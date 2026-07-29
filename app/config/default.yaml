@@ -1,6 +1,10 @@
 # pytti-able defaults — overrides on top of the pytti-core schema
 # (all settings/types/defaults: pytti-core src/pytti/config/structured_config.py).
 # This file is also the source of the UI's initial field values.
+#
+# These defaults are tuned for Apple Silicon (MPS): 256px, one CLIP model,
+# 2D animation, ~30 frames. Scale width/cutouts/models/steps up from here —
+# every extra CLIP model and cutout costs render time roughly linearly.
 
 defaults:
   - config_schema
@@ -26,17 +30,17 @@ scene_suffix: '| signature:-1.0:-.95 | signatures:-1.0:-.95 | text:-1.0:-.95'
 
 image_model: Limited Palette
 vqgan_model: coco
-animation_mode: '3D'
+animation_mode: '2D'   # 3D needs the depth model — parked on Mac for now
 
-width: 512
-height: 512
+width: 256
+height: 256
 
-steps_per_scene: 10000
-steps_per_frame: 80
-interpolation_steps: 250
+steps_per_scene: 300
+steps_per_frame: 10    # -> 30 frames per scene
+interpolation_steps: 50
 
 seed: null  # null = fresh random seed each run
-cutouts: 50
+cutouts: 24
 cut_pow: 2.1
 
 border_mode: wrap
@@ -49,15 +53,16 @@ field_of_view: 60
 near_plane: 2000
 far_plane: 12500
 
-translate_x: '22'
-translate_y: '0'
-translate_z_3d: '27'
-rotate_3d: '[cos(radians(1)),-sin(radians(0.3)),0,sin(radians(0.1))]'
+# gentle 2D drift; expressions with t are supported, e.g. '10*sin(t/4)'
+translate_x: '3'
+zoom_x_2d: '1'
+zoom_y_2d: '1'
 
 infill_mode: wrap
 
 ##################################
 
+pixel_size: 1
 smoothing_weight: 1
 
 #######################
@@ -72,15 +77,18 @@ palette_normalization_weight: 0.75
 
 ##################################
 
-frames_per_second: 15
+frames_per_second: 12
 direct_stabilization_weight: '1'
 
 ############
 ### CLIP ###
 ############
 
-ViTB16: true
-RN50x4: true
+# ViT-B/32 only: each additional model roughly doubles step time on MPS.
+# All models (including the RN* ResNets) work — tick more for quality.
+ViTB32: true
+ViTB16: false
+RN50x4: false
 
 ###############
 ### Outputs ###
@@ -94,5 +102,5 @@ backups: 3
 ### Performance tuning ###
 ##########################
 
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 1
 device: null  # null = auto (cuda > mps > cpu); or e.g. cuda:1, mps, cpu
