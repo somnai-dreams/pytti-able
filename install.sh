@@ -32,7 +32,7 @@ echo "Creating .venv (python 3.10)..."
 uv venv --python 3.10 .venv
 
 echo "Installing pytti-core + UI dependencies..."
-uv pip install --python .venv/bin/python ${=core_source} "gradio==4.44.1" "huggingface_hub==0.25.2" "fastapi==0.112.2" "starlette<0.39" pyyaml
+uv pip install --python .venv/bin/python ${=core_source} pyyaml
 
 echo
 echo "Done. Start the UI with:  ./launch.sh"

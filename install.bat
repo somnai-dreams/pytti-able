@@ -45,20 +45,20 @@ if errorlevel 1 (
 )
 
 :: ---------------------------------------------------------------------------
-call :step 1 6 "Downloading Python 3.10.11"
+call :step 1 5 "Downloading Python 3.10.11"
 powershell -Command "Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip' -OutFile 'python-embed.zip'"
 if errorlevel 1 goto :error
 call :ok
 
 :: ---------------------------------------------------------------------------
-call :step 2 6 "Extracting Python"
+call :step 2 5 "Extracting Python"
 powershell -Command "Expand-Archive -Path 'python-embed.zip' -DestinationPath 'python' -Force"
 if errorlevel 1 goto :error
 del python-embed.zip
 call :ok
 
 :: ---------------------------------------------------------------------------
-call :step 3 6 "Configuring Python"
+call :step 3 5 "Configuring Python"
 (
   echo python310.zip
   echo .
@@ -70,7 +70,7 @@ if errorlevel 1 goto :error
 call :ok
 
 :: ---------------------------------------------------------------------------
-call :step 4 6 "Installing pip"
+call :step 4 5 "Installing pip"
 powershell -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile 'get-pip.py'"
 if errorlevel 1 goto :error
 python\python.exe get-pip.py
@@ -79,7 +79,7 @@ del get-pip.py
 call :ok
 
 :: ---------------------------------------------------------------------------
-call :step 5 6 "Installing packages"
+call :step 5 5 "Installing packages"
 echo.
 echo %DIM%       This will take 20-60 minutes.%R%
 echo %DIM%       PyTorch alone is ~4GB - please be patient.%R%
@@ -94,15 +94,9 @@ python\python.exe -m pip install --no-warn-script-location "pyttitools-core[anim
 if errorlevel 1 goto :error
 
 echo %DIM%       [+] UI dependencies%R%
-python\python.exe -m pip install --no-warn-script-location gradio==4.44.1 huggingface_hub==0.25.2 fastapi==0.112.2 "starlette<0.39" pyyaml
+python\python.exe -m pip install --no-warn-script-location pyyaml
 if errorlevel 1 goto :error
 
-call :ok
-
-:: ---------------------------------------------------------------------------
-call :step 6 6 "Applying patches"
-python\python.exe app\patch_gradio.py
-if errorlevel 1 goto :error
 call :ok
 
 :: ---------------------------------------------------------------------------

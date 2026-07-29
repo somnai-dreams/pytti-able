@@ -157,8 +157,9 @@ class EventHub:
 
     def unsubscribe(self, q):
         with self._lock:
-            if q in self._clients:
-                self._clients.remove(q)
+            # identity, not equality: deques compare by contents and every
+            # drained client queue is an (equal) empty deque
+            self._clients = [c for c in self._clients if c is not q]
 
 
 HUB = EventHub()
@@ -213,6 +214,61 @@ def build_schema() -> dict:
 
 def schema_defaults() -> dict:
     return {name: meta["default"] for name, meta in build_schema()["fields"].items()}
+
+
+def coerce_values(values: dict) -> dict:
+    """
+    Parse-and-validate a draft against the schema's python types at the
+    boundary, so strings never reach spawn/pump arithmetic. Raises ValueError
+    naming the field.
+    """
+    import attrs
+
+    from pytti.config.structured_config import ConfigSchema
+
+    def type_name(tp):
+        # attrs stores real type objects for plain annotations and
+        # types.UnionType strings for X | None
+        return tp.__name__ if isinstance(tp, type) else str(tp)
+
+    types = {f.name: type_name(f.type) for f in attrs.fields(ConfigSchema)}
+    out = {}
+    for name, value in values.items():
+        ftype = types.get(name)
+        if ftype is None:
+            raise ValueError(f"unknown config field {name!r}")
+        optional = "None" in ftype
+        base = ftype.replace(" | None", "").replace("Optional[", "").rstrip("]")
+        try:
+            if value is None or value == "":
+                out[name] = None if optional else value
+                if not optional and base in ("int", "float"):
+                    raise ValueError("empty")
+            elif base == "int":
+                if isinstance(value, bool):
+                    raise ValueError("bool is not an int")
+                f = float(value)
+                if f != int(f):
+                    raise ValueError("not an integer")
+                out[name] = int(f)
+            elif base == "float":
+                out[name] = float(value)
+            elif base == "bool":
+                if isinstance(value, bool):
+                    out[name] = value
+                elif str(value).lower() in ("true", "1"):
+                    out[name] = True
+                elif str(value).lower() in ("false", "0"):
+                    out[name] = False
+                else:
+                    raise ValueError("not a bool")
+            elif base == "str":
+                out[name] = str(value)
+            else:  # lists (audio filters) pass through; preflight checks them
+                out[name] = value
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{name}: {value!r} is not a valid {base} ({e})") from e
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -322,6 +378,11 @@ def preflight(values: dict) -> dict:
     if values.get("animation_mode") == "Video Source" and not str(values.get("video_path", "")).strip():
         issue("video_path", "error", "Video Source mode needs a video_path.")
 
+    if int(values.get("interpolation_steps", 0) or 0) > int(values.get("steps_per_scene", 0) or 0):
+        issue("interpolation_steps", "error",
+              "interpolation_steps cannot exceed steps_per_scene — the crossfade "
+              "would be longer than the scene itself.")
+
     n_scenes = scene_count(scenes)
     steps_per_scene = int(values.get("steps_per_scene", 100) or 0)
     steps_per_frame = int(values.get("steps_per_frame", 50) or 1)
@@ -428,13 +489,19 @@ class SessionStore:
         arts = []
         for p in run_dir.iterdir():
             if p.suffix in (".mp4", ".mov"):
-                arts.append({"name": p.name, "bytes": p.stat().st_size})
+                m = re.search(r"_(\d+)fps", p.name)
+                arts.append({
+                    "name": p.name,
+                    "bytes": p.stat().st_size,
+                    "fps": int(m.group(1)) if m else None,
+                    "format": "mp4" if p.suffix == ".mp4" else "prores",
+                })
         return sorted(arts, key=lambda a: a["name"])
 
-    def mint_id(self, scenes: str) -> str:
+    def mint_id(self, scenes: str, taken=()) -> str:
         with self._lock:
             numbers = [0]
-            for sid in self.sessions:
+            for sid in list(self.sessions) + list(taken):
                 m = re.match(r"s-(\d+)-", sid)
                 if m:
                     numbers.append(int(m.group(1)))
@@ -473,7 +540,7 @@ class SessionStore:
             return s
 
     def summary(self, s: dict) -> dict:
-        return {
+        out = {
             k: s.get(k)
             for k in (
                 "id", "slug", "state", "seed", "startedAt", "endedAt", "frames",
@@ -481,6 +548,11 @@ class SessionStore:
                 "deltaSummary", "artifacts", "imported", "exitCode", "failExcerpt",
             )
         }
+        # SessionSummary.state is the spec enum; launch/load/stop substates
+        # travel only on SSE state events
+        if out["state"] in ("launching", "loading_models", "stopping"):
+            out["state"] = "rendering"
+        return out
 
     def summaries(self) -> list[dict]:
         with self._lock:
@@ -542,7 +614,8 @@ class RenderManager:
         with self._lock:
             if self.proc is not None:
                 raise RuntimeError("busy")
-            sid = session_id or STORE.mint_id(values.get("scenes", ""))
+            taken = [self.queued["id"]] if self.queued else []
+            sid = session_id or STORE.mint_id(values.get("scenes", ""), taken=taken)
             values = dict(values)
             if not seed_locked or values.get("seed") in (None, ""):
                 values["seed"] = random.randint(0, 2**32 - 1)
@@ -550,6 +623,9 @@ class RenderManager:
             values["scene_prefix"] = clean_prompt_field(values.get("scene_prefix", ""), trailing_pipe=True)
             values["scene_suffix"] = clean_prompt_field(values.get("scene_suffix", ""), leading_pipe=True)
 
+            # NB: session YAML must be serialized with yaml.dump, never string
+            # templates — YAML 1.1 parses an unquoted `off` as boolean False
+            # (animation_mode!); yaml.dump quotes it correctly.
             snapshot = {k: v for k, v in values.items() if k not in MANAGED_FIELDS}
             SESSIONS_CONF_DIR.mkdir(parents=True, exist_ok=True)
             conf_path = SESSIONS_CONF_DIR / f"{sid}.yaml"
@@ -571,6 +647,7 @@ class RenderManager:
             proc = subprocess.Popen(
                 cmd, cwd=str(APP_DIR), env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                start_new_session=True,  # own process group: kill takes grandchildren (ffmpeg) too
             )
             (run_dir / "pid").write_text(str(proc.pid))
 
@@ -612,9 +689,6 @@ class RenderManager:
         s = STORE.sessions.get(session_id)
         if s is None or s.get("imported"):
             raise KeyError(session_id)
-        with self._lock:
-            if self.proc is not None:
-                raise RuntimeError("busy")
         values = dict(s["config"])
         values["restore"] = True
         # reuse the existing snapshot + dir; append restore as an override
@@ -627,9 +701,14 @@ class RenderManager:
             "restore=true",
         ]
         with self._lock:
+            # busy-check and spawn under the same lock (double-clicked RESUME
+            # on a threading server must not spawn twice)
+            if self.proc is not None:
+                raise RuntimeError("busy")
             proc = subprocess.Popen(
                 cmd, cwd=str(APP_DIR), env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                start_new_session=True,  # own process group: kill takes grandchildren (ffmpeg) too
             )
             (OUTPUTS_DIR / session_id / "pid").write_text(str(proc.pid))
             self.proc = proc
@@ -660,17 +739,31 @@ class RenderManager:
             proc = self.proc
         STORE.update(session_id, state="stopping")
         HUB.publish("state", {"sessionId": session_id, "state": "stopping"})
-        proc.terminate()
+        import signal
+
+        def signal_group(sig):
+            try:
+                os.killpg(proc.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        signal_group(signal.SIGTERM)
 
         def enforcer():
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                signal_group(signal.SIGKILL)
 
         threading.Thread(target=enforcer, daemon=True).start()
 
     def enqueue(self, values: dict, fork_of: str | None, seed_locked: bool) -> dict:
+        with self._lock:
+            idle = self.proc is None
+        if idle:
+            # queue-when-idle would park a session forever; just run it
+            sid, seed = self.start(values, fork_of, seed_locked)
+            return {"sessionId": sid, "seed": seed, "startedImmediately": True}
         sid = STORE.mint_id(values.get("scenes", ""))
         with self._lock:
             replaced = self.queued is not None
@@ -681,6 +774,27 @@ class RenderManager:
         HUB.publish("queue", {"queued": {"id": sid, "slug": self.queued["slug"]}})
         return {"queued": sid, "replaced": replaced}
 
+    def preempt(self, values: dict, fork_of: str | None, seed_locked: bool) -> dict:
+        """Park the draft in the queue slot and stop the live render; the
+        finalize path spawns the parked session. Atomic against finalize."""
+        with self._lock:
+            live = self.live_id
+            if live is None:
+                idle = True
+            else:
+                idle = False
+                sid = STORE.mint_id(values.get("scenes", ""))
+                self.queued = {
+                    "id": sid, "slug": slugify(values.get("scenes", "")),
+                    "values": dict(values), "forkOf": fork_of, "seedLocked": seed_locked,
+                }
+        if idle:
+            sid, seed = self.start(values, fork_of, seed_locked)
+            return {"sessionId": sid, "seed": seed}
+        HUB.publish("queue", {"queued": {"id": self.queued["id"], "slug": self.queued["slug"]}})
+        self.stop(live)
+        return {"preempting": live, "queued": sid}
+
     def clear_queue(self):
         with self._lock:
             self.queued = None
@@ -689,6 +803,20 @@ class RenderManager:
     # ── subprocess plumbing ────────────────────────────────────────────────
 
     def _pump_stdout(self, proc: subprocess.Popen, sid: str):
+        self._fail_tail = deque(maxlen=25)
+        try:
+            self._pump_stdout_inner(proc, sid)
+        finally:
+            # finalize must run no matter what killed the pump — a stuck
+            # manager wedges every future run
+            try:
+                proc.wait(timeout=600)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            self._finalize(sid, proc.returncode, list(self._fail_tail))
+
+    def _pump_stdout_inner(self, proc: subprocess.Popen, sid: str):
         values = self.live_values or {}
         pre_steps = int(values.get("pre_animation_steps", 0) or 0)
         steps_per_scene = int(values.get("steps_per_scene", 100) or 1)
@@ -698,10 +826,11 @@ class RenderManager:
         n_scenes = scene_count(values.get("scenes", ""))
         scene_prompts_seen = 0
         last_progress_pub = 0.0
-        fail_tail: deque = deque(maxlen=25)
+        fail_tail = self._fail_tail
         rendering_announced = False
 
         for line in iter(proc.stdout.readline, ""):
+          try:
             text = ANSI_ESCAPE.sub("", line.split("\r")[-1].rstrip())
             if not text.strip():
                 continue
@@ -709,6 +838,10 @@ class RenderManager:
             is_noise = bool(LOG_NOISE.search(text))
 
             m = TQDM_RE.search(text)
+            if m and scene_prompts_seen == 0:
+                # model-download progress bars also match TQDM_RE; real
+                # training bars only appear after the first "Running prompt:"
+                m = None
             if m:
                 if not rendering_announced:
                     rendering_announced = True
@@ -771,9 +904,11 @@ class RenderManager:
                 STORE.update(sid, state="loading_models")
                 HUB.publish("state", {"sessionId": sid, "state": "loading_models", "seed": STORE.sessions[sid].get("seed")})
             HUB.publish("log", {"sessionId": sid, "line": text, "kind": kind})
-
-        proc.wait()
-        self._finalize(sid, proc.returncode, list(fail_tail))
+          except Exception:
+            # one bad line must never stop the pump: stdout has to keep
+            # draining or the render blocks on a full pipe
+            import traceback
+            traceback.print_exc()
 
     def _finalize(self, sid: str, exit_code: int, fail_tail: list):
         with self._lock:
@@ -1098,8 +1233,13 @@ class Handler(BaseHTTPRequestHandler):
         range_header = self.headers.get("Range")
         if range_header:
             m = re.match(r"bytes=(\d*)-(\d*)", range_header)
-            start = int(m.group(1)) if m and m.group(1) else 0
-            end = int(m.group(2)) if m and m.group(2) else size - 1
+            if m and not m.group(1) and m.group(2):
+                # suffix form: last N bytes
+                start = max(0, size - int(m.group(2)))
+                end = size - 1
+            else:
+                start = int(m.group(1)) if m and m.group(1) else 0
+                end = int(m.group(2)) if m and m.group(2) else size - 1
             end = min(end, size - 1)
             if start > end or start >= size:
                 self.send_response(416)
@@ -1277,6 +1417,11 @@ class Handler(BaseHTTPRequestHandler):
                 if "values" not in body:
                     self._json(400, {"error": "missing values"})
                     return
+                try:
+                    body["values"] = coerce_values(body["values"])
+                except ValueError as e:
+                    self._json(400, {"error": str(e)})
+                    return
                 write_draft(body)
                 self._no_content()
             else:
@@ -1345,17 +1490,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "preflight failed", "issues": check["issues"]})
             return
         if mode == "queue":
-            self._json(202, MANAGER.enqueue(values, fork_of, seed_locked))
+            result = MANAGER.enqueue(values, fork_of, seed_locked)
+            self._json(201 if result.get("startedImmediately") else 202, result)
             return
         if mode == "preempt":
-            with MANAGER._lock:
-                live = MANAGER.live_id
-            if live is not None:
-                # park in the queue slot, then stop; _finalize spawns it
-                MANAGER.enqueue(values, fork_of, seed_locked)
-                MANAGER.stop(live)
-                self._json(202, {"preempting": live})
-                return
+            result = MANAGER.preempt(values, fork_of, seed_locked)
+            self._json(201 if "sessionId" in result else 202, result)
+            return
         try:
             sid, seed = MANAGER.start(values, fork_of, seed_locked)
             self._json(201, {"sessionId": sid, "seed": seed})

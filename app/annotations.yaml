@@ -95,6 +95,8 @@ direct_init_weight:
     (pixel-level MSE loss). Higher = stays closer to the original pixels.
     Warning: filenames with underscores can trip the weight_mask parser —
     prefer `semantic_init_weight` for complex filenames.
+  relevantWhen:
+    nonEmpty: init_image
 
 semantic_init_weight:
   label: SEMANTIC INIT WEIGHT
@@ -108,6 +110,8 @@ semantic_init_weight:
     weight. The render will feel like the init image without being
     pixel-locked to it. Safer than `direct_init_weight` with complex
     filenames. Mask paths go in `[ ]` brackets.
+  relevantWhen:
+    nonEmpty: init_image
 
 image_model:
   label: IMAGE MODEL
@@ -378,6 +382,8 @@ input_audio_offset:
   prose: >-
     Offset in seconds into the audio file. Use it to sync audio features
     with a specific point in the animation.
+  relevantWhen:
+    nonEmpty: input_audio
 
 input_audio_filters:
   label: INPUT AUDIO FILTERS
@@ -392,6 +398,8 @@ input_audio_filters:
     `variable_name`, `f_center` (center frequency), `f_width` (bandwidth),
     and `order` (filter steepness). Each defined variable becomes available
     in motion expressions, so e.g. a `bass` band can drive zoom.
+  relevantWhen:
+    nonEmpty: input_audio
 
 translate_x:
   label: TRANSLATE X
@@ -1052,6 +1060,8 @@ breath_mode:
     the CLIP-optimized output over the course of the render: frame 1 is
     nearly 100% the init image, the final frame is 100% optimized. Requires
     `init_image` to be set. Works with all animation modes.
+  relevantWhen:
+    nonEmpty: init_image
 
 backups:
   label: BACKUPS
