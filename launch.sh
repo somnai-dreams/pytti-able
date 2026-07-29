@@ -1,10 +1,9 @@
 #!/bin/zsh
-# Launch the pytti-able UI (macOS). Run ./install.sh once first.
+# Launch PYTTI STUDIO (macOS). Run ./install.sh once first.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# keep loopback traffic off any system/env proxy (gradio's own localhost
-# self-check goes through proxy-honoring clients)
+# keep loopback traffic off any system/env proxy
 export no_proxy="127.0.0.1,localhost,::1${no_proxy:+,$no_proxy}"
 export NO_PROXY="$no_proxy"
 
@@ -13,4 +12,6 @@ if [[ ! -x ".venv/bin/python" ]]; then
   exit 1
 fi
 
-exec .venv/bin/python app/ui.py
+PORT="${PYTTI_STUDIO_PORT:-7860}"
+( sleep 2 && open "http://127.0.0.1:$PORT" ) &
+exec .venv/bin/python app/server.py

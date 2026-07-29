@@ -1,0 +1,1131 @@
+# UI metadata for every ConfigSchema field (structured_config.py).
+# Merged with attrs-introspected defaults by /api/schema — defaults and
+# choice lists live in the schema, never here.
+#
+# Per field:
+#   label        display name (caps)
+#   type         STR | PATH | WEIGHT | EXPR | NUM | BOOL | CHOICE | LIST
+#   section      bench section (prompt/canvas/startFrom/motion/coherence/
+#                time/engine/audio) or null = engine-room only
+#   group        engine-room group (every field has one)
+#   hint         one-line tooltip
+#   prose        full help paragraph
+#   relevantWhen relevance predicate {field, in: [...]} — omit if always on
+#   costNote     real speed/VRAM cost, omitted otherwise
+#   parked       true only on 3D-mode fields (unverified on Mac)
+
+scenes:
+  label: SCENES
+  type: STR
+  section: prompt
+  group: seeding
+  hint: >-
+    Text prompts separated by | — each becomes a scene. The render optimizes
+    toward these descriptions.
+  prose: >-
+    Text prompts that describe what the image should look like. Separate
+    prompts within a scene with `|` and weight them with `:weight` (e.g.
+    `forest:2` for double weight). Use `||` to separate scenes — the render
+    transitions between them over `interpolation_steps` via linear
+    interpolation in CLIP semantic space. Negative weights push the image
+    away from a concept (e.g. `blurry:-1`). A `:stop` value freezes a prompt
+    once a threshold is reached.
+
+scene_prefix:
+  label: SCENE PREFIX
+  type: STR
+  section: prompt
+  group: seeding
+  hint: >-
+    Prepended to every scene prompt. Useful for style keywords shared across
+    all scenes.
+  prose: >-
+    Text prepended to every scene prompt. Useful for global style keywords
+    like `oil painting |` or `highly detailed |` that you want applied
+    everywhere without repeating them in each scene.
+
+scene_suffix:
+  label: SCENE SUFFIX
+  type: STR
+  section: prompt
+  group: seeding
+  hint: >-
+    Appended to every scene prompt. Useful for negative or quality terms
+    applied globally.
+  prose: >-
+    Text appended to every scene prompt. Commonly used for negative prompts
+    like `| text:-1 | watermark:-1` to suppress unwanted elements globally
+    across all scenes.
+
+direct_image_prompts:
+  label: DIRECT IMAGE PROMPTS
+  type: PATH
+  section: null
+  group: seeding
+  hint: >-
+    Path or URL to an image used as a pixel-level visual prompt.
+  prose: >-
+    Path or URL to an image used as a direct (pixel-level) visual prompt.
+    CLIP compares the render against this image literally — useful for style
+    transfer. Supports `weight_mask` syntax, e.g. `image.png:1.5_mask.png`.
+    Video masks must be MP4.
+
+init_image:
+  label: INIT IMAGE
+  type: PATH
+  section: startFrom
+  group: seeding
+  hint: >-
+    Starting image for the render. Blank = start from noise.
+  prose: >-
+    Path to a starting image. The render begins from this instead of random
+    noise, creating an initial focal point and layout. Leave blank for a
+    random start. Tip: pair with `semantic_init_weight` to keep the output
+    resembling the init image throughout the render.
+
+direct_init_weight:
+  label: DIRECT INIT WEIGHT
+  type: WEIGHT
+  section: startFrom
+  group: seeding
+  hint: >-
+    How strongly the init image guides pixel appearance. 0 = off.
+  prose: >-
+    Treats the init image as a direct image prompt with this weight
+    (pixel-level MSE loss). Higher = stays closer to the original pixels.
+    Warning: filenames with underscores can trip the weight_mask parser —
+    prefer `semantic_init_weight` for complex filenames.
+
+semantic_init_weight:
+  label: SEMANTIC INIT WEIGHT
+  type: WEIGHT
+  section: startFrom
+  group: seeding
+  hint: >-
+    How strongly the init image guides semantic (CLIP) content. 0 = off.
+  prose: >-
+    Treats the init image as a semantic (CLIP-level) prompt with this
+    weight. The render will feel like the init image without being
+    pixel-locked to it. Safer than `direct_init_weight` with complex
+    filenames. Mask paths go in `[ ]` brackets.
+
+image_model:
+  label: IMAGE MODEL
+  type: CHOICE
+  section: canvas
+  group: medium
+  hint: >-
+    Limited Palette: fast, painterly. Unlimited Palette: photographic.
+    VQGAN: classic neural style.
+  prose: >-
+    Limited Palette: fast, painterly look using discrete color swatches —
+    total colors = `palette_size × palettes`. Unlimited Palette: per-pixel
+    color, more photographic. VQGAN: classic neural art using a pretrained
+    codebook (keep `pixel_size` at 1 with VQGAN to avoid VRAM issues).
+  costNote: >-
+    Models differ meaningfully in s/step — Limited Palette is lightest,
+    VQGAN heaviest.
+
+vqgan_model:
+  label: VQGAN MODEL
+  type: CHOICE
+  section: canvas
+  group: medium
+  hint: >-
+    Which VQGAN codebook to use. Only affects VQGAN mode.
+  prose: >-
+    Which VQGAN codebook to use when `image_model` is VQGAN. Each codebook
+    (sflickr, imagenet, coco, wikiart, openimages, faceshq) has a different
+    visual style bias. Weights download on first use.
+  relevantWhen:
+    field: image_model
+    in: ["VQGAN"]
+
+animation_mode:
+  label: ANIMATION MODE
+  type: CHOICE
+  section: motion
+  group: camera
+  hint: >-
+    off: single image. 2D/3D: camera moves each frame. Video Source: warp to
+    a reference video.
+  prose: >-
+    off: single image, no animation. 2D: pan/zoom/rotate the canvas each
+    frame. 3D: full 3D camera with MiDaS depth estimation — currently PARKED
+    (unverified on Mac), selectable but unsupported. Video Source: warp
+    frames of a source video using optical flow.
+
+width:
+  label: WIDTH
+  type: NUM
+  section: canvas
+  group: medium
+  hint: >-
+    Output image width in pixels. -1 = derive from init image aspect.
+  prose: >-
+    Output width in pixels. Larger = more detail but slower and more VRAM.
+    Set to -1 to auto-derive from the init image aspect ratio.
+  costNote: >-
+    Render time and VRAM scale roughly with pixel count — 512×512 costs
+    about 4× as much as 256×256.
+
+height:
+  label: HEIGHT
+  type: NUM
+  section: canvas
+  group: medium
+  hint: >-
+    Output image height in pixels. -1 = derive from init image aspect.
+  prose: >-
+    Output height in pixels. Larger = more detail but slower and more VRAM.
+    Set to -1 to auto-derive from the init image aspect ratio.
+  costNote: >-
+    Render time and VRAM scale roughly with pixel count — 512×512 costs
+    about 4× as much as 256×256.
+
+steps_per_scene:
+  label: STEPS PER SCENE
+  type: NUM
+  section: time
+  group: time
+  hint: >-
+    Total optimization steps per scene. More = longer render, more developed
+    image.
+  prose: >-
+    Total optimization steps per scene. Frames generated per scene =
+    `steps_per_scene ÷ steps_per_frame`. Must be at least
+    `interpolation_steps`. More steps mean a more refined image and more
+    frames.
+
+steps_per_frame:
+  label: STEPS PER FRAME
+  type: NUM
+  section: time
+  group: time
+  hint: >-
+    Optimization steps before advancing to the next animation frame.
+  prose: >-
+    Optimization steps between each animation frame. Lower = more frames
+    (smoother video) but less refinement per frame.
+
+interpolation_steps:
+  label: INTERPOLATION STEPS
+  type: NUM
+  section: prompt
+  group: time
+  hint: >-
+    Steps used to crossfade between scenes. 0 = hard cut.
+  prose: >-
+    Steps for a smooth crossfade between scenes (separated with `||`), using
+    linear interpolation in CLIP semantic space. Set to 0 to cut between
+    scenes instantly. Only meaningful when the scenes text contains `||`.
+
+learning_rate:
+  label: LEARNING RATE
+  type: NUM
+  section: null
+  group: optimizer
+  hint: >-
+    Optimizer step size. Leave blank for auto. Lower = more stable but
+    slower.
+  prose: >-
+    Optimizer step size. Leave blank for per-model auto-tuning. Lower values
+    (0.05–0.1) are more stable but converge slowly; higher (0.2–0.5) are
+    faster but can overshoot and flicker.
+
+reset_lr_each_frame:
+  label: RESET LR EACH FRAME
+  type: BOOL
+  section: null
+  group: optimizer
+  hint: >-
+    Reset the optimizer at each animation frame boundary.
+  prose: >-
+    Reset the optimizer at each animation frame boundary, clearing Adam
+    momentum buffers so each frame optimizes fresh. Disable to carry
+    optimizer state across frames — can reduce color shifts but may cause
+    instability.
+
+seed:
+  label: SEED
+  type: NUM
+  section: prompt
+  group: seeding
+  hint: >-
+    Random seed for reproducibility. Blank = fresh random seed each run.
+  prose: >-
+    Pseudorandom seed for reproducibility — same seed + same config gives
+    similar output. Leave blank for a fresh random seed each run; the server
+    bakes the rolled seed into the session config so every run is
+    reproducible after the fact.
+
+cutouts:
+  label: CUTOUTS
+  type: NUM
+  section: null
+  group: seeing
+  hint: >-
+    Random crops per CLIP evaluation. More = richer gradients, slower.
+  prose: >-
+    Number of random crops (glimpses) CLIP scores per step. More cutouts
+    give richer gradients and better quality; 40–60 is typical.
+  costNote: >-
+    Cost scales roughly linearly — each cutout adds CLIP evaluation work and
+    VRAM per step.
+
+cut_pow:
+  label: CUT POW
+  type: NUM
+  section: null
+  group: seeing
+  hint: >-
+    Cutout size distribution. Higher = more small crops (fine detail).
+  prose: >-
+    Controls the cutout size distribution. Higher values (2–3) bias toward
+    small crops that emphasize fine detail but can be unstable; lower values
+    bias toward large crops that emphasize global composition.
+
+cutout_border:
+  label: CUTOUT BORDER
+  type: NUM
+  section: null
+  group: seeing
+  hint: >-
+    Fraction of each cutout devoted to border padding.
+  prose: >-
+    Fraction of each cutout devoted to border padding. Higher = more context
+    around each crop, which can improve coherence but reduces the effective
+    crop area. 0 = no padding.
+
+border_mode:
+  label: BORDER MODE
+  type: CHOICE
+  section: null
+  group: camera
+  hint: >-
+    How cutouts treat pixels beyond the image edge.
+  prose: >-
+    How cutouts handle pixels beyond the image edge: wrap = tile, mirror =
+    reflect, clamp = stretch the edge, black = fill with black, smear =
+    extend edge colors.
+
+field_of_view:
+  label: FIELD OF VIEW
+  type: NUM
+  section: motion
+  group: camera
+  hint: >-
+    Camera FOV in degrees (3D mode). Lower = telephoto, higher = wide-angle.
+  prose: >-
+    Vertical field of view in degrees for the 3D camera. Lower values
+    (30–40) give a telephoto look; higher (80–100) give wide-angle
+    distortion.
+  relevantWhen:
+    field: animation_mode
+    in: ["3D"]
+  parked: true
+
+near_plane:
+  label: NEAR PLANE
+  type: NUM
+  section: null
+  group: camera
+  hint: >-
+    Near clipping plane distance (3D mode).
+  prose: >-
+    Near clipping plane distance in pixels for the 3D camera. Objects closer
+    than this are clipped from the depth buffer.
+  relevantWhen:
+    field: animation_mode
+    in: ["3D"]
+  parked: true
+
+far_plane:
+  label: FAR PLANE
+  type: NUM
+  section: null
+  group: camera
+  hint: >-
+    Far clipping plane distance (3D mode).
+  prose: >-
+    Far clipping plane distance in pixels for the 3D camera. Objects beyond
+    this are clipped from the depth buffer.
+  relevantWhen:
+    field: animation_mode
+    in: ["3D"]
+  parked: true
+
+input_audio:
+  label: INPUT AUDIO
+  type: PATH
+  section: audio
+  group: audio
+  hint: >-
+    Path to an audio file for audioreactive animation.
+  prose: >-
+    Path to a WAV/MP3 file for audioreactive animation. Audio features are
+    extracted through the bandpass filters defined in
+    `input_audio_filters`, and the resulting variables can modulate motion
+    expressions.
+
+input_audio_offset:
+  label: INPUT AUDIO OFFSET
+  type: NUM
+  section: audio
+  group: audio
+  hint: >-
+    Offset in seconds into the audio file.
+  prose: >-
+    Offset in seconds into the audio file. Use it to sync audio features
+    with a specific point in the animation.
+
+input_audio_filters:
+  label: INPUT AUDIO FILTERS
+  type: LIST
+  section: audio
+  group: audio
+  hint: >-
+    Bandpass filter bank — each row defines a variable usable in motion
+    expressions.
+  prose: >-
+    List of bandpass filters applied to the input audio. Each entry defines
+    `variable_name`, `f_center` (center frequency), `f_width` (bandwidth),
+    and `order` (filter steepness). Each defined variable becomes available
+    in motion expressions, so e.g. a `bass` band can drive zoom.
+
+translate_x:
+  label: TRANSLATE X
+  type: EXPR
+  section: motion
+  group: camera
+  hint: >-
+    Horizontal camera movement per frame. Accepts expressions in t (seconds
+    of animation time).
+  prose: >-
+    Horizontal camera shift per frame, in pixels. Accepts Python expressions
+    using `t`, where t = seconds of animation time (frames elapsed ÷
+    frames_per_second) — e.g. `10*sin(t/30)`. Audio filter variables can
+    also be used.
+  relevantWhen:
+    field: animation_mode
+    in: ["2D", "3D"]
+
+translate_y:
+  label: TRANSLATE Y
+  type: EXPR
+  section: motion
+  group: camera
+  hint: >-
+    Vertical camera movement per frame. Accepts expressions in t (seconds of
+    animation time).
+  prose: >-
+    Vertical camera shift per frame, in pixels. Accepts Python expressions
+    using `t`, where t = seconds of animation time (frames elapsed ÷
+    frames_per_second). Audio filter variables can also be used.
+  relevantWhen:
+    field: animation_mode
+    in: ["2D", "3D"]
+
+translate_z_3d:
+  label: TRANSLATE Z
+  type: EXPR
+  section: motion
+  group: camera
+  hint: >-
+    Forward/back camera movement per frame (3D mode). Expressions in t
+    supported.
+  prose: >-
+    Forward/backward camera movement per frame in 3D mode. Positive = move
+    forward into the scene. Accepts expressions in `t`, where t = seconds of
+    animation time (frames elapsed ÷ frames_per_second).
+  relevantWhen:
+    field: animation_mode
+    in: ["3D"]
+  parked: true
+
+rotate_3d:
+  label: ROTATE 3D
+  type: EXPR
+  section: motion
+  group: camera
+  hint: >-
+    Quaternion [w, x, y, z] rotation per frame (3D mode). Expressions in t
+    supported.
+  prose: >-
+    Quaternion rotation per frame in 3D mode, as `[w, x, y, z]`. Use
+    `cos(radians(N))` and `sin(radians(N))` for smooth rotations. Accepts
+    expressions in `t`, where t = seconds of animation time (frames elapsed
+    ÷ frames_per_second).
+  relevantWhen:
+    field: animation_mode
+    in: ["3D"]
+  parked: true
+
+rotate_2d:
+  label: ROTATE 2D
+  type: EXPR
+  section: motion
+  group: camera
+  hint: >-
+    Rotation in degrees per frame (2D mode). Expressions in t supported.
+  prose: >-
+    Rotation in degrees per frame in 2D mode. Accepts expressions in `t`,
+    where t = seconds of animation time (frames elapsed ÷
+    frames_per_second).
+  relevantWhen:
+    field: animation_mode
+    in: ["2D"]
+
+zoom_x_2d:
+  label: ZOOM X
+  type: EXPR
+  section: motion
+  group: camera
+  hint: >-
+    Horizontal zoom per frame (2D mode). 0 = no zoom. Expressions in t
+    supported.
+  prose: >-
+    Horizontal zoom per frame in 2D mode; 0 = no zoom. Accepts expressions
+    in `t`, where t = seconds of animation time (frames elapsed ÷
+    frames_per_second).
+  relevantWhen:
+    field: animation_mode
+    in: ["2D"]
+
+zoom_y_2d:
+  label: ZOOM Y
+  type: EXPR
+  section: motion
+  group: camera
+  hint: >-
+    Vertical zoom per frame (2D mode). 0 = no zoom. Expressions in t
+    supported.
+  prose: >-
+    Vertical zoom per frame in 2D mode; 0 = no zoom. Accepts expressions in
+    `t`, where t = seconds of animation time (frames elapsed ÷
+    frames_per_second).
+  relevantWhen:
+    field: animation_mode
+    in: ["2D"]
+
+sampling_mode:
+  label: SAMPLING MODE
+  type: CHOICE
+  section: null
+  group: camera
+  hint: >-
+    Interpolation quality when warping frames. bicubic is sharpest.
+  prose: >-
+    Pixel sampling used when warping frames during animation: nearest
+    (sharp/pixelated), bilinear (smooth), bicubic (sharpest).
+  relevantWhen:
+    field: animation_mode
+    in: ["2D", "3D", "Video Source"]
+
+infill_mode:
+  label: INFILL MODE
+  type: CHOICE
+  section: null
+  group: camera
+  hint: >-
+    How to fill areas revealed by camera movement.
+  prose: >-
+    How newly revealed areas are filled after camera movement: wrap = tile,
+    mirror = reflect, black = fill with black, smear = extend edge colors.
+  relevantWhen:
+    field: animation_mode
+    in: ["2D", "3D", "Video Source"]
+
+pre_animation_steps:
+  label: PRE-ANIMATION STEPS
+  type: NUM
+  section: motion
+  group: camera
+  hint: >-
+    Steps run before animation starts, with camera locked. Lets the image
+    develop first.
+  prose: >-
+    Optimization steps run before animation begins, with the camera locked
+    (see `lock_camera`). Lets the image develop from noise before motion
+    starts.
+  relevantWhen:
+    field: animation_mode
+    in: ["2D", "3D", "Video Source"]
+
+lock_camera:
+  label: LOCK CAMERA
+  type: BOOL
+  section: motion
+  group: camera
+  hint: >-
+    Freeze camera during pre-animation steps so the image develops before
+    motion begins.
+  prose: >-
+    Prevents camera scrolling/drifting during `pre_animation_steps` and
+    stabilizes 3D rotations. The image develops fully before motion begins.
+  relevantWhen:
+    field: animation_mode
+    in: ["2D", "3D", "Video Source"]
+
+pixel_size:
+  label: PIXEL SIZE
+  type: NUM
+  section: canvas
+  group: medium
+  hint: >-
+    Size of each pixel block. 1 = full resolution; higher = chunky pixel-art
+    look.
+  prose: >-
+    Size of each pixel block in the output. 1 = full resolution. Higher
+    values (2, 4, 8) create a chunky pixel-art look. Applies to all image
+    models but is most useful with Limited Palette; keep it at 1 under VQGAN
+    to avoid VRAM issues.
+
+smoothing_weight:
+  label: SMOOTHING WEIGHT
+  type: NUM
+  section: null
+  group: medium
+  hint: >-
+    Total variation loss — higher = smoother, more painterly; lower = more
+    texture.
+  prose: >-
+    Weight of the total variation loss, which penalizes sharp
+    pixel-to-pixel differences. Higher = smoother, more painterly images;
+    lower = more detail and texture but potentially noisy. 0 disables it.
+
+random_initial_palette:
+  label: RANDOM INITIAL PALETTE
+  type: BOOL
+  section: null
+  group: medium
+  hint: >-
+    Start with random palette colors instead of grayscale.
+  prose: >-
+    Start with random colors instead of grayscale. Without this, palettes
+    start grayscale and develop color during optimization. Good for abstract
+    work.
+  relevantWhen:
+    field: image_model
+    in: ["Limited Palette"]
+
+palette_size:
+  label: PALETTE SIZE
+  type: NUM
+  section: canvas
+  group: medium
+  hint: >-
+    Colors per palette swatch (Limited Palette mode).
+  prose: >-
+    Number of colors per palette swatch. Total colors = `palette_size ×
+    palettes`. Lower (3–6) = more stylized/posterized; higher (20–50) =
+    smoother gradients.
+  relevantWhen:
+    field: image_model
+    in: ["Limited Palette"]
+
+palettes:
+  label: PALETTES
+  type: NUM
+  section: canvas
+  group: medium
+  hint: >-
+    Number of palette swatches (Limited Palette mode).
+  prose: >-
+    Number of independent palette swatches. More palettes = more color
+    variety across the image; 12–30 is typical. Total colors =
+    `palette_size × palettes`.
+  relevantWhen:
+    field: image_model
+    in: ["Limited Palette"]
+
+gamma:
+  label: GAMMA
+  type: NUM
+  section: null
+  group: medium
+  hint: >-
+    Gamma correction applied to the palette (Limited Palette mode).
+  prose: >-
+    Relative gamma value for the palette. Higher = darker with more
+    contrast; lower = brighter midtones.
+  relevantWhen:
+    field: image_model
+    in: ["Limited Palette"]
+
+hdr_weight:
+  label: HDR WEIGHT
+  type: NUM
+  section: null
+  group: medium
+  hint: >-
+    Weight for HDR-like contrast enhancement (Limited Palette mode).
+  prose: >-
+    Strength of gamma maintenance — pushes the palette toward higher dynamic
+    range. 0 = disabled, 0.3–0.5 = subtle, 1.0+ = strong contrast boost.
+  relevantWhen:
+    field: image_model
+    in: ["Limited Palette"]
+
+palette_normalization_weight:
+  label: PALETTE NORMALIZATION
+  type: NUM
+  section: null
+  group: medium
+  hint: >-
+    Keeps palette colors spread across the full value range.
+  prose: >-
+    Keeps palette colors spread across the full brightness range, preventing
+    individual palettes from being lost or going muddy and washed-out.
+  relevantWhen:
+    field: image_model
+    in: ["Limited Palette"]
+
+target_palette:
+  label: TARGET PALETTE
+  type: PATH
+  section: canvas
+  group: medium
+  hint: >-
+    Path to an image — palette colors are pulled toward its color scheme.
+  prose: >-
+    Path to an image whose colors the palette will be pulled toward. The
+    model extracts a color scheme from this image and uses it as a target.
+  relevantWhen:
+    field: image_model
+    in: ["Limited Palette"]
+
+lock_palette:
+  label: LOCK PALETTE
+  type: BOOL
+  section: null
+  group: medium
+  hint: >-
+    Freeze the palette so colors don't change during the render.
+  prose: >-
+    Freeze the palette so colors don't change during the render. Most useful
+    when resuming from a backup — starting a fresh render with a locked
+    palette tends to produce grayscale output.
+  relevantWhen:
+    field: image_model
+    in: ["Limited Palette"]
+
+frames_per_second:
+  label: FRAMES PER SECOND
+  type: NUM
+  section: time
+  group: time
+  hint: >-
+    Playback FPS for the final video — also the time-scale of t in motion
+    expressions.
+  prose: >-
+    Playback FPS when assembling the final video. Also sets the time-scale
+    of `t` in motion expressions: t = seconds of animation time (frames
+    elapsed ÷ frames_per_second). 12–15 for a dreamy feel, 24–30 for smooth
+    motion. The encode step inherits this value.
+
+direct_stabilization_weight:
+  label: DIRECT STABILIZATION
+  type: WEIGHT
+  section: coherence
+  group: coherence
+  hint: >-
+    Resist pixel-level change between frames. Higher = less flicker, more
+    ghosting.
+  prose: >-
+    Keeps the current frame as a direct (pixel-level) image prompt for the
+    next frame. Higher = less flicker but more ghosting; 1 is a good
+    default. Supports `weight_mask` syntax.
+  relevantWhen:
+    field: animation_mode
+    in: ["2D", "3D", "Video Source"]
+
+semantic_stabilization_weight:
+  label: SEMANTIC STABILIZATION
+  type: WEIGHT
+  section: null
+  group: coherence
+  hint: >-
+    Resist semantic (CLIP-level) change between frames.
+  prose: >-
+    Keeps the current frame as a semantic (CLIP-level) prompt for the next
+    frame, preventing the meaning of the image from drifting between frames.
+    Supports masks.
+  relevantWhen:
+    field: animation_mode
+    in: ["2D", "3D", "Video Source"]
+
+depth_stabilization_weight:
+  label: DEPTH STABILIZATION
+  type: WEIGHT
+  section: null
+  group: coherence
+  hint: >-
+    Resist changes to depth structure between frames (3D mode). Very slow.
+  prose: >-
+    Maintains depth model consistency between frames in 3D mode, preventing
+    depth map flickering. Supports masks.
+  relevantWhen:
+    field: animation_mode
+    in: ["3D"]
+  costNote: >-
+    Steep — runs MiDaS depth estimation on every frame. Use sparingly.
+  parked: true
+
+edge_stabilization_weight:
+  label: EDGE STABILIZATION
+  type: WEIGHT
+  section: null
+  group: coherence
+  hint: >-
+    Resist changes to edges between frames. Low cost.
+  prose: >-
+    Preserves image contours/edges between frames, reducing shimmer on hard
+    edges. Low performance cost. Supports masks.
+  relevantWhen:
+    field: animation_mode
+    in: ["2D", "3D", "Video Source"]
+
+flow_stabilization_weight:
+  label: FLOW STABILIZATION
+  type: WEIGHT
+  section: coherence
+  group: coherence
+  hint: >-
+    Optical flow alignment — warps each frame to match previous motion.
+  prose: >-
+    Optical flow stabilization — aligns each frame to the previous one by
+    warping along the estimated motion. Prevents flickering in 3D and Video
+    Source modes.
+  relevantWhen:
+    field: animation_mode
+    in: ["3D", "Video Source"]
+  costNote: >-
+    High cost in 3D (flow must be computed from render motion); slight cost
+    in Video Source.
+
+video_path:
+  label: VIDEO PATH
+  type: PATH
+  section: motion
+  group: camera
+  hint: >-
+    Source video for Video Source animation mode.
+  prose: >-
+    Path to an MP4 source video for Video Source mode. Each frame of this
+    video guides one animation frame via optical flow.
+  relevantWhen:
+    field: animation_mode
+    in: ["Video Source"]
+
+frame_stride:
+  label: FRAME STRIDE
+  type: NUM
+  section: motion
+  group: camera
+  hint: >-
+    Source video frames to advance per output frame. 1 = every frame.
+  prose: >-
+    Video frames to advance per output frame in Video Source mode. 1 = use
+    every frame, 2 = every other frame, and so on.
+  relevantWhen:
+    field: animation_mode
+    in: ["Video Source"]
+
+reencode_each_frame:
+  label: RE-ENCODE EACH FRAME
+  type: BOOL
+  section: null
+  group: coherence
+  hint: >-
+    Re-encode source video frames through the image model each frame (Video
+    Source mode).
+  prose: >-
+    Re-encode video source frames through the image model at each frame.
+    Enabled = higher quality; disabled = faster, using raw video frames
+    directly.
+  relevantWhen:
+    field: animation_mode
+    in: ["Video Source"]
+  costNote: >-
+    Adds a full image-model encode per frame when enabled.
+
+flow_long_term_samples:
+  label: FLOW LONG-TERM SAMPLES
+  type: NUM
+  section: null
+  group: coherence
+  hint: >-
+    How many past frames to sample for flow stabilization.
+  prose: >-
+    Number of past frames sampled for flow stabilization. The earliest
+    sampled frame is 2^N frames in the past, so higher values give more
+    long-range temporal coherence.
+  relevantWhen:
+    field: animation_mode
+    in: ["3D", "Video Source"]
+  costNote: >-
+    Each extra sample adds an optical-flow pass per frame.
+
+ViTB32:
+  label: VIT-B/32
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    ViT-B/32 CLIP model. Fast, good at composition — the recommended
+    baseline.
+  prose: >-
+    Enable the ViT-B/32 CLIP perceptor. Fast and good at overall
+    composition; the recommended baseline model.
+  costNote: >-
+    The lightest CLIP model, but every enabled perceptor adds s/step and
+    VRAM.
+
+ViTB16:
+  label: VIT-B/16
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    ViT-B/16 CLIP model. More detail-sensitive than B/32, slightly slower.
+  prose: >-
+    Enable the ViT-B/16 CLIP perceptor. More detail-sensitive than ViT-B/32
+    at slightly higher cost.
+  costNote: >-
+    Moderate — slightly slower and more VRAM than ViT-B/32.
+
+ViTL14:
+  label: VIT-L/14
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    ViT-L/14 CLIP model. High quality but significantly slower and heavier.
+  prose: >-
+    Enable the ViT-L/14 CLIP perceptor. High quality guidance, but
+    significantly slower and heavier on VRAM than the B-series models.
+  costNote: >-
+    Heavy — significantly slower and more VRAM than the B-series models.
+
+ViTL14_336px:
+  label: VIT-L/14 336PX
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    ViT-L/14 at 336px input. Highest-quality ViT, very heavy on VRAM.
+  prose: >-
+    Enable the ViT-L/14 CLIP perceptor at 336px input resolution. The
+    highest-quality ViT model.
+  costNote: >-
+    Very heavy — the most expensive ViT model in both speed and VRAM.
+
+RN50:
+  label: RN50
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    ResNet-50 CLIP model. Different texture/style bias than ViT models.
+  prose: >-
+    Enable the ResNet-50 CLIP perceptor. Has a different texture/style bias
+    than the ViT models, so it can add complementary detail.
+  costNote: >-
+    Moderate — comparable to the light ViT models.
+
+RN101:
+  label: RN101
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    ResNet-101 CLIP model. Like RN50 with slightly better quality.
+  prose: >-
+    Enable the ResNet-101 CLIP perceptor. Similar character to RN50 with
+    slightly better quality at slightly higher cost.
+  costNote: >-
+    Moderate — slightly heavier than RN50.
+
+RN50x4:
+  label: RN50X4
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    ResNet-50x4 CLIP model. Good quality/speed balance; complements ViT
+    models.
+  prose: >-
+    Enable the ResNet-50x4 CLIP perceptor. A good balance of quality and
+    speed that complements the ViT models well.
+  costNote: >-
+    Moderate-heavy — noticeably more s/step and VRAM than RN50.
+
+RN50x16:
+  label: RN50X16
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    ResNet-50x16 CLIP model. High quality, heavy on VRAM.
+  prose: >-
+    Enable the ResNet-50x16 CLIP perceptor. High quality but heavy on VRAM
+    and per-step time.
+  costNote: >-
+    Heavy — high VRAM and s/step cost.
+
+RN50x64:
+  label: RN50X64
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    ResNet-50x64 CLIP model. Highest-quality ResNet, extremely heavy.
+  prose: >-
+    Enable the ResNet-50x64 CLIP perceptor. The highest-quality ResNet
+    variant.
+  costNote: >-
+    Extremely heavy — only viable with plenty of GPU memory.
+
+file_namespace:
+  label: FILE NAMESPACE
+  type: STR
+  section: null
+  group: files
+  hint: >-
+    Output subfolder inside images_out/. In the studio this is the session
+    id — never typed.
+  prose: >-
+    Name of the output subfolder inside `images_out/` where all frames for a
+    run are written. The studio sets this to the session id automatically,
+    so each run gets a unique folder; it is shown read-only in the engine
+    room.
+
+allow_overwrite:
+  label: ALLOW OVERWRITE
+  type: BOOL
+  section: null
+  group: files
+  hint: >-
+    Overwrite existing frames on re-run. Pinned false in the studio.
+  prose: >-
+    If enabled, existing frames are overwritten on re-run; if disabled, new
+    frames get incremented filenames so nothing is lost. The studio pins
+    this to false — unique per-session output folders make overwriting moot.
+
+display_every:
+  label: DISPLAY EVERY
+  type: NUM
+  section: null
+  group: files
+  hint: >-
+    Update the engine's preview every N steps. The studio sets this to the
+    save cadence.
+  prose: >-
+    How often (in optimization steps) the engine refreshes its display
+    output. The studio has no separate preview — frames stream live over
+    SSE — so the server sets this equal to the effective save cadence.
+
+save_every:
+  label: SAVE EVERY
+  type: NUM
+  section: null
+  group: files
+  hint: >-
+    Save a frame every N steps. 0 = auto-match steps_per_frame
+    (recommended).
+  prose: >-
+    Save a PNG frame every N optimization steps. 0 = auto-match
+    `steps_per_frame`, which is the recommended setting and what the studio
+    sends; set a value manually in the engine room to override.
+
+breath_mode:
+  label: BREATH MODE
+  type: BOOL
+  section: startFrom
+  group: seeding
+  hint: >-
+    Crossfade saved frames from the init image to the optimized output over
+    the render. Requires an init image.
+  prose: >-
+    When enabled, saved frames linearly crossfade from the `init_image` to
+    the CLIP-optimized output over the course of the render: frame 1 is
+    nearly 100% the init image, the final frame is 100% optimized. Requires
+    `init_image` to be set. Works with all animation modes.
+
+backups:
+  label: BACKUPS
+  type: NUM
+  section: null
+  group: files
+  hint: >-
+    Rolling .bak files of image-model state kept per run. Powers RESUME.
+  prose: >-
+    Number of rolling `.bak` backup files kept per run, storing image model
+    weights. 0 = no backups. These are the invisible substrate of the
+    studio's RESUME action — without them a stopped run cannot be resumed.
+
+approximate_vram_usage:
+  label: APPROXIMATE VRAM USAGE
+  type: BOOL
+  section: null
+  group: system
+  hint: >-
+    Log an estimate of VRAM usage during the render.
+  prose: >-
+    When enabled, the engine logs an approximation of VRAM usage during the
+    render. Diagnostic only; configured from the first-boot panel /
+    studio.yaml.
+
+restore:
+  label: RESTORE
+  type: BOOL
+  section: null
+  group: files
+  hint: >-
+    Resume from the latest backup in backup/<file_namespace>/. In the
+    studio, use RESUME on a stopped session.
+  prose: >-
+    Resume rendering from the latest backup in `backup/<file_namespace>/`.
+    The studio never exposes this as a checkbox — it is set automatically by
+    the RESUME action on stopped session cards.
+
+models_parent_dir:
+  label: MODELS PARENT DIR
+  type: PATH
+  section: null
+  group: system
+  hint: >-
+    Where model weights live; missing models are downloaded here.
+  prose: >-
+    Directory where pytti expects to find model weights, one subdirectory
+    per model. If the expected artifacts are missing, pytti downloads them
+    here on first use. Configured from the first-boot panel / studio.yaml;
+    defaults to the user cache directory.
+
+gradient_accumulation_steps:
+  label: GRADIENT ACCUMULATION
+  type: NUM
+  section: null
+  group: optimizer
+  hint: >-
+    Split each step's cutout batch over N mini-steps. Must divide cutouts
+    evenly.
+  prose: >-
+    Batch cutout processing over N mini-steps before each optimizer update.
+    Must divide `cutouts` evenly. Higher values smooth optimization and
+    lower peak VRAM per step.
+  costNote: >-
+    Trades speed for VRAM — slower overall, but lower peak memory per step.
+
+device:
+  label: DEVICE
+  type: STR
+  section: null
+  group: system
+  hint: >-
+    Compute device. Blank = auto (cuda > mps > cpu).
+  prose: >-
+    Compute device for the render. Leave blank for auto-selection (cuda,
+    then mps, then cpu), or set explicitly, e.g. `cuda:1`, `mps`, or `cpu`.
+    Configured from the first-boot panel / studio.yaml.

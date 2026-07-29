@@ -23,3 +23,10 @@ desktop.ini
 # IDE
 .vscode/
 .idea/
+
+# PYTTI STUDIO runtime state
+app/measurements.json
+app/studio.yaml
+app/uploads/
+app/config/draft.yaml
+app/config/conf/_sessions/
