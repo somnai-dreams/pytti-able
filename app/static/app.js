@@ -686,10 +686,16 @@ function isRelevant(name) {
   const meta = state.schema.fields[name]
   if (meta == null || meta.relevantWhen == null) return true
   const rw = meta.relevantWhen
-  const actual = state.draft.values[rw.field]
-  if (rw.equals !== undefined) return actual === rw.equals
-  if (Array.isArray(rw.in)) return rw.in.includes(actual)
-  return true
+  if (typeof rw.nonEmpty === 'string') {
+    const v = state.draft.values[rw.nonEmpty]
+    return typeof v === 'string' && v !== ''
+  }
+  if (typeof rw.field === 'string') {
+    const actual = state.draft.values[rw.field]
+    if (rw.equals !== undefined) return actual === rw.equals
+    if (Array.isArray(rw.in)) return rw.in.includes(actual)
+  }
+  throw new Error(`field ${name}: unknown relevantWhen shape ${JSON.stringify(rw)}`)
 }
 
 function isModified(name) {
@@ -1230,6 +1236,7 @@ function buildBench() {
     const add = el('button', 'btn chip', '+ band')
     add.dataset.ev = 'band-add'
     body.appendChild(add)
+    dc.bandAdd = add
   }
 
   // ── everything else the schema puts in a bench section, generically ──
@@ -3130,6 +3137,9 @@ function renderBenchChunk(reads) {
   dc.clipDetail.textContent = `${clipEnabled().join(' + ') || 'none'}${preset === 'CUSTOM' ? ' · CUSTOM' : ''}`
 
   // audio band table — wipe-recreate only when row count changes (stateful inputs)
+  const bandsRelevant = isRelevant('input_audio_filters')
+  dc.bandTable.style.display = bandsRelevant ? 'block' : 'none'
+  dc.bandAdd.style.display = bandsRelevant ? 'inline-block' : 'none'
   const bands = Array.isArray(v.input_audio_filters) ? v.input_audio_filters : []
   if (dc.bandCount !== bands.length) {
     dc.bandCount = bands.length
