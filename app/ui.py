@@ -984,7 +984,7 @@ def make_ui():
                     cutout_border = gr.Number(label="Cutout Border", value=cfg.get("cutout_border", 0.25), info="Border width for cutouts. Controls how much padding is added around each cutout.")
                 with gr.Row():
                     learning_rate = gr.Textbox(label="Learning Rate (blank = auto)", value=str(cfg.get("learning_rate", "") or ""), info=TIPS["learning_rate"])
-                    seed = gr.Textbox(label="Seed (blank = random)", value=str(cfg.get("seed", "")), info=TIPS["seed"])
+                    seed = gr.Textbox(label="Seed (blank = random)", value=str(cfg.get("seed", "") or ""), info=TIPS["seed"])
                     reset_lr_each_frame = gr.Checkbox(label="Reset LR Each Frame", value=cfg.get("reset_lr_each_frame", True), info="Reset the learning rate at the start of each frame.")
                 with gr.Row():
                     gradient_accumulation_steps = gr.Number(label="Gradient Accumulation Steps", value=cfg.get("gradient_accumulation_steps", 2), precision=0, info=TIPS["gradient_accumulation_steps"])
@@ -1212,7 +1212,7 @@ def make_ui():
                 _num(data.get("cut_pow", 2.1), 2.1),
                 _num(data.get("cutout_border", 0.25), 0.25),
                 str(data.get("learning_rate", "") or ""),
-                str(data.get("seed", "")),
+                str(data.get("seed", "") or ""),
                 data.get("reset_lr_each_frame", True),
                 data.get("border_mode", "wrap"),
                 data.get("sampling_mode", "bicubic"),
