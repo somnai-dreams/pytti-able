@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PYTTI_CORE_GIT="git+https://github.com/pxl-pshr/pytti-core.git@v2"
+PYTTI_CORE_GIT="git+https://github.com/somnai-dreams/pytti-core.git@v2"
 
 if ! command -v uv >/dev/null; then
   echo "uv is required — install it with:  brew install uv" >&2

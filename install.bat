@@ -90,7 +90,7 @@ python\python.exe -m pip install --no-warn-script-location torch==2.0.0 torchvis
 if errorlevel 1 goto :error
 
 echo %DIM%       [+] pytti-core v2 (pulls CLIP + all render dependencies)%R%
-python\python.exe -m pip install --no-warn-script-location "pyttitools-core[animation] @ git+https://github.com/pxl-pshr/pytti-core.git@v2"
+python\python.exe -m pip install --no-warn-script-location "pyttitools-core[animation] @ git+https://github.com/somnai-dreams/pytti-core.git@v2"
 if errorlevel 1 goto :error
 
 echo %DIM%       [+] UI dependencies%R%
