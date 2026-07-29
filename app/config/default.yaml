@@ -2,9 +2,9 @@
 # (all settings/types/defaults: pytti-core src/pytti/config/structured_config.py).
 # This file is also the source of the UI's initial field values.
 #
-# These defaults are tuned for Apple Silicon (MPS): 256px, one CLIP model,
-# 2D animation, ~30 frames. Scale width/cutouts/models/steps up from here —
-# every extra CLIP model and cutout costs render time roughly linearly.
+# Tuned for Apple Silicon (MPS): ~2s/step at these settings, so a default
+# run is ~20 minutes for a 30-frame 512px animation. Every extra CLIP model
+# and cutout costs render time roughly linearly.
 
 defaults:
   - config_schema
@@ -32,15 +32,15 @@ image_model: Limited Palette
 vqgan_model: coco
 animation_mode: '2D'   # 3D needs the depth model — parked on Mac for now
 
-width: 256
-height: 256
+width: 512
+height: 512
 
-steps_per_scene: 300
-steps_per_frame: 10    # -> 30 frames per scene
+steps_per_scene: 600
+steps_per_frame: 20    # -> 30 frames per scene
 interpolation_steps: 50
 
 seed: null  # null = fresh random seed each run
-cutouts: 24
+cutouts: 40
 cut_pow: 2.1
 
 border_mode: wrap
@@ -87,7 +87,7 @@ direct_stabilization_weight: '1'
 # ViT-B/32 only: each additional model roughly doubles step time on MPS.
 # All models (including the RN* ResNets) work — tick more for quality.
 ViTB32: true
-ViTB16: false
+ViTB16: true
 RN50x4: false
 
 ###############
