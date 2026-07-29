@@ -64,6 +64,7 @@ const state = {
   // ── boot-lifetime (fetched once at load, immutable after) ─────────────
   schema: null,            // /api/schema payload: field metadata, groups, predicates, parked flags
   calibration: null,       // /api/calibration buckets
+  health: null,            // /api/health payload: device / models / ffmpeg checks (post-spec addition)
   firstBoot: false,        // bool: show first-boot check
 
   // ── server-truth mirrors (lifetime: app; mutated only by SSE/REST results) ──
@@ -182,7 +183,6 @@ const fx = {
   scrollToField: null,     // field name → scrollIntoView
   scrollGroup: null,       // engine-room group name → scrollIntoView
   focusEngineSearch: false,
-  focusHelpSearch: false,  // help drawer rebuild stole focus from its own search input
   blur: false,             // Esc inside a field
   copyText: null,          // clipboard write (FINDER fallback)
 }
@@ -215,9 +215,9 @@ const domCache = {
   stageHead: {  // permanent
     id: grab('sh-id'), state: grab('sh-state'), meta: grab('sh-meta'), actions: grab('sh-actions'),
   },
-  stage: {  // permanent double buffer — never wiped, never blanks
+  stage: {  // permanent double buffer — never wiped, never blanks mid-session
     root: grab('stage'), imgs: [grab('stage-a'), grab('stage-b')],
-    front: 0, shownUrl: null, loadingUrl: null,   // double-buffer bookkeeping (DOM cache status, not app state)
+    front: 0, shownUrl: null, loadingUrl: null, forSession: null,   // double-buffer bookkeeping (DOM cache status, not app state)
     placard: grab('stage-placard'), summary: grab('stage-summary'), starters: grab('stage-starters'),
     startersBuilt: false,
   },
@@ -242,6 +242,7 @@ const domCache = {
   },
   bench: {  // built once at boot from schema — permanent; scenes textarea+overlay stateful, never recreated
     root: grab('bench'), head: grab('bench-head'), state: grab('bench-state'),
+    title: grab('bench-title'), presetsBtn: grab('bench-presets'), collapseBtn: grab('bench-collapse'),
     lineage: grab('bench-lineage'), scroll: grab('bench-scroll'), sections: grab('bench-sections'),
     sec: {},               // sectionKey → {root, head, badge, summary, body}
     widgets: new Map(),    // field → widget record {kind, row, input, ...}
@@ -300,6 +301,8 @@ function validateSessionSummary(s) {
   req(s, 'id', 'string', ctx); req(s, 'state', 'string', ctx)
   req(s, 'frames', 'number', ctx); req(s, 'stepsDone', 'number', ctx); req(s, 'stepsTotal', 'number', ctx)
   req(s, 'artifacts', 'array', ctx)
+  // live substates normalize to "rendering" at this boundary — summaries don't distinguish them
+  if (['launching', 'loading_models', 'stopping'].includes(s.state)) s.state = 'rendering'
   const states = ['rendering', 'done', 'stopped', 'failed', 'queued', 'imported']
   if (!states.includes(s.state)) throw new Error(`${ctx}: unknown state ${JSON.stringify(s.state)}`)
   return s
@@ -393,12 +396,18 @@ function loadSessions() {
 function loadDetail(id) {
   if (pendingDetails.has(id)) return
   pendingDetails.add(id)
-  api('GET', `/api/sessions/${id}`).then((detail) => {
-    pendingDetails.delete(id)
-    validateSessionSummary(detail)
-    req(detail, 'config', 'object', 'SessionDetail')
-    emit({ k: 'detail', id, detail })
-  })
+  api('GET', `/api/sessions/${id}`)
+    .finally(() => pendingDetails.delete(id))   // a failed fetch must not brick the session forever
+    .then(
+      (detail) => {
+        validateSessionSummary(detail)
+        req(detail, 'config', 'object', 'SessionDetail')
+        emit({ k: 'detail', id, detail })
+      },
+      (err) => {
+        emit({ k: 'detail-failed', id })
+        throw err   // still surfaces as a danger toast via unhandledrejection
+      })
 }
 
 function loadQueue() {
@@ -455,6 +464,10 @@ function loadBrowse(path) {
 
 function savePreset(name) {
   api('POST', '/api/presets', { name, values: state.draft.values }).then(() => loadPresets())
+}
+
+function postSystem(settings) {
+  api('POST', '/api/system', settings).then(() => emit({ k: 'system-saved', settings }))
 }
 function deletePreset(name) { api('DELETE', `/api/presets/${encodeURIComponent(name)}`).then(() => loadPresets()) }
 
@@ -1390,7 +1403,9 @@ function archiveFiltered() {
     const s = state.sessions.byId[id]
     if (f.status !== 'all' && s.state !== f.status) continue
     if (f.hasVideo && s.artifacts.length === 0) continue
-    if (f.text !== '' && !id.toLowerCase().includes(f.text.toLowerCase())) continue
+    // SessionSummary carries no prompt text — id/slug/delta is the searchable surface
+    const haystack = `${id} ${s.slug ?? ''} ${s.deltaSummary ?? ''}`.toLowerCase()
+    if (f.text !== '' && !haystack.includes(f.text.toLowerCase())) continue
     out.push(s)
   }
   return out
@@ -1722,6 +1737,9 @@ function registerEvents() {
     state.events.push({ k: 'up', x: e.clientX, y: e.clientY, time: e.timeStamp })
     scheduleRender()
   })
+  // a drag or hover must not survive losing the pointer or the window
+  window.addEventListener('pointercancel', () => { state.events.push({ k: 'pointer-reset' }); scheduleRender() })
+  window.addEventListener('blur', () => { state.events.push({ k: 'pointer-reset' }); scheduleRender() })
   window.addEventListener('scroll', () => { state.events.push({ k: 'scroll' }); scheduleRender() }, true)
   window.addEventListener('resize', () => { state.events.push({ k: 'resize' }); scheduleRender() })
   window.addEventListener('dragover', (e) => {
@@ -1783,7 +1801,7 @@ function applySse(ev) {
       // a client that connected mid-render never saw a state event — adopt from progress
       if (live.sessionId == null) { live.sessionId = data.sessionId; state.dirty.stage = true; state.dirty.filmstrip = true }
       if (live.sessionId !== data.sessionId) break   // stale event from a previous render
-      live.state = 'rendering'
+      if (live.state !== 'stopping') live.state = 'rendering'   // a draining step must not undo STOP
       live.step = data.step; live.stepsTotal = data.stepsTotal
       live.scene = data.scene ?? 0; live.sceneCount = data.sceneCount ?? 1
       live.phase = data.phase ?? 'scene'
@@ -1885,7 +1903,11 @@ function doAction(action, node, ev) {
     }
     case 'pip-swap': state.sel.sessionId = null; state.sel.frameIdx = null; state.sel.playing = false; state.sel.compare = null; state.dirty.stage = true; state.dirty.filmstrip = true; break
     case 'fs-live': state.sel.frameIdx = null; state.sel.playing = false; anim.flinging = false; fx.fsFollow = true; state.dirty.stage = true; state.dirty.filmstrip = true; break
-    case 'toggle-log': u.logOpen = !u.logOpen; state.dirty.log = true; break
+    case 'toggle-log':
+      u.logOpen = !u.logOpen
+      if (u.logOpen) fx.scrollLogBottom = true   // stickiness is meaningless while the drawer was 0px
+      state.dirty.log = true
+      break
     case 'set-field': setField(node.dataset.field, node.dataset.value); break
     case 'size-preset': {
       const px = Number(node.dataset.px)
@@ -2049,6 +2071,16 @@ function doAction(action, node, ev) {
     case 'sheet-play':
       if (u.sheet != null && u.sheet.kind === 'encode') { u.sheet.playUrl = node.dataset.url; state.dirty.overlay = true }
       break
+    case 'system-save': {
+      const n = domCache.sheet.nodes
+      if (n.deviceIn == null) break
+      postSystem({
+        device: n.deviceIn.value.trim() === '' ? null : n.deviceIn.value.trim(),
+        models_parent_dir: n.modelsIn.value.trim(),
+        approximate_vram_usage: n.vramIn.checked,
+      })
+      break
+    }
     default:
       throw new Error(`unhandled action ${JSON.stringify(action)}`)
   }
@@ -2092,7 +2124,11 @@ function handleKey(ev) {
       break
     }
     case 'e': case 'E': u.engineRoomOpen = !u.engineRoomOpen; state.dirty.engine = true; break
-    case 'l': case 'L': u.logOpen = !u.logOpen; state.dirty.log = true; break
+    case 'l': case 'L':
+      u.logOpen = !u.logOpen
+      if (u.logOpen) fx.scrollLogBottom = true
+      state.dirty.log = true
+      break
     case '?': u.helpOpen = !u.helpOpen; break
     case ' ': togglePlay(); break
     case 'ArrowLeft': scrubBy(ev.shift ? -10 : -1); break
@@ -2149,6 +2185,14 @@ function tick(now) {
         }
         break
       }
+      case 'detail-failed':
+        if (pendingFork === ev.id) pendingFork = null   // don't fork unexpectedly on a later retry
+        break
+      case 'system-saved':
+        // the draft mirrors the persisted system fields (same values, one truth on screen)
+        for (const [key, value] of Object.entries(ev.settings)) state.draft.values[key] = value
+        toast('system settings saved to studio.yaml', [])
+        break
       case 'preflight':
         state.draft.preflight = ev.result
         state.dirty.bench = true; state.dirty.runBar = true
@@ -2244,6 +2288,13 @@ function tick(now) {
       }
       case 'key': handleKey(ev); break
       case 'focus-field': lastFocusedField = ev.field; break
+      case 'pointer-reset':
+        drag.kind = null
+        if (hover.scrubCardId != null || hover.fsIdx != null) {
+          hover.scrubCardId = null; hover.fsIdx = null
+          state.dirty.library = true; state.dirty.archive = true; state.dirty.stage = true
+        }
+        break
       case 'move': handleMove(ev); break
       case 'down': handleDown(ev); break
       case 'up': handleUp(ev); break
@@ -2338,15 +2389,21 @@ function handleUiInput(ev) {
     case 'compare-scrub': {
       const cmp = state.sel.compare
       if (cmp == null) break
-      const [a, b] = compareSides()
+      const [a] = compareSides()
       const step = Number(ev.value)
-      if (cmp.locked || cmp.focus === 'a') {
-        state.sel.frameIdx = clamp(Math.round(step / stepsPerFrame(a)), 1, Math.max(1, sessionFrames(a)))
-        if (!cmp.locked && cmp.focus === 'a') { /* A moved alone; offset now differs implicitly */ }
+      const spfA = stepsPerFrame(a)
+      const oldStepA = (state.sel.frameIdx ?? sessionFrames(a)) * spfA
+      if (cmp.locked) {
+        // aligned: one scrub moves both sides through the same step number
+        state.sel.frameIdx = clamp(Math.round(step / spfA), 1, Math.max(1, sessionFrames(a)))
+      } else if (cmp.focus === 'a') {
+        // A scrubs alone: compensate the offset so B holds its step
+        const stepB = oldStepA + cmp.stepOffset
+        state.sel.frameIdx = clamp(Math.round(step / spfA), 1, Math.max(1, sessionFrames(a)))
+        cmp.stepOffset = stepB - state.sel.frameIdx * spfA
       } else {
-        const stepA = (state.sel.frameIdx ?? sessionFrames(a)) * stepsPerFrame(a)
-        cmp.stepOffset = step - stepA
-        void b
+        // B scrubs alone: A holds, the offset absorbs the motion
+        cmp.stepOffset = step - oldStepA
       }
       state.dirty.compare = true
       break
@@ -2440,6 +2497,16 @@ function scheduleRender() {
 }
 
 function animTick(now) {
+  // spring destinations derive from state HERE, before stepping and before `still`
+  // is decided — setting them in the DOM-write phase would leave open/close
+  // animations without a scheduled next frame
+  anim.springs.engine.dest = state.ui.engineRoomOpen ? 1 : 0
+  anim.springs.help.dest = state.ui.helpOpen ? 1 : 0
+  anim.springs.archive.dest = state.ui.archiveOpen ? 1 : 0
+  anim.springs.inspector.dest = state.ui.inspectorOpen ? 1 : 0
+  anim.springs.sheet.dest = state.ui.sheet != null ? 1 : 0
+  anim.springs.confirm.dest = state.ui.confirmPending != null ? 1 : 0
+
   let until = anim.animatedUntilTime ?? now
   const steps = Math.min(300, Math.floor((now - until) / msPerAnimationStep))   // spiral-of-death cap
   until += steps * msPerAnimationStep
@@ -2460,7 +2527,7 @@ function animTick(now) {
       if (springDone(f)) { springSnap(f); anim.flinging = false }
     }
   }
-  let still = anim.pulse > 0 || anim.flinging
+  let still = anim.pulse > 0 || anim.flinging || state.sel.playing   // playback needs the loop hot
   for (const s of springs) { if (springDone(s)) springSnap(s); else still = true }
   if (anim.decays.size > 0) {
     for (const [key, at] of anim.decays) {
@@ -2576,11 +2643,6 @@ function applyFx() {
     fx.scrollGroup = null
   }
   if (fx.blur) { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); fx.blur = false }
-  if (fx.focusHelpSearch) {
-    const search = domCache.help.searchNode
-    if (search != null) { search.focus(); search.setSelectionRange(search.value.length, search.value.length) }
-    fx.focusHelpSearch = false
-  }
   if (fx.copyText != null) { navigator.clipboard.writeText(fx.copyText).catch(() => {}); fx.copyText = null }
 }
 
@@ -2592,6 +2654,17 @@ const STATE_GLYPHS = {
   rendering: ['●', 'var(--signal)', 'REC'], done: ['✓', 'var(--phos)', 'DONE'],
   stopped: ['■', 'var(--text)', 'STOP'], failed: ['✕', 'var(--danger)', 'FAIL'],
   queued: ['⧖', 'var(--accent)', 'QUEUED'], imported: ['▤', 'var(--text)', 'IMPORTED'],
+}
+
+// "○ READY · mps · models ok · ffmpeg ok" (§3.2) from whatever /api/health reports
+function healthSummary() {
+  if (state.health == null) return ''
+  const parts = []
+  for (const [key, v] of Object.entries(state.health)) {
+    if (typeof v === 'boolean') parts.push(`${key} ${v ? 'ok' : '✕'}`)
+    else if (typeof v === 'string' && v !== '') parts.push(v)
+  }
+  return parts.slice(0, 4).join(' · ')
 }
 
 function renderStatusStrip() {
@@ -2614,7 +2687,9 @@ function renderStatusStrip() {
     dc.led.textContent = '○'
     dc.led.style.color = 'var(--text)'
     dc.led.style.opacity = '1'
-    dc.label.textContent = state.sse.connected ? 'READY' : 'READY · reconnecting event stream…'
+    dc.label.textContent = state.sse.connected
+      ? `READY${healthSummary() !== '' ? ' · ' + healthSummary() : ''}`
+      : 'READY · reconnecting event stream…'
     dc.stop.style.display = 'none'
   }
   if (state.queue != null) {
@@ -2764,6 +2839,9 @@ function renderStageHead() {
 function renderStage() {
   const dc = domCache.stage
   const sid = stageSessionId()
+  // switching sessions invalidates the buffer: never show the previous
+  // session's frame under the new session's header
+  if (dc.forSession !== sid) { dc.forSession = sid; dc.shownUrl = null }
 
   // starter ghost cards, built once, shown only for the empty library
   if (!dc.startersBuilt) {
@@ -3019,14 +3097,23 @@ function calibBadge(model) {
 
 function renderBenchChunk(reads) {
   const dc = domCache.bench
-  domCache.cols.style.gridTemplateColumns = state.ui.benchCollapsed ? '248px 1fr 36px' : '248px 1fr 340px'
+  const collapsed = state.ui.benchCollapsed
+  domCache.cols.style.gridTemplateColumns = collapsed ? '248px 1fr 36px' : '248px 1fr 340px'
+  // the collapsed spine keeps a working expand affordance — never a one-way trap
+  dc.title.style.display = collapsed ? 'none' : 'inline'
+  dc.state.style.display = collapsed ? 'none' : 'inline'
+  dc.presetsBtn.style.display = collapsed ? 'none' : 'inline-block'
+  dc.head.style.padding = collapsed ? '8px 2px' : '8px 12px'
+  dc.collapseBtn.textContent = collapsed ? '◀' : '▐'
+  dc.collapseBtn.title = collapsed ? 'expand bench' : 'collapse bench'
+  dc.collapseBtn.className = collapsed ? 'btn spine' : 'btn'
   dc.lineage.textContent = state.draft.forkOf != null ? `forked from ${state.draft.forkOf} ${state.draft.seedLocked ? '🔒' : ''}` : ''
-  dc.lineage.style.display = state.draft.forkOf != null && !state.ui.benchCollapsed ? 'block' : 'none'
+  dc.lineage.style.display = state.draft.forkOf != null && !collapsed ? 'block' : 'none'
   dc.state.textContent = state.draft.dirtySinceRun ? '● edited' : '○ fresh'
   dc.state.style.color = state.draft.dirtySinceRun ? 'var(--signal)' : 'var(--text)'
-  dc.scroll.style.display = state.ui.benchCollapsed ? 'none' : 'block'
-  domCache.runBar.root.style.display = state.ui.benchCollapsed ? 'none' : 'block'
-  if (state.ui.benchCollapsed) return
+  dc.scroll.style.display = collapsed ? 'none' : 'block'
+  domCache.runBar.root.style.display = collapsed ? 'none' : 'block'
+  if (collapsed) return
 
   const v = state.draft.values
   const summaries = benchSummaries()
@@ -3141,9 +3228,11 @@ function renderBenchChunk(reads) {
   dc.bandTable.style.display = bandsRelevant ? 'block' : 'none'
   dc.bandAdd.style.display = bandsRelevant ? 'inline-block' : 'none'
   const bands = Array.isArray(v.input_audio_filters) ? v.input_audio_filters : []
+  const bandCols = ['variable_name', 'f_center', 'f_width', 'order']
   if (dc.bandCount !== bands.length) {
     dc.bandCount = bands.length
     dc.bandTable.textContent = ''
+    dc.bandInputs = []   // [rowIdx][colIdx] — owned refs, never re-queried from the DOM
     if (bands.length > 0) {
       const headRow = el('div', 'band-row band-head')
       for (const h of ['variable', 'f_center', 'f_width', 'order', '']) headRow.appendChild(el('span', 'band-cell', h))
@@ -3151,27 +3240,28 @@ function renderBenchChunk(reads) {
     }
     for (let i = 0; i < bands.length; i++) {
       const row = el('div', 'band-row')
-      for (const col of ['variable_name', 'f_center', 'f_width', 'order']) {
+      const rowInputs = []
+      for (const col of bandCols) {
         const input = el('input', 'band-in')
         input.type = col === 'variable_name' ? 'text' : 'number'
         input.dataset.ui = 'band'; input.dataset.idx = String(i); input.dataset.col = col
         const cell = el('span', 'band-cell')
         cell.appendChild(input)
         row.appendChild(cell)
+        rowInputs.push(input)
       }
       const del = el('button', 'btn tiny', '✕')
       del.dataset.ev = 'band-del'; del.dataset.idx = String(i)
       const cell = el('span', 'band-cell'); cell.appendChild(del)
       row.appendChild(cell)
       dc.bandTable.appendChild(row)
+      dc.bandInputs.push(rowInputs)
     }
   }
-  const bandRows = dc.bandTable.querySelectorAll('.band-row:not(.band-head)')
-  const bandCols = ['variable_name', 'f_center', 'f_width', 'order']
   for (let i = 0; i < bands.length; i++) {
-    const inputs = bandRows[i].querySelectorAll('input')
     for (let j = 0; j < bandCols.length; j++) {
-      if (inputs[j] !== reads.active) inputs[j].value = String(bands[i][bandCols[j]] ?? '')
+      const input = dc.bandInputs[i][j]
+      if (input !== reads.active) input.value = String(bands[i][bandCols[j]] ?? '')
     }
   }
 }
@@ -3265,7 +3355,6 @@ function renderRunBar(reads) {
 function renderEngineRoomChunk(reads) {
   const dc = domCache.engineRoom
   const s = anim.springs.engine
-  s.dest = state.ui.engineRoomOpen ? 1 : 0
   if (state.ui.engineRoomOpen && !dc.built) buildEngineRoom()
   if (!dc.built) { dc.root.style.display = 'none'; return }
   const hidden = !state.ui.engineRoomOpen && springDone(s) && s.dest === 0
@@ -3294,7 +3383,7 @@ function renderEngineRoomChunk(reads) {
         const gas = Number(state.draft.values.gradient_accumulation_steps), cuts = Number(state.draft.values.cutouts)
         const ok = gas > 0 && cuts % gas === 0
         row.note.textContent = ok ? '✓ divides cutouts' : '✕ must divide cutouts'
-        row.note.style.color = ok ? 'var(--phos)' : 'var(--signal)'
+        row.note.style.color = ok ? 'var(--accent)' : 'var(--signal)'   // client verdict, not engine truth — never green
       } else {
         row.note.textContent = '0 = auto-match steps_per_frame'
         row.note.style.color = 'var(--text)'
@@ -3339,7 +3428,6 @@ function archCardCreate(id) {
 function renderArchiveChunk(reads) {
   const dc = domCache.archive
   const s = anim.springs.archive
-  s.dest = state.ui.archiveOpen ? 1 : 0
   if (state.ui.archiveOpen && !dc.built) buildArchive()
   if (!dc.built) { dc.root.style.display = 'none'; return }
   const hidden = !state.ui.archiveOpen && springDone(s) && s.dest === 0
@@ -3493,7 +3581,6 @@ function renderInspectorChunk(reads) {
   const dc = domCache.inspector
   const open = state.ui.inspectorOpen
   const s = anim.springs.inspector
-  s.dest = open ? 1 : 0
   const hidden = !open && springDone(s) && s.dest === 0
   dc.root.style.display = hidden ? 'none' : 'block'
   dc.root.style.opacity = String(clamp(s.pos, 0, 1))
@@ -3604,7 +3691,6 @@ function renderSheetChunk(reads) {
   const dc = domCache.sheet
   const sheet = state.ui.sheet
   const s = anim.springs.sheet
-  s.dest = sheet != null ? 1 : 0
   const hidden = sheet == null && springDone(s) && s.dest === 0
   dc.root.style.display = hidden ? 'none' : 'block'
   dc.root.style.opacity = String(clamp(s.pos, 0, 1))
@@ -3773,20 +3859,45 @@ function buildEncodeSheet(sheet) {
 }
 
 function buildFirstBootSheet() {
+  const dc = domCache.sheet
   const panel = sheetShell('FIRST BOOT — studio check')
-  const v = state.draft.values
-  const rows = [
-    ['device', String(v.device ?? 'auto (cuda > mps > cpu)')],
-    ['models_parent_dir', String(v.models_parent_dir ?? '')],
-    ['checkpoints', 'downloaded on first use into models_parent_dir'],
-    ['ffmpeg', 'checked at encode time'],
-  ]
-  for (const [k, val] of rows) {
+
+  panel.appendChild(el('div', 'lbl', 'HEALTH'))
+  for (const [key, v] of Object.entries(state.health ?? {})) {
     const row = el('div', 'insp-row')
-    row.appendChild(el('span', 'insp-key', k))
-    row.appendChild(el('span', 'insp-val', val))
+    row.appendChild(el('span', 'insp-key', key))
+    const val = el('span', 'insp-val', typeof v === 'boolean' ? (v ? 'ok' : '✕ missing') : String(v))
+    if (v === false) val.style.color = 'var(--signal)'
+    row.appendChild(val)
     panel.appendChild(row)
   }
+
+  // device / models_parent_dir / approximate_vram_usage persist via POST /api/system (studio.yaml)
+  panel.appendChild(el('div', 'lbl', 'SYSTEM'))
+  const v = state.draft.values
+  const deviceIn = el('input', 'in-str')
+  deviceIn.type = 'text'; deviceIn.placeholder = 'auto (cuda > mps > cpu)'
+  deviceIn.value = v.device != null ? String(v.device) : ''
+  const modelsIn = el('input', 'in-path')
+  modelsIn.type = 'text'
+  modelsIn.value = String(v.models_parent_dir ?? '')
+  const vramIn = el('input')
+  vramIn.type = 'checkbox'
+  vramIn.checked = v.approximate_vram_usage === true
+  for (const [label, input] of [['device', deviceIn], ['models_parent_dir', modelsIn], ['approximate_vram_usage', vramIn]]) {
+    const row = el('div', 'field-row')
+    row.appendChild(el('label', 'field-label', label))
+    row.appendChild(el('span', 'type-badge', input.type === 'checkbox' ? 'BOOL' : 'STR'))
+    const wrap = el('span', 'field-wrap'); wrap.appendChild(input)
+    row.appendChild(wrap)
+    panel.appendChild(row)
+  }
+  const saveRow = el('div', 'enc-done')
+  const save = el('button', 'btn', 'SAVE SYSTEM SETTINGS')
+  save.dataset.ev = 'system-save'
+  saveRow.appendChild(save)
+  panel.appendChild(saveRow)
+
   panel.appendChild(el('div', 'lbl', 'CALIBRATION'))
   const buckets = Object.entries(state.calibration.buckets)
   if (buckets.length === 0) {
@@ -3802,6 +3913,7 @@ function buildFirstBootSheet() {
   const ok = el('button', 'btn run-btn', 'START')
   ok.dataset.ev = 'close-sheet'
   panel.appendChild(ok)
+  dc.nodes = { deviceIn, modelsIn, vramIn }
 }
 
 function buildPresetsSheet() {
@@ -3874,18 +3986,40 @@ function renderHelpChunk(reads) {
   const dc = domCache.help
   const open = state.ui.helpOpen
   const s = anim.springs.help
-  s.dest = open ? 1 : 0
   const hidden = !open && springDone(s) && s.dest === 0
   dc.root.style.display = hidden ? 'none' : 'block'
   dc.root.style.transform = `translateX(${(1 - clamp(s.pos, 0, 1.05)) * 100}%)`
-  if (hidden) { dc.key = ''; dc.root.textContent = ''; return }
+  if (hidden) { dc.key = ''; dc.tableKey = null; dc.root.textContent = ''; return }
 
+  // shell rebuilds only when the band set changes; the settings table is its own
+  // sub-projection so typing never rebuilds the search input under the cursor
   const bands = audioBandNames()
-  const key = `open|${bands.join(',')}|${helpSearch}`
-  if (dc.key === key) return
-  dc.key = key
-  const prevSearchFocused = reads.active != null && reads.active.dataset != null && reads.active.dataset.ui === 'help-search'
+  const key = `open|${bands.join(',')}`
+  if (dc.key !== key) {
+    dc.key = key
+    buildHelpShell(bands)
+  }
+  if (dc.searchNode !== reads.active) dc.searchNode.value = helpSearch
+  const q = helpSearch.trim().toLowerCase()
+  if (dc.tableKey !== q) {
+    dc.tableKey = q
+    dc.settingsTable.textContent = ''
+    for (const [name, meta] of Object.entries(state.schema.fields)) {
+      const text = `${name} ${meta.label ?? ''} ${meta.hint ?? ''}`.toLowerCase()
+      if (q !== '' && !text.includes(q)) continue
+      const row = el('button', 'help-setting')
+      row.dataset.ev = 'help-setting'; row.dataset.field = name
+      row.appendChild(el('span', 'insp-key', name))
+      row.appendChild(el('span', 'dim', meta.hint ?? meta.label ?? ''))
+      dc.settingsTable.appendChild(row)
+    }
+  }
+}
+
+function buildHelpShell(bands) {
+  const dc = domCache.help
   dc.root.textContent = ''
+  dc.tableKey = null
 
   const head = el('div', 'panel-head scanlines')
   head.appendChild(el('span', 'panel-title', 'HELP // DSL'))
@@ -3933,19 +4067,9 @@ function renderHelpChunk(reads) {
   search.value = helpSearch
   dc.root.appendChild(search)
   dc.searchNode = search
-  const q = helpSearch.trim().toLowerCase()
   const table = el('div', 'help-settings')
-  for (const [name, meta] of Object.entries(state.schema.fields)) {
-    const text = `${name} ${meta.label ?? ''} ${meta.hint ?? ''}`.toLowerCase()
-    if (q !== '' && !text.includes(q)) continue
-    const row = el('button', 'help-setting')
-    row.dataset.ev = 'help-setting'; row.dataset.field = name
-    row.appendChild(el('span', 'insp-key', name))
-    row.appendChild(el('span', 'dim', meta.hint ?? meta.label ?? ''))
-    table.appendChild(row)
-  }
   dc.root.appendChild(table)
-  if (prevSearchFocused) fx.focusHelpSearch = true
+  dc.settingsTable = table
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -4002,16 +4126,18 @@ function renderToastConfirm() {
 // ════════════════════════════════════════════════════════════════════════════
 
 async function boot() {
-  const [schema, draft, sessions, calibration, queue, presets] = await Promise.all([
+  const [schema, draft, sessions, calibration, queue, presets, health] = await Promise.all([
     api('GET', '/api/schema'),
     api('GET', '/api/draft'),
     api('GET', '/api/sessions'),
     api('GET', '/api/calibration'),
     api('GET', '/api/queue'),
     api('GET', '/api/presets'),
+    api('GET', '/api/health'),
   ])
   state.schema = validateSchema(schema)
   state.calibration = { buckets: req(calibration, 'buckets', 'object', '/api/calibration') }
+  state.health = health
 
   const values = req(draft, 'values', 'object', '/api/draft')
   state.draft.values = { ...schemaDefaults(), ...values }

@@ -107,6 +107,7 @@ input, textarea { user-select: text; -webkit-user-select: text; }
 .btn.fork { color: var(--signal); border-color: var(--signal); }
 .btn.fork:hover { background: var(--signal); color: var(--ink-0); }
 .btn.tiny { padding: 0 5px; font-size: var(--fs-caption); }
+.btn.spine { padding: 2px 4px; }   /* fits the 36px collapsed-bench spine */
 .btn.chip { padding: 0 6px; font-size: var(--fs-caption); }
 .btn.chip.selected, .btn.seg.selected, .btn.active { background: var(--accent); color: var(--ink-0); }
 .btn.seg.parked { opacity: .5; }
@@ -421,13 +422,14 @@ input, textarea { user-select: text; -webkit-user-select: text; }
 }
 #bench-head {
   flex: 0 0 auto;
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);   /* first paint; JS projects collapsed/expanded padding */
   font-size: var(--fs-label);
   letter-spacing: .08em;
   border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  overflow: hidden;
 }
 #bench-title { flex: 0 0 auto; }
 #bench-state { flex: 1; text-align: right; }
