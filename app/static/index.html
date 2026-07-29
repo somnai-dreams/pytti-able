@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>PYTTI STUDIO</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="status-strip" class="scanlines">
+    <span id="ss-brand">PYTTI // STUDIO</span>
+    <span id="ss-led">○</span>
+    <span id="ss-label">READY</span>
+    <button id="ss-stop" class="btn danger" data-ev="stop-live">■ STOP</button>
+    <button id="ss-queue" class="btn" data-ev="queue-chip">⧖</button>
+    <span id="ss-spacer"></span>
+    <button class="btn" data-ev="open-boot" title="setup">⚙</button>
+    <button class="btn" data-ev="open-help" title="help (?)">?</button>
+  </header>
+
+  <main id="cols">
+    <aside id="library">
+      <div id="lib-head" class="scanlines">LIBRARY
+        <button class="btn" data-ev="open-archive" title="archive (G)">G</button>
+      </div>
+      <div id="lib-scroll">
+        <div id="lib-empty">no sessions yet —<br>pick a starter →<br><br><span class="dim">(after first run,<br>cards appear here)</span></div>
+        <div id="lib-pad-top"></div>
+        <div id="lib-cards"></div>
+        <div id="lib-pad-bot"></div>
+      </div>
+    </aside>
+
+    <section id="stage-col">
+      <div id="stage-head">
+        <span id="sh-id"></span><span id="sh-state"></span>
+        <span id="sh-meta"></span>
+        <span id="sh-actions">
+          <button class="btn fork" data-ev="stage-fork">⑂ FORK</button>
+          <button class="btn" data-ev="stage-compare">⇆ COMPARE</button>
+          <button class="btn" data-ev="stage-encode">🎞 ENCODE</button>
+          <button class="btn" data-ev="stage-finder">FINDER</button>
+          <button class="btn" data-ev="stage-inspect">ⓘ</button>
+        </span>
+      </div>
+      <div id="stage">
+        <img id="stage-a" alt="" draggable="false">
+        <img id="stage-b" alt="" draggable="false">
+        <div id="stage-placard"></div>
+        <div id="stage-summary"></div>
+        <div id="stage-starters"></div>
+        <div id="pip" data-ev="pip-swap" title="click to return stage to live"><img id="pip-img" alt="" draggable="false"><span class="pip-tag">LIVE</span></div>
+      </div>
+      <div id="compare-root"></div>
+      <div id="filmstrip">
+        <div id="fs-scroll"><div id="fs-track" data-scrub="fs"></div></div>
+        <button id="fs-live" class="btn" data-ev="fs-live">◉ LIVE</button>
+        <span id="fs-count"></span>
+      </div>
+      <div id="progress-deck">
+        <div id="pd-countdown"></div>
+        <div id="pd-scenebar"><div id="pd-fill"></div><div id="pd-segments"></div></div>
+        <div id="pd-row">
+          <span id="pd-step"></span><span id="pd-rate"></span>
+          <canvas id="pd-spark" width="140" height="22"></canvas>
+          <span id="pd-phase"></span><span id="pd-elapsed"></span>
+        </div>
+      </div>
+      <div id="log-line" data-ev="toggle-log"><span id="ll-badge"></span><span id="ll-text"></span><span id="ll-key">[L]</span></div>
+      <div id="log-drawer"><div id="log-rows"></div></div>
+    </section>
+
+    <aside id="bench">
+      <div id="bench-head" class="scanlines"><span id="bench-title">BENCH</span><span id="bench-state"></span>
+        <button class="btn" data-ev="open-presets">PRESETS</button>
+        <button class="btn" data-ev="bench-collapse" title="collapse bench">▐</button>
+      </div>
+      <div id="bench-lineage"></div>
+      <div id="bench-scroll"><div id="bench-sections"></div></div>
+      <div id="run-bar">
+        <div id="seed-strip"><span class="lbl">SEED</span><span id="seed-val"></span>
+          <button class="btn" id="seed-lock" data-ev="seed-lock" title="lock seed">🔒</button>
+          <button class="btn" id="seed-roll" data-ev="seed-roll" title="reroll seed">⟳</button>
+        </div>
+        <div id="cost-meter"></div>
+        <div id="run-issues"></div>
+        <div id="run-buttons"></div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="engine-room"></div>
+  <div id="archive"></div>
+  <div id="help-drawer"></div>
+  <div id="inspector"></div>
+  <div id="sheet"></div>
+  <div id="toast"></div>
+  <div id="confirm"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
