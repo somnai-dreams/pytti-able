@@ -1139,3 +1139,31 @@ device:
     Compute device for the render. Leave blank for auto-selection (cuda,
     then mps, then cpu), or set explicitly, e.g. `cuda:1`, `mps`, or `cpu`.
     Configured from the first-boot panel / studio.yaml.
+
+cutout_sampler:
+  label: CUTOUT SAMPLER
+  type: CHOICE
+  section: null
+  group: seeing
+  hint: >-
+    batched = one fused grid_sample for all cutouts (~1.7x faster, identical
+    bilinear math); classic = the original per-crop path.
+  prose: >-
+    How random CLIP crops are extracted each step. The batched sampler builds
+    every cutout in a single GPU operation — measurably faster with provably
+    identical resampling math (gradient parity ~1e-11). Classic remains the
+    default until the A/B soak completes.
+
+optimizer:
+  label: OPTIMIZER
+  type: CHOICE
+  section: null
+  group: optimizer
+  hint: >-
+    adam = the classic pytti optimizer; adamw_sf = schedule-free AdamW with a
+    Polyak-averaged output image.
+  prose: >-
+    adamw_sf (Schedule-Free AdamW, NeurIPS 2024) removes the learning-rate
+    schedule question and saves frames from a smoothed average of recent
+    optimization states — steadier structure in stills and less shimmer in
+    animations. Opt-in while A/B testing runs.
