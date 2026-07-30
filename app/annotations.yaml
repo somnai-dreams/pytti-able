@@ -1146,13 +1146,14 @@ cutout_sampler:
   section: null
   group: seeing
   hint: >-
-    batched = one fused grid_sample for all cutouts (~1.7x faster, identical
-    bilinear math); classic = the original per-crop path.
+    batched (default) = one fused grid_sample for all cutouts — faster,
+    same resampling math; classic = the original 2021 per-crop path.
   prose: >-
     How random CLIP crops are extracted each step. The batched sampler builds
-    every cutout in a single GPU operation — measurably faster with provably
-    identical resampling math (gradient parity ~1e-11). Classic remains the
-    default until the A/B soak completes.
+    every cutout in a single GPU operation — measurably faster (sampler ~5x,
+    renders ~10-15%) with the same resampling math and crop distribution
+    (gradient parity ~1e-11, A/B verified at parity quality). Classic is kept
+    as the legacy preset.
 
 optimizer:
   label: OPTIMIZER
