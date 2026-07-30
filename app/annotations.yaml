@@ -903,6 +903,71 @@ ViTB16:
   costNote: >-
     Moderate — slightly slower and more VRAM than ViT-B/32.
 
+FARE4ViTB32:
+  label: FARE-4 B/32
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    Adversarially-robust ViT-B/32 (FARE). Cleaner, perceptually-aligned
+    gradients — less high-frequency noise. Same speed as ViT-B/32.
+  prose: >-
+    Enable the FARE-4 robust ViT-B/32 perceptor (Schlarmann et al.).
+    Adversarial fine-tuning gives it perceptually-aligned gradients, which
+    for image optimization means cleaner structure and less high-frequency
+    artifacting than the classic CLIP towers, at identical cost to ViT-B/32.
+    A modern member for the ensemble — pairs well with a classic tower.
+  costNote: >-
+    Light — same speed and VRAM as ViT-B/32.
+
+FARE2ViTL14:
+  label: FARE-2 L/14
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    Adversarially-robust ViT-L/14 (FARE, OpenAI-init). Robust gradients at
+    L-scale quality. As heavy as ViT-L/14.
+  prose: >-
+    Enable the FARE-2 robust ViT-L/14 perceptor — fine-tuned from the
+    OpenAI ViT-L/14 weights, so it keeps much of the classic large-model
+    look while adding perceptually-aligned gradients. Costs the same as
+    ViT-L/14: significantly slower and heavier than B-series models.
+  costNote: >-
+    Heavy — same cost as ViT-L/14 (~10x a B/32 step).
+
+SigLIP2B16:
+  label: SIGLIP2 B/16
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    SigLIP2 B/16 — far stronger prompt understanding than classic CLIP
+    (~78% vs ~63% zero-shot). About 2x the cost of ViT-B/32.
+  prose: >-
+    Enable the SigLIP2 B/16 perceptor. A 2025-generation model with much
+    stronger text-image semantics than the classic OpenAI towers — prompts
+    with composition and relations land more literally. Roughly twice the
+    step cost of ViT-B/32. Changes the character of the output; pair with
+    a classic tower to blend old look with new comprehension.
+  costNote: >-
+    Moderate — about 2x ViT-B/32 per step.
+
+SigLIP2SO400M:
+  label: SIGLIP2 SO400M
+  type: BOOL
+  section: engine
+  group: seeing
+  hint: >-
+    SigLIP2 SO400M @256px — the strongest semantics available here, at
+    L-14-class cost. Heavy.
+  prose: >-
+    Enable the SigLIP2 SO400M perceptor (256px). The strongest prompt
+    comprehension in the palette (~85% zero-shot), at a step cost slightly
+    above ViT-L/14. Best reserved for final renders rather than drafts.
+  costNote: >-
+    Heavy — ~13x a ViT-B/32 step, comparable to ViT-L/14.
+
 ViTL14:
   label: VIT-L/14
   type: BOOL
