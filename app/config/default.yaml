@@ -2,9 +2,10 @@
 # (all settings/types/defaults: pytti-core src/pytti/config/structured_config.py).
 # This file is also the source of the UI's initial field values.
 #
-# Tuned for Apple Silicon (MPS): ~2s/step at these settings, so a default
-# run is ~20 minutes for a 30-frame 512px animation. Every extra CLIP model
-# and cutout costs render time roughly linearly.
+# Tuned for Apple Silicon: ~0.4s/step at these settings (MLX perceptor
+# backend), so a default run is a few minutes for a 30-frame 512px
+# animation. Every extra CLIP model and cutout costs render time roughly
+# linearly.
 
 defaults:
   - config_schema
@@ -84,8 +85,9 @@ direct_stabilization_weight: '1'
 ### CLIP ###
 ############
 
-# ViT-B/32 only: each additional model roughly doubles step time on MPS.
-# All models (including the RN* ResNets) work — tick more for quality.
+# Each additional model costs step time roughly by its size. The default
+# MLX backend runs the classic ViT towers; RN* ResNets and the modern
+# towers (FARE/SigLIP2) need perceptor_backend: torch.
 ViTB32: true
 ViTB16: true
 RN50x4: false
@@ -104,3 +106,7 @@ backups: 3
 
 gradient_accumulation_steps: 1
 device: null  # null = auto (cuda > mps > cpu); or e.g. cuda:1, mps, cpu
+# mlx: CLIP towers + prompt losses on Apple Metal in fp16, ~1.75x step
+# rate (A/B verified at parity quality vs the same-seed null pair).
+# Set to torch for image prompts, semantic [mask]s, or non-ViT towers.
+perceptor_backend: mlx
