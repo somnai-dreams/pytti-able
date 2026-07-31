@@ -241,9 +241,16 @@ def coerce_values(values: dict) -> dict:
         base = ftype.replace(" | None", "").replace("Optional[", "").rstrip("]")
         try:
             if value is None or value == "":
-                out[name] = None if optional else value
-                if not optional and base in ("int", "float"):
-                    raise ValueError("empty")
+                if optional:
+                    out[name] = None
+                elif base == "str":
+                    # a cleared text field arrives as null/""; the schema's
+                    # contract for plain-str fields (weight expressions etc.)
+                    # is "" = disabled. None must NOT reach the session yaml:
+                    # hydra rejects it at render time, far from the cause.
+                    out[name] = ""
+                else:
+                    raise ValueError("empty value for a required field")
             elif base == "int":
                 if isinstance(value, bool):
                     raise ValueError("bool is not an int")
