@@ -1211,14 +1211,14 @@ cutout_sampler:
   section: null
   group: seeing
   hint: >-
-    batched (default) = one fused grid_sample for all cutouts — faster,
-    same resampling math; classic = the original 2021 per-crop path.
+    batched (default) = fused cutouts AND a fused augmentation stack —
+    much faster, same distributions; classic = the original 2021 path.
   prose: >-
-    How random CLIP crops are extracted each step. The batched sampler builds
-    every cutout in a single GPU operation — measurably faster (sampler ~5x,
-    renders ~10-15%) with the same resampling math and crop distribution
-    (gradient parity ~1e-11, A/B verified at parity quality). Classic is kept
-    as the legacy preset.
+    How random CLIP crops are extracted and augmented each step. Batched
+    builds every cutout in a single GPU operation and runs the augmentation
+    stack as one composed warp with on-device parameters (same ops, ranges,
+    and probabilities as the classic kornia stack, ~11x faster). Same-size
+    perceptors share one cutout batch. Classic is kept as the legacy preset.
 
 optimizer:
   label: OPTIMIZER
