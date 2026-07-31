@@ -269,10 +269,13 @@ cutouts:
   section: null
   group: seeing
   hint: >-
-    Random crops per CLIP evaluation. More = richer gradients, slower.
+    Crops per CLIP evaluation. 16 suits the smart sampler; use ~40 with
+    batched/classic. Cost is linear.
   prose: >-
-    Number of random crops (glimpses) CLIP scores per step. More cutouts
-    give richer gradients and better quality; 40–60 is typical.
+    Number of crops (glimpses) CLIP scores per step. With the default smart
+    sampler, 16 is the tuned sweet spot — its designed global/detail split
+    was A/B judged to beat 40 random crops. The batched/classic samplers
+    rely on volume and want 40–60.
   costNote: >-
     Cost scales roughly linearly — each cutout adds CLIP evaluation work and
     VRAM per step.
@@ -1211,14 +1214,18 @@ cutout_sampler:
   section: null
   group: seeing
   hint: >-
-    batched (default) = fused cutouts AND a fused augmentation stack —
-    much faster, same distributions; classic = the original 2021 path.
+    smart (default) = designed global-anchor + stratified-detail cuts,
+    tuned for CUTOUTS 16; batched/classic = the 2021 distribution
+    (wants CUTOUTS ~40).
   prose: >-
-    How random CLIP crops are extracted and augmented each step. Batched
-    builds every cutout in a single GPU operation and runs the augmentation
-    stack as one composed warp with on-device parameters (same ops, ranges,
-    and probabilities as the classic kornia stack, ~11x faster). Same-size
-    perceptors share one cutout batch. Classic is kept as the legacy preset.
+    How CLIP crops are extracted and augmented each step. Smart splits the
+    budget deliberately — a quarter full-frame anchors that hold the
+    composition together, the rest smaller detail crops stratified across
+    the canvas so every step sees everything. A/B judged with a held-out
+    perceptor, smart at 16 cutouts beat the old distribution at 40 on
+    prompt adherence while using less than half the compute. Batched keeps
+    the classic 2021 distribution in fast fused form; classic is the
+    original per-crop loop. All three are sync-free where it matters.
 
 perceptor_backend:
   label: PERCEPTOR BACKEND

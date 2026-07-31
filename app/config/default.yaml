@@ -41,7 +41,9 @@ steps_per_frame: 20    # -> 30 frames per scene
 interpolation_steps: 50
 
 seed: null  # null = fresh random seed each run
-cutouts: 40
+# 16 is tuned for the default smart sampler (global anchors + stratified
+# detail); switch to ~40 if you select the batched/classic samplers.
+cutouts: 16
 cut_pow: 2.1
 
 border_mode: wrap
