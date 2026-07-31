@@ -1220,6 +1220,25 @@ cutout_sampler:
     and probabilities as the classic kornia stack, ~11x faster). Same-size
     perceptors share one cutout batch. Classic is kept as the legacy preset.
 
+perceptor_backend:
+  label: PERCEPTOR BACKEND
+  type: CHOICE
+  section: null
+  group: seeing
+  hint: >-
+    mlx = run CLIP towers on Apple Metal in fp16 — ~1.75x step rate.
+    macOS only; classic ViT towers only. torch = works everywhere.
+  prose: >-
+    Which engine runs the CLIP towers. The mlx backend executes the vision
+    towers and prompt losses on Apple's MLX framework in fp16, measured
+    ~1.75x faster end-to-end on Apple Silicon with gradient parity 0.998+
+    against the torch path. Only the classic ViT towers (ViT-B/32, B/16,
+    L/14, L/14-336) are supported — selecting ResNet or modern towers with
+    mlx errors on purpose. Image prompts, semantic masks, and semantic
+    stabilization are torch-only for now.
+  costNote: >-
+    Free speedup on Apple Silicon for text-prompt still renders.
+
 optimizer:
   label: OPTIMIZER
   type: CHOICE
