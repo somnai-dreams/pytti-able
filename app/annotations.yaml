@@ -1233,18 +1233,23 @@ perceptor_backend:
   section: null
   group: seeing
   hint: >-
-    mlx = run CLIP towers on Apple Metal in fp16 — ~1.75x step rate.
-    macOS only; classic ViT towers only. torch = works everywhere.
+    mlx_full = whole step on Apple Metal (fastest, stills only);
+    mlx = towers on Metal (covers animation); torch = everything,
+    every platform.
   prose: >-
-    Which engine runs the CLIP towers. The mlx backend executes the vision
-    towers and prompt losses on Apple's MLX framework in fp16, measured
-    ~1.75x faster end-to-end on Apple Silicon with gradient parity 0.998+
-    against the torch path. Only the classic ViT towers (ViT-B/32, B/16,
-    L/14, L/14-336) are supported — selecting ResNet or modern towers with
-    mlx errors on purpose. Image prompts, semantic masks, and semantic
-    stabilization are torch-only for now.
+    Which engine runs the render step. mlx_full runs the ENTIRE still-image
+    step (image decode, cutouts, augs, CLIP towers, losses, Adam) on Apple's
+    MLX framework as one compiled graph — the fastest option, biggest win at
+    draft sizes. Requires macOS, stills, Limited/Unlimited Palette, the
+    batched or smart sampler, plain adam, and classic ViT towers. mlx runs
+    just the towers + prompt losses on Metal (~1.75x) and also covers
+    animation and VQGAN. torch is the reference engine: everything, every
+    platform. Unsupported configs fail at startup naming the backend to
+    switch to; backups and restores are compatible across all three. Note:
+    the same seed renders a different (equally good) image on MLX backends —
+    different random stream.
   costNote: >-
-    Free speedup on Apple Silicon for text-prompt still renders.
+    Free speedup on Apple Silicon; mlx_full is fastest for stills.
 
 optimizer:
   label: OPTIMIZER
