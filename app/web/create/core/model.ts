@@ -8,7 +8,7 @@
 // surface.
 //
 // types:
-//   Tile, Pending, Composer, Lightbox, CreateState … (spec §4 verbatim)
+//   Tile, Pending, Composer, Lightbox, MaskEditor, CreateState … (spec §4 + §15.3)
 //   SseEvent   — tagged union produced by core/api parseSseEvent
 //   FollowUp   — 'none' | fetch-session (unknown id: fetch+insert) | fetch-fail-excerpt
 //                | download-and-refresh (encode done)
@@ -19,6 +19,14 @@
 //                                               clears pending when it claims pending.id
 //   removeTile(state, id)                       + closes a lightbox showing it
 //   showToast(state, text, now)                 expiresAt = now + feel.toastMs
+//   openMaskEditor(state) -> boolean            §15.7 open transition: closes the popover;
+//                                               false (no-op) without a ready attachment OR
+//                                               while already open — re-entry must never
+//                                               replace an editor holding unsaved strokes
+//   dropUnreadableMask(state)                   §15.7: unreadable existing mask -> init.mask
+//                                               = null in the same transition as the
+//                                               'starting blank' toast, so the dead path
+//                                               cannot ride an invert-only SAVE or submit
 //   applyStateEvent(state, ev, nowEpoch) -> FollowUp
 //   applyProgressEvent(state, ev)               telemetry fields only (substate belongs to
 //                                               state events); unknown ids ignored
@@ -29,11 +37,13 @@
 //                                               tile (Q3 shape) — never lies about a slot
 //   reconcileSessions(state, fresh)             fresh wins; live carries over for ids
 //                                               still rendering; detail carries always;
-//                                               closes lightbox/confirm on dropped ids
+//                                               closes lightbox/delete-confirm on dropped
+//                                               ids (discard-mask survives a resync)
 // @/cs
 import type { SwipeDirection } from '@kit/reel-strip/core'
 import type { Env } from '@kit/env/core'
 import { feel } from './feel'
+import type { InitAttachment } from './init'
 import type { AspectId, LookId, QualityId, SeedMode } from './presets'
 
 export type SessionState = 'rendering' | 'stopped' | 'done' | 'failed' | 'imported'
@@ -102,7 +112,18 @@ export type Composer = {
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
+  init: InitAttachment | null // the image attachment (§15.3); strength null only in tweak
   popoverOpen: boolean
+}
+
+// The paint surface's control state (§15.7). The PIXELS are dom scratch beside the
+// store (an offscreen canvas at image resolution), never state.
+export type MaskEditor = {
+  brushSize: number // px in view space, feel.maskBrushMin..Max
+  mode: 'paint' | 'erase'
+  inverted: boolean // initialized from init.mask?.inverted ?? false; '-' applied at compose
+  dirty: boolean // any stroke/clear since open (drives the Esc confirm)
+  saving: boolean // upload in flight; SAVE disabled meanwhile
 }
 
 export type Lightbox = {
@@ -156,7 +177,8 @@ export type CreateState = {
   lastRun: { values: Record<string, unknown>; forkOf: string | null; seedLocked: boolean } | null
   lastSeed: number | null // most recent seed returned by POST; seeds the locked toggle
   lightbox: Lightbox | null
-  confirm: { kind: 'delete'; sessionId: string } | null
+  maskEditor: MaskEditor | null // §15.7; non-null implies composer.init != null
+  confirm: { kind: 'delete'; sessionId: string } | { kind: 'discard-mask' } | null
   toast: { text: string; expiresAt: number } | null
   download: { jobId: string; sessionId: string; framesDone: number; framesTotal: number } | null
   sse: { phase: 'connecting' | 'open' | 'retrying' }
@@ -182,6 +204,36 @@ export function findTile(tiles: readonly Tile[], id: string): Tile | null {
 
 export function showToast(state: CreateState, text: string, now: number): void {
   state.toast = { text, expiresAt: now + feel.toastMs }
+}
+
+// §15.7 open transition. The false branches mirror disabled affordances (no attachment /
+// still uploading -> the chip disables MASK) plus the re-entry guard: the MASK button can
+// still be activated at open time (Space/Enter while it holds focus), and a re-open would
+// replace the editor object — unsaved strokes wiped past the discard confirm.
+export function openMaskEditor(state: CreateState): boolean {
+  if (state.maskEditor != null) return false
+  const init = state.composer.init
+  if (init == null || init.image.kind !== 'ready') return false
+  state.composer.popoverOpen = false // mutual exclusion by construction (§15.7)
+  state.maskEditor = {
+    brushSize: feel.maskBrushDefault,
+    mode: 'paint',
+    inverted: init.mask != null && init.mask.inverted,
+    dirty: false,
+    saving: false,
+  }
+  return true
+}
+
+// §15.7's fail-soft ('existing mask not readable — starting blank') completed at the state
+// layer: the unreadable PNG's path must not stay on init.mask, or an invert-only SAVE or a
+// clean close re-emits the dead path into the next submit. One transition — what the user
+// sees (blank canvas, no mask) is what submits.
+export function dropUnreadableMask(state: CreateState): void {
+  if (state.maskEditor == null) throw new Error('dropUnreadableMask outside an open mask editor')
+  const init = state.composer.init
+  if (init == null) throw new Error('mask editor open without an attachment (unreachable by construction)')
+  init.mask = null
 }
 
 // Insert by startedAt desc (the server list order); a tile with the same id is replaced
@@ -386,5 +438,9 @@ export function reconcileSessions(state: CreateState, fresh: Tile[]): void {
   }
   state.tiles = fresh
   if (state.lightbox != null && findTile(fresh, state.lightbox.sessionId) == null) state.lightbox = null
-  if (state.confirm != null && findTile(fresh, state.confirm.sessionId) == null) state.confirm = null
+  // The confirm-close rule applies to 'delete' only — a discard-mask confirm has no
+  // session and survives a resync (§15.3).
+  if (state.confirm != null && state.confirm.kind === 'delete' && findTile(fresh, state.confirm.sessionId) == null) {
+    state.confirm = null
+  }
 }

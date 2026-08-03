@@ -18,11 +18,14 @@
 //   parseSchemaFields(raw) -> string[]               GET /api/schema (field names only)
 //   parseStartResult(status, raw) -> StartResult     POST /api/sessions 201/202/400
 //   parseEncodeStart(raw) -> jobId                   POST /api/sessions/{id}/encode 201
+//   parseUploadResult(raw) -> abs path               POST /api/uploads 200 {"path": ...}
 //   parseErrorBody(raw) -> string                    any {"error": ...} body
 //   parseSseEvent(type, raw) -> SseEvent             tagged union over the 5 consumed
 //     event streams (state splits into live/terminal); unknown type throws
 //   frameUrl(id, index) / thumbUrl(id, index)        1-based, index >= 1 asserted
 //   artifactUrl(id, name)
+//   uploadUrl(absPath)                               GET /api/uploads?path= — the server
+//     owns "what is an upload" (anything outside app/uploads/ 404s; §15.2)
 // @/cs
 import type {
   Artifact,
@@ -233,6 +236,13 @@ export function parseEncodeStart(raw: unknown): string {
   return asString(r['jobId'], 'encode.jobId')
 }
 
+export function parseUploadResult(raw: unknown): string {
+  const r = asRecord(raw, 'POST /api/uploads 200 body')
+  const path = asString(r['path'], 'upload.path')
+  if (path === '') throw new Error('upload.path: empty — the server upload route is broken')
+  return path
+}
+
 export function parseSseEvent(type: string, raw: unknown): SseEvent {
   switch (type) {
     case 'state': {
@@ -320,4 +330,10 @@ export function thumbUrl(id: string, index: number): string {
 
 export function artifactUrl(id: string, name: string): string {
   return `/api/sessions/${id}/artifacts/${encodeURIComponent(name)}`
+}
+
+// Display route for uploaded files (init thumbs, existing masks). Validity is the
+// SERVER's call — a path outside app/uploads/ 404s and the surface degrades (§15.8).
+export function uploadUrl(absPath: string): string {
+  return `/api/uploads?path=${encodeURIComponent(absPath)}`
 }

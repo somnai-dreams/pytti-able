@@ -192,6 +192,8 @@ Rules of the split, applied:
   key listeners, `window.open`.
 - Env facts enter core as the `Env` snapshot (kit/env), read once in `main.ts`,
   re-read only by `watchEnv`'s listener set.
+- §15.3 adds `core/init.ts`, `core/mask.ts` (+ tests) and `dom/renderMask.ts`
+  for the image-input feature.
 
 ---
 
@@ -299,6 +301,8 @@ type CreateState = {
 
 Data-modeling notes (binding):
 
+- §15.3 adds `composer.init` (the image attachment) and `state.maskEditor`; the
+  confirm union gains a `discard-mask` kind. Additive only — nothing above changes.
 - `tiles` is a flat array, single source of truth. Lookups are linear scans
   (`findTile(tiles, id)` in core) — hundreds of sessions × ≤2 events/s is nothing;
   no `byId` map, no denormalized ordering.
@@ -384,6 +388,12 @@ in the **dom** layer (the one `Math.random` in the app — core receives it as
 data). The pinned value is displayed read-only next to the toggle. Re-pinning =
 toggle random → locked again. Every POST response's `seed` updates
 `state.lastSeed`.
+
+### 5.5 Image input
+
+§15.6 amends `composeDraft`/`matchPresets` with the init-image fields
+(`init_image`, `direct_init_weight`, `semantic_init_weight`, `perceptor_backend`),
+emitted **only** when an image is attached.
 
 ---
 
@@ -685,6 +695,10 @@ CSS: centered, `feel.barMaxX` wide), not measured; `placeAtCursor` is not needed
 dismisses exactly that one. Toasts are not Esc-dismissable; they expire via the
 wake loop (`feel.toastMs = 4000`).
 
+§15.7 inserts `zMaskEditor` between `zPopover` and `zConfirm`, adds a
+`mask-editor` `CreateView` variant, and extends `topmostDismissable` to
+`confirm` → `mask-editor` → `popover` → `lightbox` → `null`.
+
 ### 9.2 Keyboard (`core/keys.ts`)
 
 `KeyFacts = { key, meta, ctrl, inInput }` (dom builds it from the event; `meta`
@@ -968,6 +982,9 @@ Draft/1:1 so each finishes in ~1 minute on this machine.
     the page loads no framework (no react/vue/etc. in the bundle or network
     panel).
 
+Items 33–48 (image input + mask, §15) continue this list in §15.11. Item 5's
+"exactly four rows" holds only while no image is attached — see §15.5.
+
 ---
 
 ## 14. Known + accepted caveats
@@ -982,3 +999,504 @@ Reviewed, deliberately not fixed — each is transient and self-resolving:
   resurrect a `STARTING` pending tile for a session that already started or finished;
   the starting-grace deadline (`feel.startingGraceMs`, 15 s) drops it — self-heals,
   no user action needed.
+
+---
+
+## 15. Image input — init attachment + mask (added 2026-08-03)
+
+**Status: binding**, same authority as the rest of this document. This section is
+additive: §§4–13 stand as written except where an "amends" note below says
+otherwise. The lead's rulings (attach-on-bar, INIT row presets, hold-meaning
+toggle + torch pin, paint-surface mask with white-equals-hold semantics, tweak/re-run
+rematerialization, no-empty-init-keys, error states) are restated here as spec.
+
+### 15.1 Engine contract (verified against pytti-core, read-only checkout)
+
+- `init_image` is a plain `str` path (`structured_config.py` line 51, default
+  `""`). The engine stretches it to `width × height` — attaching an image does
+  **not** auto-switch the aspect preset; matching them is the user's call (no
+  silent state changes).
+- `direct_init_weight` / `semantic_init_weight` are `str` weight expressions
+  (lines 52–53, default `""`). Weight fields support the `weight_mask` grammar
+  (`prompt_spec.py` `parse_weight_spec` line 145 / `parse_mask_token` line 119):
+  `"<weight>_[<abs path>]"`, with a `-` **inside the bracket** prefixing the path
+  for inversion — `"0.3_[-/abs/mask.png]"` (line 126–128). A third `_` field is a
+  cutoff expression; Create never emits one.
+- Mask semantics: the mask PNG is opened `convert("L")` and **multiplies the
+  direct loss**; inversion is `1 - mask` (`MSELossClass.py` lines 72, 106). So
+  **white = the init holds there**, black = free to diverge. UI copy must say
+  this plainly.
+- `semantic_init_weight` builds an image-embedding prompt
+  (`LossOrchestratorClass.py` line 71) and **requires `perceptor_backend:
+  torch`** — both mlx backends fail loud on it by design. Plain direct init +
+  image mask runs fine on the default `mlx_full` (the M2 MSE port includes mask
+  semantics).
+- Preflight already validates `init_image` existence server-side (`server.py`
+  line 380 path-field loop) — a vanished upload becomes the existing A1 preflight
+  toast, no new client check needed.
+
+### 15.2 Server prerequisites — S3 (REQUIRED)
+
+Uploads live in `app/uploads/` and are referenced by **absolute path**.
+
+- **Reuse** `POST /api/uploads` (`server.py` `_post_upload`, line 1522):
+  multipart/form-data, first file part is saved under `UPLOADS_DIR` with a
+  sanitized name, name collisions dedupe as `stem-N.suffix` (so an upload path
+  is never overwritten — upload URLs are immutable). Responds `200 {"path":
+  "<abs path>"}` (note: 200, not 201). Errors are the standard `{error}` body.
+- **Add** a read route (nothing serves `app/uploads/` today — `do_GET` only
+  serves `STATIC_DIR` and session subresources; tweak rematerialization needs to
+  display a previously-uploaded image). House style follows `/api/browse`'s
+  query-param path (line 1342) and the static branch's containment check
+  (line 1358):
+
+  ```python
+  elif path == "/api/uploads":
+      qs = urllib.parse.parse_qs(parsed.query)
+      target = Path(qs.get("path", [""])[0]).expanduser().resolve()
+      if target.parent == UPLOADS_DIR.resolve() and target.is_file():
+          self._send_file(target, immutable=True)  # mime guessed; names never reused
+      else:
+          self._json(404, {"error": "not an upload"})
+  ```
+
+  The **server** owns "what is an upload" — the client never path-matches
+  against a directory heuristic. Any path outside `UPLOADS_DIR` (including
+  bench-browsed init images from tweak bases) is a 404; the client degrades per
+  §15.8.
+
+No other server change.
+
+### 15.3 State additions (`core/model.ts`) and new files
+
+```ts
+// core/init.ts (string domain — outside freerange's numeric subset; init.test.ts
+// is the checked surface)
+type InitStrengthId = 'subtle' | 'medium' | 'strong'   // 0.15 / 0.3 / 0.6
+
+type InitImage =
+  | { kind: 'uploading'; name: string; localUrl: string }
+  | { kind: 'ready'; name: string; path: string; localUrl: string | null }
+    // localUrl: object URL when attached this session (created/revoked by dom —
+    //   it enters core as boundary data, like `now`); null when rematerialized
+    //   from a tweak base (display goes through uploadUrl(path), §15.8)
+
+type InitMask = { path: string; inverted: boolean }    // abs path of the mask PNG upload
+
+type InitAttachment = {
+  image: InitImage
+  strength: InitStrengthId | null   // null = CUSTOM — inherit the base's weight
+                                    //   expression; reachable ONLY while tweak != null
+                                    //   (mirrors aspect/quality/look, §4)
+  holdMeaning: boolean              // semantic_init_weight + torch pin (§15.6)
+  mask: InitMask | null
+}
+
+// core/model.ts
+Composer gains:      init: InitAttachment | null
+CreateState gains:   maskEditor: MaskEditor | null          // §15.7
+confirm widens to:   { kind: 'delete'; sessionId: string }
+                   | { kind: 'discard-mask' }               // §15.7 Esc guard
+```
+
+`reconcileSessions`'s confirm-close rule applies to `kind: 'delete'` only —
+`discard-mask` has no session and survives a resync.
+
+No mirrors: the tweak base's `direct_init_weight` string is **derived at need**
+from `composer.tweak.baseValues` via `parseInitWeight` (§15.6), never copied into
+`InitAttachment`.
+
+New files (extends the §3 tree):
+
+```
+create/core/init.ts        # strength table; parseInitWeight/formatInitWeight (the
+                           #   weight_mask codec, Create's subset); matchStrength;
+                           #   deriveInitFromBase (tweak rematerialization)  [+ .test.ts]
+create/core/mask.ts        # PURE editor geometry (freerange numeric subset, pinned in
+                           #   fr-audit.ts): viewToImage pointer mapping, strokeStamps
+                           #   interpolation, brush-size clamp. Fit rect comes from
+                           #   kit/midui fit — not re-derived here.        [+ .test.ts]
+create/dom/renderMask.ts   # the paint surface: canvases, pointer strokes, PNG export
+```
+
+`dom/net.ts` gains `uploadFile(data: File | Blob, name: string)` →
+`POST /api/uploads` (FormData) → parsed by `core/api.ts` `parseUploadResult(raw)
+-> string` (the abs path). `core/api.ts` also gains `uploadUrl(absPath) ->
+string` = `'/api/uploads?path=' + encodeURIComponent(absPath)` (the server
+decides validity, §15.2).
+
+New `feel.ts` constants: `chipThumbSize: 28`, `maskBrushDefault: 48`,
+`maskBrushMin: 8`, `maskBrushMax: 160`, `maskStampSpacingFrac: 0.25` (stamp
+interval as a fraction of brush size), `maskEditorMargin: 24`,
+`maskToolbarY: 56`.
+
+### 15.4 Attaching — bar button, drag-drop, paste (amends A1's guard list)
+
+Three attach routes, one result:
+
+1. **⊕ button** on the bar (left of ⚙): opens a file picker
+   (`accept="image/png,image/jpeg,image/webp,image/bmp"` — the suffixes
+   `parse_mask_token` recognizes, minus mp4).
+2. **Drag-drop onto the bar**: the bar (only the bar, not the whole page) is the
+   drop target; dragover shows an accent inset ring.
+3. **Paste** while the bar is focused: first image item of the clipboard.
+
+Non-image payloads are ignored silently at all three (a text paste must keep
+working as text — this is an input-type boundary, not an error).
+
+Attach flow (dom): create an object URL → `composer.init = { image: { kind:
+'uploading', name, localUrl }, strength: 'medium', holdMeaning: false, mask:
+null }` → the chip renders this frame → `uploadFile(...)`. On `200` → `image =
+{ kind: 'ready', path, name, localUrl }`. On any failure (non-200, network) →
+toast `parseErrorBody` (or `upload failed`), `composer.init = null`, revoke the
+object URL (ruling 6). Attaching while a chip exists **replaces** it (old object
+URL revoked, mask cleared — a new image invalidates a mask painted on the old
+one).
+
+**Chip anatomy** (in the bar, between the input and ⚙): `[28px thumb] MASK ✕`.
+Thumb from `localUrl` (fresh) or `uploadUrl(path)` (rematerialized). `✕` →
+`composer.init = null` — clears chip, mask, and INIT row in one gesture
+(ruling 6). `MASK` opens the paint surface (§15.7); it is disabled while `image.
+kind === 'uploading'`, when the thumb failed to load (§15.8), or when the tweak
+base's weight is opaque (§15.6). A saved mask renders the affordance as
+`MASK ✓`.
+
+**A1 guard addition**: submitting while `init.image.kind === 'uploading'` →
+toast `image still uploading`, no optimistic tile, stop. **Bar-clear rule
+extension** (A1 step 4): clearing the bar resets the *whole* composer — tweak
+AND attachment (chip, mask, INIT row) — so `strength: null` stays unreachable
+outside tweak mode, mirroring the aspect/quality invariant.
+
+### 15.5 INIT row (settings popover — amends §10.2 and checklist item 5)
+
+The row exists **iff** `composer.init != null` (the popover has four rows
+without an attachment, five with — item 5 is amended accordingly):
+
+```
+   ┌─────────────────────────────────────────────┐
+   │ ASPECT   [1:1] [3:4] [4:3] [16:9]           │
+   │ QUALITY  [DRAFT] [STANDARD] [DEEP]          │
+   │ LOOK     [LIMITED] [UNLTD] [VQGAN]          │
+   │ SEED     [⚄ RANDOM] [🔒 3982117]            │
+   │ INIT     [SUBTLE] [MEDIUM] [STRONG]  ◈ HOLD │
+   │          torch engine                       │  ← note, only while HOLD is on
+   └─────────────────────────────────────────────┘
+```
+
+- Strength chips map to `direct_init_weight` `0.15 / 0.3 / 0.6`; **medium is the
+  default** on attach. In tweak mode the row may show `[CUSTOM]` selected
+  (`strength: null`, §15.6) — same convention as §5.3.
+- `◈ HOLD` ("hold meaning") toggle: **on** → the submission carries
+  `semantic_init_weight: '0.3'` **and pins `perceptor_backend: 'torch'`**, and
+  the row shows a small dim `torch engine` note. **Off** → it pins *nothing* —
+  neither key is emitted; the backend rides the default (fresh) or the tweak
+  base (tweak).
+- Popover edits still touch `composer` only — no network (A11 unchanged).
+
+### 15.6 `composeDraft` changes (`core/presets.ts` + `core/init.ts`)
+
+`ComposerDraftInput` gains `init: InitDraftInput | null`:
+
+```ts
+type InitDraftInput = {
+  path: string                     // image.kind must be 'ready' (A1 guard, §15.4)
+  strength: InitStrengthId | null
+  holdMeaning: boolean
+  mask: InitMask | null
+}
+```
+
+`DraftPayload` is unchanged in shape — the init fields ride inside `values`.
+
+The codec (`core/init.ts`), Create's subset of the engine grammar:
+
+```ts
+formatInitWeight(weight: string, mask: InitMask | null): string
+  // mask == null → weight;  else `${weight}_[${mask.inverted ? '-' : ''}${mask.path}]`
+
+parseInitWeight(raw: string):
+  | { kind: 'none' }                        // '' or a plain-number zero
+  | { kind: 'simple'; weight: string; mask: InitMask | null }
+    // plain weight expr, optionally one bracketed image-path mask (either '-' position)
+  | { kind: 'opaque'; raw: string }         // cutoff field, video/semantic/geometric
+                                            //   masks, anything else bench-authorable
+
+matchStrength(weight: string): InitStrengthId | null   // exact match on the three
+  // preset values (plain-number strings only) — no nearest-neighbor, per §5.3 doctrine
+```
+
+**Fresh** (`tweak == null`, `init != null`) — `strength` must be concrete (throw
+on null: caller-contract violation, unreachable per §15.4's bar-clear rule).
+`values` gains:
+
+- `init_image: init.path`
+- `direct_init_weight: formatInitWeight(STRENGTH[init.strength], init.mask)`
+- iff `holdMeaning`: `semantic_init_weight: '0.3'` **and**
+  `perceptor_backend: 'torch'`
+
+`init == null` → **none of the four keys appear** (ruling 5: never emit
+empty-string init keys; schema defaults cover absence). Fresh submissions still
+pin `animation_mode: 'off'` exactly as before.
+
+**Tweak** (`tweak != null`) — base values ride, overrides only where the
+composer differs from the base (`base = parseInitWeight(String(
+baseValues['direct_init_weight'] ?? ''))`, `baseOn = semantic_init_weight` not
+in `{'', '0'}`):
+
+- `init == null` (user removed the chip): `delete` `init_image`,
+  `direct_init_weight`, `semantic_init_weight` from `values` (the draft merge
+  restores schema defaults — same mechanism as random-seed's `delete`).
+  `perceptor_backend` is left untouched (a base's deliberate backend choice is
+  not Create's to revert).
+- `init != null`:
+  - `values['init_image'] = init.path` (unconditional — cheap, correct).
+  - **direct**: if `strength == null` AND the mask state equals the base's
+    (`simple` with same path+inverted, or untouched `opaque`) → **no override**,
+    the base string rides verbatim (this is how an opaque base — cutoffs, video
+    masks — survives a tweak untouched). Otherwise compose:
+    `weight = strength != null ? STRENGTH[strength] : base.weight` (base is
+    `simple` here by construction — mask editing is disabled on opaque bases,
+    §15.4 — assert it), `values['direct_init_weight'] =
+    formatInitWeight(weight, init.mask)`. A base cutoff does not survive a
+    recompose — accepted, documented here.
+  - **semantic**: `holdMeaning === baseOn` → no override (a non-0.3 base value
+    rides verbatim). Toggled on → `values['semantic_init_weight'] = '0.3'`.
+    Toggled off → `delete values['semantic_init_weight']`.
+  - **backend**: `holdMeaning` → `values['perceptor_backend'] = 'torch'`
+    (unconditional when on — covers legacy/imported bases whose snapshot lacks a
+    backend); off → untouched.
+
+`matchPresets` is **not** widened — init has its own reverse map,
+`deriveInitFromBase(baseValues)` (§15.8). `composerDims` is unaffected (an init
+never changes dims).
+
+### 15.7 The mask editor (paint surface)
+
+**Surface.** Toplayer, lightbox-class scrim. §9.1 amendments:
+
+```ts
+let d = 1
+export const zLightbox = d++
+export const zPopover = d++
+export const zMaskEditor = d++   // opens from the bar chip; opening it closes the
+export const zConfirm = d++      //   popover (mutual exclusion by construction —
+export const zToast = d++        //   same convention as popover/lightbox)
+
+CreateView gains        { type: 'mask-editor' }
+confirm view widens to  { type: 'confirm'; kind: 'delete' | 'discard-mask'; ... }
+topmostDismissable:     confirm → mask-editor → popover → lightbox → null
+```
+
+The mask editor is unreachable without an image by construction (its only
+entry point is the chip's MASK affordance — ruling 6's "mask without an image"
+state cannot occur).
+
+**State.**
+
+```ts
+type MaskEditor = {
+  brushSize: number                 // px in view space, feel.maskBrushMin..Max
+  mode: 'paint' | 'erase'
+  inverted: boolean                 // initialized from init.mask?.inverted ?? false
+  dirty: boolean                    // any stroke/clear since open (drives the Esc confirm)
+  saving: boolean                   // POST in flight; SAVE disabled meanwhile
+}
+```
+
+The **pixels are dom scratch**, not state (precedent: springs, node caches): an
+offscreen `<canvas>` at the image's **natural resolution** beside the store,
+plus its on-screen projection. Opening with an existing mask draws
+`uploadUrl(mask.path)` onto the canvas first. Load failure fail-softs — toast
+`existing mask not readable — starting blank`, blank canvas — **and drops
+`init.mask` in the same transition** (core `dropUnreadableMask`): a dead path
+left on the composer would ride an invert-only SAVE or the next submit, and
+what the user sees (blank, no mask) must be what submits.
+
+**Geometry (core/mask.ts — pure, numeric, freerange-pinned).** The image renders
+at fit size: `fit(imgAspect, viewX - 2*feel.maskEditorMargin, viewY -
+2*feel.maskEditorMargin - feel.maskToolbarY)` from kit/midui — core/mask.ts does
+not re-derive fitting. It owns:
+
+- `viewToImage(px, py, fitRect, imgSizeX, imgSizeY) -> {x, y}` — pointer to
+  image-pixel space (the canvas paints at image resolution; brush size scales by
+  the same factor).
+- `strokeStamps(fromX, fromY, toX, toY, spacing) -> number[]` (flat x,y pairs) —
+  stamp interpolation so fast drags leave no gaps; `spacing =
+  brushSize * feel.maskStampSpacingFrac`, guard-derived per freerange.
+- `clampBrushSize(raw) -> number`.
+
+**Painting (dom/renderMask.ts).** Pointer strokes stamp white circles
+(`mode: 'paint'`) or punch to black (`'erase'`, `destination-out` onto the
+black-filled base). On-screen, the **hold region is tinted accent (~55%)** over
+the dimmed image; `INVERT` flips *which region shows the tint* — the overlay
+always shows where the init holds, and the toggle only flips
+`maskEditor.inverted` (exported PNG is identical; the `-` goes inside the
+bracket at compose time). Toolbar: `PAINT · ERASE · INVERT · CLEAR ·
+brush-size slider` + (`REMOVE MASK` iff `init.mask != null`) + `SAVE` + header
+copy, plainly: **"paint where the image should hold — tinted = held"**.
+
+**Save.** Composite the canvas onto black → white-on-black PNG blob at image
+resolution (engine `convert("L")`s it) → one `getImageData` scan: if no pixel
+> 0 → toast `mask is empty — paint where the image should hold`, stay open.
+Else `uploadFile(blob, 'mask-' + imageStem + '.png')` (`saving: true`) → 200 →
+`init.mask = { path, inverted }`, `maskEditor = null`. Failure → toast, editor
+**stays open** (painted work is never destroyed by a network error).
+**Invert-only edit** (existing mask, no strokes): SAVE skips the re-upload and
+just flips `init.mask.inverted` on the existing path. `REMOVE MASK` → `init.mask
+= null`, close.
+
+**Keyboard & focus containment (amends §9.2's scope table, not `keyIntent`).**
+No new bindings — the tools are pointer-only; the intent map is unchanged.
+Scope rule: while `maskEditor != null`, **only the editor's own controls and
+the surfaces above it (discard confirm, toast) act.** Three mechanisms
+enforce that — the intent guard alone was not containment, because Tab and
+native Space/Enter activation are not in the intent map:
+
+- the dom dispatcher acts on `dismiss` **only** (submit, rerun-last,
+  focus-prompt, frame-prev/next are inert);
+- the background shell (bar + popover, gallery, lightbox, header link, boot
+  surfaces) is `inert` while the editor is open, projected from
+  `maskEditor != null` each frame — the scrim only blocks pointers; `inert`
+  also removes tab focus and keyboard activation;
+- the element focused at open (the MASK chip, on a keyboard activation) is
+  blurred, and opening is a **state no-op while the editor is already open**
+  (core `openMaskEditor` returns false) — re-entry must never replace an
+  editor holding unsaved strokes.
+
+Esc layering:
+
+- `dirty && !saving` → `confirm = { kind: 'discard-mask' }` (surface above the
+  editor). Its CONFIRM → `maskEditor = null` (chip's previous mask state
+  untouched); CANCEL/Esc → closes only the confirm, editor intact.
+- `!dirty` → `maskEditor = null` immediately.
+- Outside-click on the scrim follows the same rule as Esc.
+
+### 15.8 Tweak / Re-run rematerialization (amends A3, A4)
+
+Fork snapshots already carry `init_image` / `direct_init_weight` /
+`semantic_init_weight`, and all three are schema fields — so they pass
+`draftableValues` and ride A3/A2 **verbatim with zero new code**: Re-run and
+Cmd+Enter replay the init exactly (only the seed differs on A3, per its design).
+
+**A4 (Tweak) gains one step** — after `matchPresets`, derive the attachment
+(`core/init.ts deriveInitFromBase(baseValues) -> InitAttachment | null`):
+
+- `init_image` empty → `init = null` (no chip). Else chip with `image = { kind:
+  'ready', path, name: basename, localUrl: null }` — thumb via
+  `uploadUrl(path)`.
+- `strength = matchStrength(base.weight)` when `parseInitWeight` says `simple`
+  (miss → `null` = CUSTOM chip); `opaque` → `null` + MASK affordance disabled
+  (title: `bench-authored weight — attach a new image to repaint`). Picking a
+  concrete strength on an opaque base recomposes from composer state per §15.6
+  (the opaque tail is deliberately dropped).
+- `mask` from the `simple` parse's bracket token (path + inverted); `holdMeaning
+  = baseOn`.
+- Display degradation is the **server's** call (§15.2): a base `init_image`
+  outside `app/uploads/` 404s → the chip thumb's `onerror` (node-cache fact,
+  like gallery thumb loads) renders a thumbless basename chip and disables MASK
+  — strength/hold/submit all still work, and an untouched weight string rides
+  verbatim.
+
+The chip persists across a tweak submit (same as tweak itself, A1 step 4);
+clearing the bar clears it (§15.4).
+
+### 15.9 Error and empty states (ruling 6, consolidated)
+
+| state | behavior |
+|---|---|
+| upload failure (attach) | toast; chip cleared; object URL revoked (§15.4) |
+| upload failure (mask save) | toast; editor stays open, painting preserved (§15.7) |
+| submit while image uploading | toast `image still uploading`; no optimistic tile |
+| mask without an image | unreachable by construction (§15.7) |
+| remove image (chip ✕) | clears chip + mask + INIT row in one gesture |
+| empty (all-black) mask save | toast; editor stays open (§15.7) |
+| init file deleted before submit | server preflight 400 → existing A1 toast path (§15.1) |
+| tweak-base image not an upload | thumbless chip, MASK disabled; weight rides verbatim (§15.8) |
+| stale mask thumb/PNG unreadable | fail-soft: thumbs degrade at the display boundary (§15.8); in the editor the unreadable mask also drops `init.mask` (§15.7) — never blocks submit |
+
+### 15.10 Wireframes
+
+Bar with chip (extends §10.1):
+
+```
+   ┌────────────────────────────────────────────────────────────────┐
+   │ ⌕  overgrown cathedral, dawn light   ┌──┐ MASK ✓ ✕   ⊕  ⚙  ▶  │
+   │                                      │▒▒│                      │
+   └────────────────────────────────────  └──┘  ────────────────────┘
+        chip: 28px thumb · MASK affordance (✓ when saved) · ✕ remove
+```
+
+Mask editor (toplayer, lightbox-class):
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ████████████████████████████ scrim ████████████████████████████████████████│
+│   paint where the image should hold — tinted = held                        │
+│                ┌───────────────────────────────┐                           │
+│                │            image              │                           │
+│                │      ▓▓▓▓ (accent tint =      │                           │
+│                │      ▓▓▓▓▓▓  hold region)     │                           │
+│                │         ▓▓▓                   │                           │
+│                └───────────────────────────────┘                           │
+│   [PAINT] [ERASE] [INVERT] [CLEAR]  brush ●───────  [REMOVE MASK] [SAVE]   │
+└────────────────────────────────────────────────────────────────────────────┘
+  Esc: dirty → discard confirm; clean → close · wheel/keys inert while open
+```
+
+### 15.11 Acceptance checklist additions (continues §13; same environment rules)
+
+33. Attach via the bar's ⊕ file picker: the chip appears with a thumbnail, ✕,
+    and MASK affordance; the network panel shows one `POST /api/uploads`
+    returning a path under `app/uploads/`; the popover now shows the INIT row
+    (MEDIUM selected, HOLD off, no torch note).
+34. Drag-drop an image file onto the bar and paste an image from the clipboard
+    each produce the same chip + INIT row. Dropping/pasting non-image data does
+    nothing (no chip, no request, no console error).
+35. With the 7911 server killed, attaching toasts the failure and clears the
+    chip (no INIT row remains); after restart, re-attaching works.
+36. ⚑ Submit with an attached image at MEDIUM: `GET /api/draft` (7911) shows
+    `init_image` = the absolute upload path and `direct_init_weight` `"0.3"`,
+    and **no** `semantic_init_weight` / `perceptor_backend` keys among the
+    stored overrides; the render completes on the default backend and frame 1
+    visibly starts from the attached image.
+37. SUBTLE and STRONG submissions carry `direct_init_weight` `"0.15"` /
+    `"0.6"` respectively (bench inspector on the created sessions).
+38. ⚑ HOLD MEANING on: the INIT row shows the `torch engine` note; the
+    submitted config has `semantic_init_weight` `"0.3"` **and**
+    `perceptor_backend` `"torch"`; the render completes.
+39. Submit with no image attached: the stored draft values contain none of
+    `init_image` / `direct_init_weight` / `semantic_init_weight` (keys absent,
+    not empty strings).
+40. MASK opens the paint surface: image at fit size; PAINT tints the stroked
+    region accent; ERASE removes it; the brush-size slider changes stamp
+    diameter; CLEAR wipes; the header copy states painted = where the image
+    holds.
+41. ⚑ SAVE uploads a white-on-black PNG (`POST /api/uploads`, `mask-*.png`),
+    closes the editor, and the chip reads `MASK ✓`; the submitted
+    `direct_init_weight` is `0.3_[/abs/.../mask-*.png]`. With INVERT on, the
+    bracket carries the leading `-`: `0.3_[-/abs/.../mask-*.png]`.
+42. Saving an all-black (empty) mask toasts `mask is empty — paint where the
+    image should hold` and keeps the editor open.
+43. Esc layering: Esc in the editor with unsaved strokes opens the discard
+    confirm; Esc again closes only the confirm (editor + painting intact);
+    CONFIRM discards (editor closes, the chip's previous mask state unchanged).
+    Esc with no strokes closes the editor immediately. `/`, `←`/`→`, Enter and
+    Cmd+Enter are inert while the editor is open.
+44. Removing the image (chip ✕) clears chip, mask, and INIT row in one gesture;
+    clearing the bar does the same (full composer reset). Re-attaching starts
+    fresh: MEDIUM, HOLD off, no mask.
+45. TWEAK on an init session rematerializes the chip (thumb served by
+    `GET /api/uploads?path=…`), the strength chip (or CUSTOM for a non-preset
+    base weight), the HOLD toggle, and `MASK ✓` whose editor re-opens showing
+    the existing painted region; an INVERT-only edit re-submits with the `-`
+    flipped and **no** new upload.
+46. RE-RUN on an init session creates a session whose `init_image` /
+    `direct_init_weight` / `semantic_init_weight` match the source exactly
+    (seed differs); Cmd+Enter after an init submit replays the init keys
+    verbatim.
+47. `curl 'http://127.0.0.1:7911/api/uploads?path=/etc/hosts'` (and any path
+    outside `app/uploads/`) returns 404 `{"error": "not an upload"}`; a real
+    upload path returns the image bytes.
+48. `cd app/web && bun run check` exits 0 with the new core files (`init.ts` +
+    test, `mask.ts` + test with `mask.ts` pinned in `fr-audit.ts`);
+    `app/static/create.js` stays ≤ 100 KB.

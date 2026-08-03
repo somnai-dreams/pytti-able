@@ -1,31 +1,67 @@
 // renderBar.ts — the prompt bar + settings popover projection. The input echoes through
 // renderNow (main wires that); this module only projects latest state each frame. The
 // popover anchors to the bar through the shell CSS (layout data, never measured) and
-// springs open/closed.
+// springs open/closed. §15 additions: the init chip (thumb · MASK · ✕) between the
+// input and the gear, and the INIT row (strength presets + HOLD + torch note) that
+// exists iff an image is attached.
 import { spring, springGoToEnd, springMostlyDone, springStep } from '@kit/midui/motion'
+import { uploadUrl } from '../core/api'
+import { maskEditingLocked } from '../core/init'
 import type { CreateState } from '../core/model'
-import type { AspectId, LookId, QualityId } from '../core/presets'
 
 let promptEl: HTMLInputElement
 let goEl: HTMLButtonElement
+let attachEl: HTMLButtonElement
 let popEl: HTMLElement
 let sseEl: HTMLElement
-let chips: { el: HTMLElement; row: 'aspect' | 'quality' | 'look'; value: string | null }[] = []
+let chips: { el: HTMLElement; row: 'aspect' | 'quality' | 'look' | 'init'; value: string | null }[] = []
 let seedRandomEl: HTMLElement
 let seedLockedEl: HTMLElement
+let initRowEl: HTMLElement
+let initNoteEl: HTMLElement
+let holdEl: HTMLElement
+let chipEl: HTMLElement
+let chipThumbEl: HTMLImageElement
+let chipNameEl: HTMLElement
+let chipMaskEl: HTMLButtonElement
+
+// Thumb load state is a node-cache fact (same as gallery thumbs), never app state.
+let chipSrc = ''
+let chipThumbFailed = false
 
 const pop = spring(0)
 
-export function initBar(els: {
+export function initBar(deps: {
+  scheduleRender: () => void
   prompt: HTMLInputElement
   go: HTMLButtonElement
+  attach: HTMLButtonElement
   popover: HTMLElement
   sse: HTMLElement
+  chip: HTMLElement
+  chipThumb: HTMLImageElement
+  chipName: HTMLElement
+  chipMask: HTMLButtonElement
 }): void {
-  promptEl = els.prompt
-  goEl = els.go
-  popEl = els.popover
-  sseEl = els.sse
+  promptEl = deps.prompt
+  goEl = deps.go
+  attachEl = deps.attach
+  popEl = deps.popover
+  sseEl = deps.sse
+  chipEl = deps.chip
+  chipThumbEl = deps.chipThumb
+  chipNameEl = deps.chipName
+  chipMaskEl = deps.chipMask
+  chipThumbEl.addEventListener('load', () => {
+    chipThumbFailed = false
+    deps.scheduleRender()
+  })
+  chipThumbEl.addEventListener('error', () => {
+    // A base init_image outside app/uploads/ 404s here (§15.8): thumbless basename chip,
+    // MASK disabled — strength/hold/submit all still work.
+    chipThumbFailed = true
+    deps.scheduleRender()
+  })
   chips = []
   for (const el of popEl.querySelectorAll<HTMLElement>('[data-aspect]')) {
     chips.push({ el, row: 'aspect', value: el.dataset['aspect'] === 'custom' ? null : el.dataset['aspect']! })
@@ -36,8 +72,14 @@ export function initBar(els: {
   for (const el of popEl.querySelectorAll<HTMLElement>('[data-look]')) {
     chips.push({ el, row: 'look', value: el.dataset['look'] === 'custom' ? null : el.dataset['look']! })
   }
+  for (const el of popEl.querySelectorAll<HTMLElement>('[data-init-strength]')) {
+    chips.push({ el, row: 'init', value: el.dataset['initStrength'] === 'custom' ? null : el.dataset['initStrength']! })
+  }
   seedRandomEl = mustQuery('[data-seed="random"]')
   seedLockedEl = mustQuery('[data-seed="locked"]')
+  initRowEl = mustQuery('#init-row')
+  initNoteEl = mustQuery('#init-note')
+  holdEl = mustQuery('[data-hold]')
 }
 
 function mustQuery(selector: string): HTMLElement {
@@ -46,7 +88,7 @@ function mustQuery(selector: string): HTMLElement {
   return el
 }
 
-function rowValue(state: CreateState, row: 'aspect' | 'quality' | 'look'): AspectId | QualityId | LookId | null {
+function rowValue(state: CreateState, row: 'aspect' | 'quality' | 'look' | 'init'): string | null {
   switch (row) {
     case 'aspect':
       return state.composer.aspect
@@ -54,16 +96,51 @@ function rowValue(state: CreateState, row: 'aspect' | 'quality' | 'look'): Aspec
       return state.composer.quality
     case 'look':
       return state.composer.look
+    case 'init':
+      return state.composer.init == null ? null : state.composer.init.strength
   }
+}
+
+function renderChip(state: CreateState): void {
+  const init = state.composer.init
+  chipEl.style.display = init == null ? 'none' : ''
+  if (init == null) {
+    if (chipSrc !== '') {
+      chipSrc = ''
+      chipThumbEl.removeAttribute('src')
+      chipThumbFailed = false
+    }
+    return
+  }
+  const image = init.image
+  const src = image.kind === 'uploading' ? image.localUrl : (image.localUrl ?? uploadUrl(image.path))
+  if (src !== chipSrc) {
+    chipSrc = src
+    chipThumbFailed = false
+    chipThumbEl.src = src
+  }
+  chipThumbEl.style.display = chipThumbFailed ? 'none' : ''
+  chipNameEl.style.display = chipThumbFailed ? '' : 'none'
+  chipNameEl.textContent = image.name
+  const tweak = state.composer.tweak
+  const opaqueLocked = tweak != null && maskEditingLocked(init.strength, tweak.baseValues)
+  chipMaskEl.disabled = image.kind === 'uploading' || chipThumbFailed || opaqueLocked
+  chipMaskEl.textContent = init.mask != null ? 'MASK ✓' : 'MASK'
+  chipMaskEl.title = opaqueLocked
+    ? 'bench-authored weight — attach a new image to repaint'
+    : 'paint where the image should hold'
 }
 
 export function renderBar(state: CreateState, springSteps: number): boolean {
   const ready = state.boot.phase === 'ready'
   promptEl.disabled = !ready
   goEl.disabled = !ready
+  attachEl.disabled = !ready
   if (promptEl.value !== state.composer.prompt) promptEl.value = state.composer.prompt
   promptEl.placeholder = state.composer.tweak != null ? 'tweaking — clear to start fresh' : 'describe a scene…'
   promptEl.classList.toggle('tweaking', state.composer.tweak != null)
+
+  renderChip(state)
 
   sseEl.style.display = state.sse.phase === 'retrying' ? '' : 'none'
 
@@ -80,6 +157,10 @@ export function renderBar(state: CreateState, springSteps: number): boolean {
 
   if (visible) {
     const inTweak = state.composer.tweak != null
+    const init = state.composer.init
+    initRowEl.style.display = init == null ? 'none' : '' // the row exists iff attached (§15.5)
+    initNoteEl.style.display = init != null && init.holdMeaning ? '' : 'none'
+    holdEl.classList.toggle('sel', init != null && init.holdMeaning)
     for (const chip of chips) {
       const current = rowValue(state, chip.row)
       if (chip.value == null) {

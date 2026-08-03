@@ -17,8 +17,16 @@
     <div id="bar">
       <span id="bar-glyph">⌕</span>
       <input id="prompt" type="text" placeholder="describe a scene…" autocomplete="off" spellcheck="false">
+      <div id="chip" style="display:none">
+        <img id="chip-thumb" alt="" draggable="false">
+        <span id="chip-name" style="display:none"></span>
+        <button id="chip-mask">MASK</button>
+        <button id="chip-x" title="remove image">✕</button>
+      </div>
+      <button id="attach" title="attach init image">⊕</button>
       <button id="gear" title="settings">⚙</button>
       <button id="go" title="render (Enter)">▶</button>
+      <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" style="display:none">
     </div>
     <div id="popover" style="display:none">
       <div class="pop-row">
@@ -47,6 +55,18 @@
         <span class="pop-label">SEED</span>
         <button class="chip" data-seed="random">⚄ RANDOM</button>
         <button class="chip" data-seed="locked">🔒 LOCK</button>
+      </div>
+      <div class="pop-row" id="init-row" style="display:none">
+        <span class="pop-label">INIT</span>
+        <button class="chip" data-init-strength="subtle">SUBTLE</button>
+        <button class="chip" data-init-strength="medium">MEDIUM</button>
+        <button class="chip" data-init-strength="strong">STRONG</button>
+        <button class="chip custom" data-init-strength="custom">CUSTOM</button>
+        <button class="chip" data-hold title="hold meaning: image-embedding prompt (torch engine)">◈ HOLD</button>
+      </div>
+      <div class="pop-row" id="init-note" style="display:none">
+        <span class="pop-label"></span>
+        <span class="dim">torch engine</span>
       </div>
     </div>
   </div>
@@ -88,6 +108,24 @@
         <button id="lb-download">↓ DOWNLOAD</button>
         <button id="lb-delete">✕ DELETE</button>
       </div>
+    </div>
+  </div>
+
+  <div id="mask-editor" style="display:none">
+    <div id="mask-scrim"></div>
+    <div id="mask-head">paint where the image should hold — tinted = held</div>
+    <div id="mask-stage">
+      <img id="mask-img" alt="" draggable="false">
+      <canvas id="mask-overlay"></canvas>
+    </div>
+    <div id="mask-toolbar">
+      <button id="mask-paint" class="chip">PAINT</button>
+      <button id="mask-erase" class="chip">ERASE</button>
+      <button id="mask-invert" class="chip">INVERT</button>
+      <button id="mask-clear" class="chip">CLEAR</button>
+      <label id="mask-brush-wrap">brush <input id="mask-brush" type="range" min="8" max="160" step="1" value="48"></label>
+      <button id="mask-remove" class="chip" style="display:none">REMOVE MASK</button>
+      <button id="mask-save" class="chip">SAVE</button>
     </div>
   </div>
 

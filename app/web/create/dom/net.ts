@@ -11,6 +11,7 @@ import {
   parseSessions,
   parseSseEvent,
   parseStartResult,
+  parseUploadResult,
   type StartResult,
 } from '../core/api'
 import type { QueueSlot, SseEvent, Tile } from '../core/model'
@@ -70,6 +71,19 @@ export async function deleteQueue(): Promise<void> {
 export async function deleteSession(id: string): Promise<void> {
   const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' })
   if (res.status !== 204) throw new Error(`DELETE /api/sessions/${id} -> ${res.status}: ${parseErrorBody(await res.json())}`)
+}
+
+export type UploadResult = { ok: true; path: string } | { ok: false; message: string }
+
+// POST /api/uploads (multipart) — the one non-JSON request body in the app. A non-200
+// is expected-recoverable data (the attach/save flows toast it); network refusal throws
+// and the callers map it to the 'upload failed' toast (ruling 6).
+export async function uploadFile(data: Blob, name: string): Promise<UploadResult> {
+  const form = new FormData()
+  form.append('file', data, name)
+  const res = await fetch('/api/uploads', { method: 'POST', body: form })
+  if (res.status === 200) return { ok: true, path: parseUploadResult(await res.json()) }
+  return { ok: false, message: parseErrorBody(await res.json()) }
 }
 
 export type EncodeResult = { ok: true; jobId: string } | { ok: false; message: string }

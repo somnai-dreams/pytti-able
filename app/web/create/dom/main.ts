@@ -10,6 +10,7 @@ import { createWakeLoop } from '@kit/onestore/core'
 import { rafRenderLoop } from '@kit/onestore/dom'
 import { artifactUrl } from '../core/api'
 import { feel } from '../core/feel'
+import { deriveInitFromBase, type InitAttachment, type InitStrengthId, toInitDraftInput } from '../core/init'
 import { keyIntent } from '../core/keys'
 import { applyWheel, jumpToFrame, stepFrame } from '../core/lightbox'
 import {
@@ -23,6 +24,7 @@ import {
   findTile,
   type FollowUp,
   insertTile,
+  openMaskEditor,
   reconcileSessions,
   removeTile,
   showToast,
@@ -35,6 +37,7 @@ import * as net from './net'
 import { initBar, renderBar } from './renderBar'
 import { initGallery, renderGallery, tileScreenRect } from './renderGallery'
 import { initLightbox, lightboxCloseMorph, lightboxOpenMorph, renderLightbox } from './renderLightbox'
+import { initMask, openMaskSurface, renderMask } from './renderMask'
 import { initTop, renderTop } from './renderTop'
 
 function mustGet(id: string): HTMLElement {
@@ -44,9 +47,13 @@ function mustGet(id: string): HTMLElement {
 }
 
 // --- static shell elements
+const barEl = mustGet('bar')
 const promptEl = mustGet('prompt') as HTMLInputElement
 const gearEl = mustGet('gear') as HTMLButtonElement
 const goEl = mustGet('go') as HTMLButtonElement
+const attachEl = mustGet('attach') as HTMLButtonElement
+const fileInputEl = mustGet('file-input') as HTMLInputElement
+const chipMaskEl = mustGet('chip-mask') as HTMLButtonElement
 const popoverEl = mustGet('popover')
 const sseEl = mustGet('sse-dot')
 const scrollerEl = mustGet('gallery-scroll')
@@ -58,6 +65,22 @@ const bootFailMsgEl = mustGet('boot-fail-msg')
 const lightboxEl = mustGet('lightbox')
 const confirmEl = mustGet('confirm')
 const toastEl = mustGet('toast')
+
+// §15.7 focus containment: everything stacked beneath zMaskEditor. While the mask editor
+// is open these go `inert` — the scrim only blocks pointers; inert also removes tab focus
+// and keyboard activation (Shift+Tab to the prompt under the scrim used to reach the
+// bar-clear branch; Tab-to-GO + Enter used to submit under the editor). The confirm and
+// toast roots stay live: the discard-mask confirm sits ABOVE the editor.
+const shellEls = [
+  mustGet('advanced-link'),
+  sseEl,
+  mustGet('bar-wrap'), // bar + popover
+  scrollerEl,
+  emptyEl,
+  bootSkelEl,
+  bootFailEl,
+  lightboxEl,
+]
 
 // --- the single state object
 const state: CreateState = {
@@ -74,11 +97,13 @@ const state: CreateState = {
     look: 'limited',
     seedMode: { kind: 'random' },
     tweak: null,
+    init: null,
     popoverOpen: false,
   },
   lastRun: null,
   lastSeed: null,
   lightbox: null,
+  maskEditor: null,
   confirm: null,
   toast: null,
   download: null,
@@ -93,6 +118,7 @@ let wheelDelta = 0
 let springAcc = 0
 let lastFrameTime = performance.now()
 let wasAnimating = false // did the previous frame schedule this one to continue motion?
+let shellInert = false // last projected inert value (§15.7 containment)
 
 // --- render: latest-state projection, springs on the fixed timestep
 //
@@ -130,10 +156,19 @@ const loop = rafRenderLoop((now) => {
   bootFailEl.style.display = state.boot.phase === 'failed' ? '' : 'none'
   if (state.boot.phase === 'failed') bootFailMsgEl.textContent = state.boot.message
 
+  // §15.7 containment, projected from state like everything else in this loop (the many
+  // close paths — Esc, scrim, SAVE, REMOVE, discard confirm — all just null maskEditor).
+  const editorOpen = state.maskEditor != null
+  if (editorOpen !== shellInert) {
+    shellInert = editorOpen
+    for (const el of shellEls) el.inert = editorOpen
+  }
+
   let animating = false
   if (renderBar(state, steps)) animating = true
   if (renderGallery(state, steps)) animating = true
   if (renderLightbox(state, steps)) animating = true
+  if (renderMask(state, steps)) animating = true
   if (renderTop(state, steps)) animating = true
   if (state.lightbox != null && state.lightbox.swipe.accumulated !== 0) animating = true
   wasAnimating = animating
@@ -360,10 +395,25 @@ function beginSubmission(prompt: string, dims: { width: number; height: number }
 function submit(): void {
   if (state.boot.phase !== 'ready') return
   if (state.composer.prompt.trim() === '') return
-  const payload = composeDraft(state.composer)
-  const dims = composerDims(state.composer)
-  beginSubmission(state.composer.prompt.trim(), dims, payload)
-  // The bar keeps its text; tweak mode persists (iterating on the same base).
+  const composer = state.composer
+  if (composer.init != null && composer.init.image.kind === 'uploading') {
+    // A1 guard addition (§15.4): no optimistic tile, stop.
+    toastNow('image still uploading')
+    return
+  }
+  const draftInput = {
+    prompt: composer.prompt,
+    aspect: composer.aspect,
+    quality: composer.quality,
+    look: composer.look,
+    seedMode: composer.seedMode,
+    tweak: composer.tweak,
+    init: toInitDraftInput(composer.init),
+  }
+  const payload = composeDraft(draftInput)
+  const dims = composerDims(draftInput)
+  beginSubmission(composer.prompt.trim(), dims, payload)
+  // The bar keeps its text; tweak mode AND the attachment persist (iterating on the base).
 }
 
 function rerunLast(): void {
@@ -401,7 +451,8 @@ async function rerunSession(id: string): Promise<void> {
   )
 }
 
-// A4 — TWEAK: prefill the bar + popover from the source session, lock its seed.
+// A4 — TWEAK: prefill the bar + popover from the source session, lock its seed,
+// rematerialize the init attachment (§15.8).
 async function tweakSession(id: string): Promise<void> {
   const tile = findTile(state.tiles, id)
   if (tile == null) throw new Error(`tweak of unknown session ${id}`)
@@ -416,11 +467,104 @@ async function tweakSession(id: string): Promise<void> {
   composer.look = match.look
   const seed = config['seed']
   composer.seedMode = typeof seed === 'number' ? { kind: 'locked', seed } : { kind: 'random' }
+  setInit(deriveInitFromBase(composer.tweak.baseValues))
   composer.popoverOpen = false
   closeLightbox()
   loop.renderNow()
   promptEl.focus()
   promptEl.setSelectionRange(composer.prompt.length, composer.prompt.length)
+}
+
+// --- init attachment (§15.4): three attach routes, one result
+
+const ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/bmp']
+
+// Replace the attachment, revoking the object URL the dom layer created for the old one
+// (rematerialized attachments have localUrl null — nothing to revoke).
+function setInit(init: InitAttachment | null): void {
+  const prev = state.composer.init
+  if (prev != null && prev.image.localUrl != null) URL.revokeObjectURL(prev.image.localUrl)
+  state.composer.init = init
+}
+
+function attachImage(file: File): void {
+  if (state.boot.phase !== 'ready') return
+  if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) return // input-type boundary: silent
+  const localUrl = URL.createObjectURL(file)
+  // A new image invalidates a mask painted on the old one: the whole attachment resets.
+  const att: InitAttachment = {
+    image: { kind: 'uploading', name: file.name, localUrl },
+    strength: 'medium',
+    holdMeaning: false,
+    mask: null,
+  }
+  setInit(att)
+  loop.renderNow() // the chip renders THIS frame, before any network
+  void net
+    .uploadFile(file, file.name)
+    .then((result) => {
+      if (state.composer.init !== att) return // replaced or removed while uploading
+      if (result.ok) {
+        att.image = { kind: 'ready', name: file.name, path: result.path, localUrl }
+      } else {
+        setInit(null) // ruling 6: toast, chip cleared, object URL revoked
+        showToast(state, result.message, performance.now())
+        wake.invalidate()
+      }
+      loop.scheduleRender()
+    })
+    .catch((err: unknown) => {
+      console.error(err)
+      if (state.composer.init === att) setInit(null)
+      toastNow('upload failed')
+    })
+}
+
+// First accepted image file among a DataTransfer/clipboard item list, or null.
+function firstImageFile(items: DataTransferItemList): File | null {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!
+    if (item.kind === 'file' && ACCEPTED_IMAGE_TYPES.includes(item.type)) {
+      const file = item.getAsFile()
+      if (file != null) return file
+    }
+  }
+  return null
+}
+
+function dragHasImage(items: DataTransferItemList): boolean {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!
+    if (item.kind === 'file' && ACCEPTED_IMAGE_TYPES.includes(item.type)) return true
+  }
+  return false
+}
+
+// --- mask editor (§15.7)
+
+// The state move is the core transition (model.openMaskEditor) so its guards — the chip's
+// disabled affordances AND the re-entry no-op — are model-tested; this wrapper owns the
+// dom side: the paint surface and focus containment.
+function openMask(): void {
+  if (!openMaskEditor(state)) return // no attachment / uploading / already open (§15.7)
+  const init = state.composer.init
+  if (init == null) throw new Error('openMaskEditor opened without an attachment')
+  openMaskSurface(init)
+  // Containment (§15.7): the control that opened the editor (the MASK chip, on a keyboard
+  // activation) still holds DOM focus — blur it now; the shell goes inert in the next
+  // frame's projection.
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+  loop.scheduleRender()
+}
+
+// Esc and scrim-click share this rule: dirty -> discard confirm above the editor;
+// clean -> close immediately; saving -> inert (SAVE is disabled too, the upload is brief).
+function requestMaskClose(): void {
+  const editor = state.maskEditor
+  if (editor == null || editor.saving) return
+  if (editor.dirty) state.confirm = { kind: 'discard-mask' }
+  else state.maskEditor = null
+  loop.scheduleRender()
 }
 
 // A6 — DOWNLOAD: existing mp4 downloads directly; otherwise one encode at a time.
@@ -460,7 +604,7 @@ function requestDelete(id: string): void {
 
 async function confirmDelete(): Promise<void> {
   const confirm = state.confirm
-  if (confirm == null) return
+  if (confirm == null || confirm.kind !== 'delete') return
   state.confirm = null
   await net.deleteSession(confirm.sessionId)
   removeTile(state, confirm.sessionId)
@@ -511,7 +655,10 @@ function togglePopover(): void {
 function dismissTopmost(): void {
   switch (topmostDismissable(state)) {
     case 'confirm':
-      state.confirm = null
+      state.confirm = null // discard-mask CANCEL path too: editor + painting intact
+      break
+    case 'mask-editor':
+      requestMaskClose()
       break
     case 'popover':
       state.composer.popoverOpen = false
@@ -540,7 +687,35 @@ function pinnedSeed(): number {
 
 // --- module init + event listener registration
 
-initBar({ prompt: promptEl, go: goEl, popover: popoverEl, sse: sseEl })
+initBar({
+  scheduleRender: () => loop.scheduleRender(),
+  prompt: promptEl,
+  go: goEl,
+  attach: attachEl,
+  popover: popoverEl,
+  sse: sseEl,
+  chip: mustGet('chip'),
+  chipThumb: mustGet('chip-thumb') as HTMLImageElement,
+  chipName: mustGet('chip-name'),
+  chipMask: chipMaskEl,
+})
+initMask(
+  { state, scheduleRender: () => loop.scheduleRender(), toast: toastNow, requestClose: requestMaskClose },
+  {
+    root: mustGet('mask-editor'),
+    scrim: mustGet('mask-scrim'),
+    stage: mustGet('mask-stage'),
+    img: mustGet('mask-img') as HTMLImageElement,
+    overlay: mustGet('mask-overlay') as HTMLCanvasElement,
+    paintBtn: mustGet('mask-paint') as HTMLButtonElement,
+    eraseBtn: mustGet('mask-erase') as HTMLButtonElement,
+    invertBtn: mustGet('mask-invert') as HTMLButtonElement,
+    clearBtn: mustGet('mask-clear') as HTMLButtonElement,
+    brush: mustGet('mask-brush') as HTMLInputElement,
+    removeBtn: mustGet('mask-remove') as HTMLButtonElement,
+    saveBtn: mustGet('mask-save') as HTMLButtonElement,
+  },
+)
 initGallery({ scheduleRender: () => loop.scheduleRender(), scroller: scrollerEl, canvas: canvasEl, empty: emptyEl })
 initLightbox({
   scheduleRender: () => loop.scheduleRender(),
@@ -558,6 +733,7 @@ initLightbox({
 initTop({
   lightbox: lightboxEl,
   popover: popoverEl,
+  mask: mustGet('mask-editor'),
   confirm: confirmEl,
   confirmText: mustGet('confirm-text'),
   confirmNote: mustGet('confirm-note'),
@@ -567,19 +743,58 @@ initTop({
 promptEl.addEventListener('input', () => {
   const cleared = state.composer.prompt !== '' && promptEl.value === ''
   state.composer.prompt = promptEl.value
-  if (cleared && state.composer.tweak != null) {
-    // Clearing the bar leaves tweak mode: back to concrete fresh defaults.
-    state.composer.tweak = null
-    state.composer.aspect = '1:1'
-    state.composer.quality = 'standard'
-    state.composer.look = 'limited'
-    state.composer.seedMode = { kind: 'random' }
+  if (cleared) {
+    // Clearing the bar resets the WHOLE composer (§15.4): tweak AND attachment — so
+    // strength: null stays unreachable outside tweak, mirroring the aspect invariant.
+    setInit(null)
+    if (state.composer.tweak != null) {
+      state.composer.tweak = null
+      state.composer.aspect = '1:1'
+      state.composer.quality = 'standard'
+      state.composer.look = 'limited'
+      state.composer.seedMode = { kind: 'random' }
+    }
   }
   loop.renderNow() // synchronous keystroke echo — the controlled-input answer
 })
 
 goEl.addEventListener('click', submit)
 gearEl.addEventListener('click', togglePopover)
+
+// --- attach routes (§15.4): ⊕ picker, drag-drop on the bar, paste while bar focused
+attachEl.addEventListener('click', () => fileInputEl.click())
+fileInputEl.addEventListener('change', () => {
+  const file = fileInputEl.files == null ? null : fileInputEl.files[0]
+  if (file != null) attachImage(file)
+  fileInputEl.value = '' // re-attaching the same file must fire change again
+})
+barEl.addEventListener('dragover', (e) => {
+  if (e.dataTransfer == null || !dragHasImage(e.dataTransfer.items)) return
+  e.preventDefault()
+  barEl.classList.add('drop')
+})
+barEl.addEventListener('dragleave', () => barEl.classList.remove('drop'))
+barEl.addEventListener('drop', (e) => {
+  barEl.classList.remove('drop')
+  if (e.dataTransfer == null) return
+  const file = firstImageFile(e.dataTransfer.items)
+  if (file == null) return // non-image drop: browser default, no chip, no request
+  e.preventDefault()
+  attachImage(file)
+})
+promptEl.addEventListener('paste', (e) => {
+  if (e.clipboardData == null) return
+  const file = firstImageFile(e.clipboardData.items)
+  if (file == null) return // text paste keeps working as text — input-type boundary
+  e.preventDefault()
+  attachImage(file)
+})
+chipMaskEl.addEventListener('click', openMask)
+mustGet('chip-x').addEventListener('click', () => {
+  // Clears chip, mask, and INIT row in one gesture (ruling 6).
+  setInit(null)
+  loop.scheduleRender()
+})
 
 popoverEl.addEventListener('click', (e) => {
   const target = e.target as HTMLElement
@@ -589,11 +804,15 @@ popoverEl.addEventListener('click', (e) => {
   const quality = chip.dataset['quality']
   const look = chip.dataset['look']
   const seed = chip.dataset['seed']
+  const initStrength = chip.dataset['initStrength']
+  const init = state.composer.init
   if (aspect != null && aspect !== 'custom') state.composer.aspect = aspect as CreateState['composer']['aspect']
   else if (quality != null && quality !== 'custom') state.composer.quality = quality as CreateState['composer']['quality']
   else if (look != null && look !== 'custom') state.composer.look = look as CreateState['composer']['look']
   else if (seed === 'random') state.composer.seedMode = { kind: 'random' }
   else if (seed === 'locked') state.composer.seedMode = { kind: 'locked', seed: pinnedSeed() }
+  else if (initStrength != null && initStrength !== 'custom' && init != null) init.strength = initStrength as InitStrengthId
+  else if (chip.dataset['hold'] != null && init != null) init.holdMeaning = !init.holdMeaning
   loop.scheduleRender()
 })
 
@@ -667,7 +886,21 @@ mustGet('lb-prompt').addEventListener('click', () => {
   mustGet('lb-prompt').classList.toggle('expanded')
 })
 
-mustGet('confirm-yes').addEventListener('click', () => void confirmDelete().catch(toastError))
+mustGet('confirm-yes').addEventListener('click', () => {
+  const confirm = state.confirm
+  if (confirm == null) return
+  switch (confirm.kind) {
+    case 'delete':
+      void confirmDelete().catch(toastError)
+      return
+    case 'discard-mask':
+      // Discard: editor closes; the chip's previous mask state is untouched (§15.7).
+      state.confirm = null
+      state.maskEditor = null
+      loop.scheduleRender()
+      return
+  }
+})
 mustGet('confirm-no').addEventListener('click', () => {
   state.confirm = null
   loop.scheduleRender()
@@ -679,6 +912,9 @@ window.addEventListener('keydown', (e) => {
   const active = document.activeElement
   const inInput = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
   const intent = keyIntent({ key: e.key, meta: e.metaKey, ctrl: e.ctrlKey, inInput })
+  // §15.7 scope rule: while the mask editor is open, only `dismiss` acts — submit,
+  // rerun-last, focus-prompt and frame-prev/next are inert (the intent map is unchanged).
+  if (state.maskEditor != null && intent !== 'dismiss') return
   switch (intent) {
     case 'submit':
       e.preventDefault()

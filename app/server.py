@@ -1339,6 +1339,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"presets": list_presets()})
             elif path == "/api/calibration":
                 self._json(200, {"buckets": CALIBRATION.buckets})
+            elif path == "/api/uploads":
+                # Serve a previously-uploaded file (init thumbs, mask rematerialization).
+                # The server owns "what is an upload": only files directly inside
+                # UPLOADS_DIR qualify; anything else — including bench-browsed init
+                # images from tweak bases — is a 404 and the client degrades.
+                qs = urllib.parse.parse_qs(parsed.query)
+                target = Path(qs.get("path", [""])[0]).expanduser().resolve()
+                if target.parent == UPLOADS_DIR.resolve() and target.is_file():
+                    self._send_file(target, immutable=True)  # names never reused (dedupe on upload)
+                else:
+                    self._json(404, {"error": "not an upload"})
             elif path.startswith("/api/browse"):
                 qs = urllib.parse.parse_qs(parsed.query)
                 base = Path(qs.get("path", [str(Path.home())])[0]).expanduser()

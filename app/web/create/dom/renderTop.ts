@@ -9,6 +9,7 @@ import { surfaces } from '../core/surfaces'
 
 let lightboxEl: HTMLElement
 let popoverEl: HTMLElement
+let maskEl: HTMLElement
 let confirmEl: HTMLElement
 let confirmTextEl: HTMLElement
 let confirmNoteEl: HTMLElement
@@ -19,6 +20,7 @@ const toastRise = spring(0)
 export function initTop(els: {
   lightbox: HTMLElement
   popover: HTMLElement
+  mask: HTMLElement
   confirm: HTMLElement
   confirmText: HTMLElement
   confirmNote: HTMLElement
@@ -26,6 +28,7 @@ export function initTop(els: {
 }): void {
   lightboxEl = els.lightbox
   popoverEl = els.popover
+  maskEl = els.mask
   confirmEl = els.confirm
   confirmTextEl = els.confirmText
   confirmNoteEl = els.confirmNote
@@ -49,15 +52,27 @@ export function renderTop(state: CreateState, springSteps: number): boolean {
       case 'popover':
         popoverEl.style.zIndex = z
         break
+      case 'mask-editor':
+        maskEl.style.zIndex = z // display/content is renderMask's — the ladder only stacks
+        break
       case 'confirm': {
         confirmOpen = true
         confirmEl.style.zIndex = z
-        const tile = findTile(state.tiles, surface.view.sessionId)
-        confirmTextEl.textContent = `delete ${surface.view.sessionId}?`
-        confirmNoteEl.textContent =
-          tile != null && tile.imported
-            ? 'imported session — files stay on disk and reappear after a server restart'
-            : 'frames, sidecar and artifacts are removed'
+        switch (surface.view.kind) {
+          case 'delete': {
+            const tile = findTile(state.tiles, surface.view.sessionId)
+            confirmTextEl.textContent = `delete ${surface.view.sessionId}?`
+            confirmNoteEl.textContent =
+              tile != null && tile.imported
+                ? 'imported session — files stay on disk and reappear after a server restart'
+                : 'frames, sidecar and artifacts are removed'
+            break
+          }
+          case 'discard-mask':
+            confirmTextEl.textContent = 'discard unsaved mask strokes?'
+            confirmNoteEl.textContent = 'the saved mask (if any) is unchanged'
+            break
+        }
         break
       }
       case 'toast':

@@ -43,6 +43,15 @@ export const feel = {
   springB: 33,
   maxSpringStepsPerFrame: 60,
 
+  // --- init attachment chip + mask editor (§15.3)
+  chipThumbSize: 28,
+  maskBrushDefault: 48,
+  maskBrushMin: 8,
+  maskBrushMax: 160,
+  maskStampSpacingFrac: 0.25, // stamp interval as a fraction of brush size
+  maskEditorMargin: 24,
+  maskToolbarY: 56,
+
   // --- timing (deadlines as data, consumed by the wake loop)
   toastMs: 4000,
   startingGraceMs: 15000, // queued->starting grace: drop the pending tile if no SSE state claims it

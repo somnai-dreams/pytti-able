@@ -22,14 +22,24 @@ if (!existsSync(fr)) {
 // analyzed counts are expected — the pin catches analyzability REGRESSIONS, and any
 // finding fails via fr's exit code regardless of domain.
 const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
-  { file: 'create/core/api.ts', coverage: '5/23', partial: 2 },
+  // 5/23 -> 5/25 with §15: +parseUploadResult, +uploadUrl (string domain, unsupported).
+  { file: 'create/core/api.ts', coverage: '5/25', partial: 2 },
   { file: 'create/core/feel.ts', coverage: '0/0', partial: 0 },
   { file: 'create/core/gallery.ts', coverage: '3/5', partial: 0 },
+  // §15 weight_mask codec — string domain by declaration; the 4 analyzed are the
+  // incidental numeric-ish helpers.
+  { file: 'create/core/init.ts', coverage: '4/12', partial: 0 },
   { file: 'create/core/keys.ts', coverage: '1/1', partial: 0 },
   { file: 'create/core/lightbox.ts', coverage: '1/7', partial: 0 },
+  // §15 editor geometry: viewToImage + clampBrushSize analyzed; strokeStamps is an
+  // array producer (documented fr exception in its header, tested).
+  { file: 'create/core/mask.ts', coverage: '2/3', partial: 0 },
   // 2/11 -> 3/13 with the failed-submit queue-restore fix: +pendingFromQueueSlot,
   // +failSubmission (one of the two is in the analyzable subset).
-  { file: 'create/core/model.ts', coverage: '3/13', partial: 0 },
+  // 3/13 -> 3/15 with §15.7 containment: +openMaskEditor, +dropUnreadableMask — state
+  // transitions on the tagged-union store (string/JSON domain, model.test.ts is the
+  // checked surface), outside freerange's numeric subset as expected.
+  { file: 'create/core/model.ts', coverage: '3/15', partial: 0 },
   { file: 'create/core/presets.ts', coverage: '1/10', partial: 0 },
   { file: 'create/core/surfaces.ts', coverage: '1/2', partial: 0 },
 ]

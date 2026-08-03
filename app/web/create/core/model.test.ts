@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { defaultEnv } from '@kit/env/core'
 import { feel } from './feel'
+import type { InitAttachment } from './init'
 import {
   applyEncodeEvent,
   applyFrameEvent,
@@ -8,9 +9,11 @@ import {
   applyQueueEvent,
   applyStateEvent,
   type CreateState,
+  dropUnreadableMask,
   failSubmission,
   findTile,
   insertTile,
+  openMaskEditor,
   reconcileSessions,
   removeTile,
   showToast,
@@ -50,10 +53,11 @@ function state(over: Partial<CreateState> = {}): CreateState {
     tiles: [],
     pending: null,
     queue: null,
-    composer: { prompt: '', aspect: '1:1', quality: 'standard', look: 'limited', seedMode: { kind: 'random' }, tweak: null, popoverOpen: false },
+    composer: { prompt: '', aspect: '1:1', quality: 'standard', look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null, popoverOpen: false },
     lastRun: null,
     lastSeed: null,
     lightbox: null,
+    maskEditor: null,
     confirm: null,
     toast: null,
     download: null,
@@ -270,6 +274,12 @@ describe('reconcileSessions', () => {
     expect(s.lightbox!.sessionId).toBe('keep')
     expect(s.confirm).toBeNull()
   })
+
+  test('a discard-mask confirm has no session and survives a resync (§15.3)', () => {
+    const s = state({ tiles: [tile('x')], confirm: { kind: 'discard-mask' } })
+    reconcileSessions(s, [])
+    expect(s.confirm).toEqual({ kind: 'discard-mask' })
+  })
 })
 
 describe('failSubmission', () => {
@@ -294,5 +304,75 @@ describe('showToast', () => {
     const s = state()
     showToast(s, 'hi', 100)
     expect(s.toast).toEqual({ text: 'hi', expiresAt: 100 + feel.toastMs })
+  })
+})
+
+function readyInit(over: Partial<InitAttachment> = {}): InitAttachment {
+  return {
+    image: { kind: 'ready', name: 'img.png', path: '/uploads/img.png', localUrl: null },
+    strength: 'medium',
+    holdMeaning: false,
+    mask: null,
+    ...over,
+  }
+}
+
+describe('openMaskEditor (§15.7)', () => {
+  test('opens with defaults, closes the popover, seeds inverted from the existing mask', () => {
+    const s = state()
+    s.composer.init = readyInit({ mask: { path: '/uploads/mask-img.png', inverted: true } })
+    s.composer.popoverOpen = true
+    expect(openMaskEditor(s)).toBe(true)
+    expect(s.maskEditor).toEqual({
+      brushSize: feel.maskBrushDefault,
+      mode: 'paint',
+      inverted: true,
+      dirty: false,
+      saving: false,
+    })
+    expect(s.composer.popoverOpen).toBe(false)
+  })
+
+  test('re-entry is a no-op: the open editor and its unsaved-strokes flag survive', () => {
+    // Regression: Space/Enter on the still-focused MASK button replaced the editor
+    // object — dirty reset to false, unsaved strokes wiped past the discard confirm.
+    const s = state()
+    s.composer.init = readyInit()
+    expect(openMaskEditor(s)).toBe(true)
+    const editor = s.maskEditor!
+    editor.dirty = true
+    editor.mode = 'erase'
+    expect(openMaskEditor(s)).toBe(false)
+    expect(s.maskEditor).toBe(editor)
+    expect(editor.dirty).toBe(true)
+    expect(editor.mode).toBe('erase')
+  })
+
+  test('no attachment or still-uploading image -> no-op (the chip disables MASK)', () => {
+    const s = state()
+    expect(openMaskEditor(s)).toBe(false)
+    expect(s.maskEditor).toBeNull()
+    s.composer.init = readyInit({ image: { kind: 'uploading', name: 'img.png', localUrl: 'blob:x' } })
+    expect(openMaskEditor(s)).toBe(false)
+    expect(s.maskEditor).toBeNull()
+  })
+})
+
+describe('dropUnreadableMask (§15.7)', () => {
+  test('the dead path leaves composer state with the toast; the editor stays open blank', () => {
+    // Regression: an unreadable existing mask fail-softed in the editor display only —
+    // init.mask kept the dead path, and an invert-only SAVE or a clean close re-emitted
+    // it into the next submit.
+    const s = state()
+    s.composer.init = readyInit({ mask: { path: '/uploads/mask-gone.png', inverted: false } })
+    expect(openMaskEditor(s)).toBe(true)
+    dropUnreadableMask(s)
+    expect(s.composer.init!.mask).toBeNull()
+    expect(s.maskEditor).not.toBeNull()
+  })
+
+  test('throws outside an open editor (invariant violation, fail loud)', () => {
+    const s = state()
+    expect(() => dropUnreadableMask(s)).toThrow('dropUnreadableMask outside an open mask editor')
   })
 })

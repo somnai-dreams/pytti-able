@@ -11,8 +11,10 @@
 // types:
 //   AspectId = '1:1'|'3:4'|'4:3'|'16:9'    QualityId = 'draft'|'standard'|'deep'
 //   LookId = 'limited'|'unlimited'|'vqgan' SeedMode = {kind:'random'} | {kind:'locked', seed}
-//   ComposerDraftInput = { prompt, aspect|null, quality|null, look|null, seedMode, tweak|null }
-//     (null preset ids = "inherit tweak base", reachable only while tweak != null)
+//   ComposerDraftInput = { prompt, aspect|null, quality|null, look|null, seedMode, tweak|null,
+//     init: InitDraftInput|null }   (null preset ids = "inherit tweak base", reachable
+//     only while tweak != null; init per §15.6 — main maps the attachment through
+//     core/init toInitDraftInput, which enforces the image-is-ready contract)
 //   DraftPayload = { values, forkOf, seedLocked }   — the PUT /api/draft body
 //
 // functions:
@@ -23,6 +25,11 @@
 //     composer with null ids (caller-contract violations). Tweak dims rule: width/height
 //     override only when aspect != null; its size class comes from quality when non-null,
 //     else from exact-matching the BASE dims against the 256 table (miss -> 512 class).
+//     Init rule (§15.6): fresh emits init_image + formatInitWeight (+ semantic '0.3' and
+//     perceptor_backend torch iff holdMeaning); no attachment -> keys ABSENT, never ''.
+//     Tweak overrides only on diff (an untouched simple/opaque base weight rides
+//     verbatim, preserving bench cutoffs); chip removal deletes the three init keys
+//     (perceptor_backend untouched); holdMeaning pins torch unconditionally when on.
 //   composerDims(composer) -> {width, height}          the dims the submission renders at
 //     (optimistic tile sizing); same dims rule as composeDraft, base-dims fallback 512x512
 //   matchPresets(values) -> {aspect|null, quality|null, look|null}   exact-match only,
@@ -30,6 +37,14 @@
 //     to match the dims-derived class
 //   draftableValues(config, draftFields) -> Record       whitelist filter
 // @/cs
+import {
+  formatInitWeight,
+  type InitDraftInput,
+  parseInitWeight,
+  sameMask,
+  semanticOn,
+  strengthWeight,
+} from './init'
 
 export type AspectId = '1:1' | '3:4' | '4:3' | '16:9'
 export type QualityId = 'draft' | 'standard' | 'deep'
@@ -96,6 +111,7 @@ export type ComposerDraftInput = {
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
+  init: InitDraftInput | null
 }
 
 export type DraftPayload = {
@@ -177,6 +193,20 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       animation_mode: 'off',
     }
     if (composer.seedMode.kind === 'locked') values['seed'] = composer.seedMode.seed
+    // Init (§15.6): with no attachment NONE of the four keys appear (ruling 5 — schema
+    // defaults cover absence; never emit empty-string init keys).
+    const init = composer.init
+    if (init != null) {
+      if (init.strength == null) {
+        throw new Error('composeDraft: fresh init with null strength (unreachable per §15.4 bar-clear rule)')
+      }
+      values['init_image'] = init.path
+      values['direct_init_weight'] = formatInitWeight(strengthWeight(init.strength), init.mask)
+      if (init.holdMeaning) {
+        values['semantic_init_weight'] = '0.3'
+        values['perceptor_backend'] = 'torch' // semantic init is torch-only by design
+      }
+    }
     return { values, forkOf: null, seedLocked }
   }
 
@@ -202,6 +232,49 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       delete values['seed']
       break
   }
+
+  // Init (§15.6, tweak): base values ride; override only where the composer differs.
+  const init = composer.init
+  if (init == null) {
+    // User removed the chip: the draft merge restores schema defaults (same mechanism
+    // as random-seed's delete). perceptor_backend stays — a base's deliberate backend
+    // choice is not Create's to revert.
+    delete values['init_image']
+    delete values['direct_init_weight']
+    delete values['semantic_init_weight']
+  } else {
+    values['init_image'] = init.path // unconditional — cheap, correct
+    const base = parseInitWeight(String(composer.tweak.baseValues['direct_init_weight'] ?? ''))
+    // direct: no override when strength inherits AND the mask state equals the base's
+    // (simple with same path+inverted, or an untouched opaque/none base — mask editing
+    // is locked there, §15.4). This is how a bench cutoff survives a tweak untouched.
+    const maskUntouched = base.kind === 'simple' ? sameMask(init.mask, base.mask) : init.mask == null
+    if (init.strength != null || !maskUntouched) {
+      let weight: string
+      if (init.strength != null) {
+        weight = strengthWeight(init.strength)
+      } else {
+        // Recomposing with an inherited weight requires a simple base by construction
+        // (mask editing is locked on opaque bases — §15.6 assert).
+        if (base.kind !== 'simple') {
+          throw new Error('composeDraft: mask changed over a non-simple base weight (mask editing must be locked)')
+        }
+        weight = base.weight
+      }
+      values['direct_init_weight'] = formatInitWeight(weight, init.mask)
+    }
+    // semantic: no override while the toggle matches the base (a non-0.3 base value
+    // rides verbatim); toggled on -> '0.3'; toggled off -> delete.
+    const baseOn = semanticOn(composer.tweak.baseValues)
+    if (init.holdMeaning !== baseOn) {
+      if (init.holdMeaning) values['semantic_init_weight'] = '0.3'
+      else delete values['semantic_init_weight']
+    }
+    // backend: pinned unconditionally while hold is on (covers legacy/imported bases
+    // whose snapshot lacks a backend); off -> untouched.
+    if (init.holdMeaning) values['perceptor_backend'] = 'torch'
+  }
+
   return { values, forkOf: composer.tweak.of, seedLocked }
 }
 
