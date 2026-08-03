@@ -1251,6 +1251,80 @@ perceptor_backend:
   costNote: >-
     Free speedup on Apple Silicon; mlx_full is fastest for stills.
 
+phase_scheduling:
+  label: PHASE SCHEDULING
+  type: BOOL
+  section: null
+  group: optimizer
+  hint: >-
+    Quality phases over the render: structure early, detail late, palette
+    locked for the final third, init-hold easing off.
+  prose: >-
+    One switch for scheduled behavior across the scene: smoothing ramps
+    from strong (structure forms) to light (detail crystallizes), the
+    Limited Palette locks for the final third, and any init-image hold
+    relaxes toward the end. The schedules multiply your configured values.
+  costNote: >-
+    Free — same step cost, different phase behavior.
+
+coarse_to_fine:
+  label: COARSE TO FINE
+  type: BOOL
+  section: null
+  group: optimizer
+  hint: >-
+    Compose at half resolution for the first 40% of steps, then upscale
+    and finish at full resolution.
+  prose: >-
+    Two-stage rendering: composition forms fast at half size, then the
+    render upscales and continues at full resolution with the stage-one
+    image as a strong anchor. Often better composition AND faster to a
+    finished image. Stills only.
+  costNote: >-
+    Faster overall — early steps run at quarter cost.
+
+auto_stop:
+  label: AUTO STOP
+  type: BOOL
+  section: null
+  group: optimizer
+  hint: >-
+    Stop the render automatically when the loss stops improving —
+    STEPS PER SCENE becomes just the upper cap.
+  prose: >-
+    Convergence detection: the render ends on its own when the loss has
+    plateaued (relative improvement below the threshold over the trailing
+    window), and the final state is saved at that point. Saves choosing a
+    step count per prompt; the configured steps remain the hard maximum.
+  costNote: >-
+    Saves time on prompts that converge early; costs nothing otherwise.
+
+auto_stop_window:
+  label: AUTO STOP WINDOW
+  type: NUM
+  section: null
+  group: optimizer
+  hint: >-
+    Trailing window (steps) over which convergence is measured. Larger =
+    more patient.
+  prose: >-
+    How many steps of history the convergence detector looks at. Larger
+    windows tolerate noisy plateaus before stopping; smaller windows stop
+    sooner and riskier.
+
+auto_stop_threshold:
+  label: AUTO STOP THRESHOLD
+  type: NUM
+  section: null
+  group: optimizer
+  hint: >-
+    Relative loss improvement per window below which the render counts as
+    converged.
+  prose: >-
+    The convergence bar: if the loss improved by less than this fraction
+    over the trailing window, the render stops. Lower = stricter (runs
+    longer), higher = eager (stops sooner).
+
 optimizer:
   label: OPTIMIZER
   type: CHOICE
