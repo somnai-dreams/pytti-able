@@ -9,7 +9,7 @@
 // surface.
 //
 // types:
-//   InitStrengthId = 'subtle' | 'medium' | 'strong'   (0.15 / 0.3 / 0.6)
+//   InitStrengthId = 'subtle' | 'medium' | 'strong'   (1.5 / 4 / 10)
 //   InitImage   — uploading (object URL only) | ready (abs upload path; localUrl null
 //                 when rematerialized from a tweak base — display via api.uploadUrl)
 //   InitMask    = { path, inverted }                   abs path of the mask PNG upload
@@ -20,7 +20,7 @@
 //   ParsedInitWeight = none | simple{weight, mask|null} | opaque{raw}
 //
 // functions:
-//   strengthWeight(id) -> '0.15' | '0.3' | '0.6'
+//   strengthWeight(id) -> '1.5' | '4' | '10'
 //   formatInitWeight(weight, mask) -> string          the compose half of the codec
 //   parseInitWeight(raw) -> ParsedInitWeight          '' / plain-number zero -> none;
 //     plain weight expr + at most one BRACKETED image-path mask (either '-' position)
@@ -43,7 +43,7 @@ export type InitStrengthId = 'subtle' | 'medium' | 'strong'
 
 export const INIT_STRENGTH_IDS: readonly InitStrengthId[] = ['subtle', 'medium', 'strong']
 
-const STRENGTH: Record<InitStrengthId, string> = { subtle: '0.15', medium: '0.3', strong: '0.6' }
+const STRENGTH: Record<InitStrengthId, string> = { subtle: '1.5', medium: '4', strong: '10' }
 
 export function strengthWeight(id: InitStrengthId): string {
   return STRENGTH[id]

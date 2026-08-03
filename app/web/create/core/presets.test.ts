@@ -230,26 +230,26 @@ describe('composeDraft init — fresh (§15.6)', () => {
     tweak: null,
   }
 
-  test('attached at medium, no mask, hold off: init_image + "0.3", no semantic/backend keys', () => {
+  test('attached at medium, no mask, hold off: init_image + "4", no semantic/backend keys', () => {
     const payload = composeDraft({
       ...fresh,
       init: { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: null },
     })
     expect(payload.values['init_image']).toBe('/up/a.png')
-    expect(payload.values['direct_init_weight']).toBe('0.3')
+    expect(payload.values['direct_init_weight']).toBe('4')
     expect('semantic_init_weight' in payload.values).toBe(false)
     expect('perceptor_backend' in payload.values).toBe(false)
   })
 
-  test('subtle / strong map to 0.15 / 0.6', () => {
+  test('subtle / strong map to 1.5 / 10', () => {
     expect(
       composeDraft({ ...fresh, init: { path: '/up/a.png', strength: 'subtle', holdMeaning: false, mask: null } })
         .values['direct_init_weight'],
-    ).toBe('0.15')
+    ).toBe('1.5')
     expect(
       composeDraft({ ...fresh, init: { path: '/up/a.png', strength: 'strong', holdMeaning: false, mask: null } })
         .values['direct_init_weight'],
-    ).toBe('0.6')
+    ).toBe('10')
   })
 
   test('mask rides in the bracket; inverted puts the - inside it', () => {
@@ -258,13 +258,13 @@ describe('composeDraft init — fresh (§15.6)', () => {
         ...fresh,
         init: { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: false } },
       }).values['direct_init_weight'],
-    ).toBe('0.3_[/up/m.png]')
+    ).toBe('4_[/up/m.png]')
     expect(
       composeDraft({
         ...fresh,
         init: { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: true } },
       }).values['direct_init_weight'],
-    ).toBe('0.3_[-/up/m.png]')
+    ).toBe('4_[-/up/m.png]')
   })
 
   test('hold meaning pins semantic 0.3 AND the torch backend', () => {
@@ -272,7 +272,7 @@ describe('composeDraft init — fresh (§15.6)', () => {
       ...fresh,
       init: { path: '/up/a.png', strength: 'medium', holdMeaning: true, mask: null },
     })
-    expect(payload.values['semantic_init_weight']).toBe('0.3')
+    expect(payload.values['semantic_init_weight']).toBe('4')
     expect(payload.values['perceptor_backend']).toBe('torch')
   })
 
@@ -309,7 +309,7 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
       tweakInput(
         {
           init_image: '/up/a.png',
-          direct_init_weight: '0.3',
+          direct_init_weight: '4',
           semantic_init_weight: '0.5',
           perceptor_backend: 'torch',
           width: 512,
@@ -345,7 +345,7 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
   test('picking a strength recomposes and drops an opaque tail', () => {
     const base = { init_image: '/x/a.png', direct_init_weight: '1_r_0.3' }
     const payload = composeDraft(tweakInput(base, { path: '/x/a.png', strength: 'strong', holdMeaning: false, mask: null }))
-    expect(payload.values['direct_init_weight']).toBe('0.6')
+    expect(payload.values['direct_init_weight']).toBe('10')
   })
 
   test('mask change over a simple base with CUSTOM strength keeps the base weight expr', () => {
@@ -383,23 +383,23 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
   })
 
   test('semantic: matching toggle -> a non-0.3 base value rides verbatim, backend pinned', () => {
-    const base = { init_image: '/up/a.png', direct_init_weight: '0.3', semantic_init_weight: '0.7' }
+    const base = { init_image: '/up/a.png', direct_init_weight: '4', semantic_init_weight: '0.7' }
     const payload = composeDraft(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: true, mask: null }))
     expect(payload.values['semantic_init_weight']).toBe('0.7')
     expect(payload.values['perceptor_backend']).toBe('torch') // unconditional while on
   })
 
   test('semantic toggled ON over an off base -> 0.3 + torch', () => {
-    const base = { init_image: '/up/a.png', direct_init_weight: '0.3', semantic_init_weight: '' }
+    const base = { init_image: '/up/a.png', direct_init_weight: '4', semantic_init_weight: '' }
     const payload = composeDraft(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: true, mask: null }))
-    expect(payload.values['semantic_init_weight']).toBe('0.3')
+    expect(payload.values['semantic_init_weight']).toBe('4')
     expect(payload.values['perceptor_backend']).toBe('torch')
   })
 
   test('semantic toggled OFF over an on base -> key deleted, backend untouched', () => {
     const base = {
       init_image: '/up/a.png',
-      direct_init_weight: '0.3',
+      direct_init_weight: '4',
       semantic_init_weight: '0.7',
       perceptor_backend: 'torch',
     }

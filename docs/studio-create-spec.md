@@ -1020,7 +1020,7 @@ rematerialization, no-empty-init-keys, error states) are restated here as spec.
   (lines 52–53, default `""`). Weight fields support the `weight_mask` grammar
   (`prompt_spec.py` `parse_weight_spec` line 145 / `parse_mask_token` line 119):
   `"<weight>_[<abs path>]"`, with a `-` **inside the bracket** prefixing the path
-  for inversion — `"0.3_[-/abs/mask.png]"` (line 126–128). A third `_` field is a
+  for inversion — `"4_[-/abs/mask.png]"` (line 126–128). A third `_` field is a
   cutoff expression; Create never emits one.
 - Mask semantics: the mask PNG is opened `convert("L")` and **multiplies the
   direct loss**; inversion is `1 - mask` (`MSELossClass.py` lines 72, 106). So
@@ -1072,7 +1072,7 @@ No other server change.
 ```ts
 // core/init.ts (string domain — outside freerange's numeric subset; init.test.ts
 // is the checked surface)
-type InitStrengthId = 'subtle' | 'medium' | 'strong'   // 0.15 / 0.3 / 0.6
+type InitStrengthId = 'subtle' | 'medium' | 'strong'   // 1.5 / 4 / 10
 
 type InitImage =
   | { kind: 'uploading'; name: string; localUrl: string }
@@ -1183,7 +1183,7 @@ without an attachment, five with — item 5 is amended accordingly):
    └─────────────────────────────────────────────┘
 ```
 
-- Strength chips map to `direct_init_weight` `0.15 / 0.3 / 0.6`; **medium is the
+- Strength chips map to `direct_init_weight` `1.5 / 4 / 10`; **medium is the
   default** on attach. In tweak mode the row may show `[CUSTOM]` selected
   (`strength: null`, §15.6) — same convention as §5.3.
 - `◈ HOLD` ("hold meaning") toggle: **on** → the submission carries
@@ -1455,12 +1455,12 @@ Mask editor (toplayer, lightbox-class):
 35. With the 7911 server killed, attaching toasts the failure and clears the
     chip (no INIT row remains); after restart, re-attaching works.
 36. ⚑ Submit with an attached image at MEDIUM: `GET /api/draft` (7911) shows
-    `init_image` = the absolute upload path and `direct_init_weight` `"0.3"`,
+    `init_image` = the absolute upload path and `direct_init_weight` `"4"`,
     and **no** `semantic_init_weight` / `perceptor_backend` keys among the
     stored overrides; the render completes on the default backend and frame 1
     visibly starts from the attached image.
-37. SUBTLE and STRONG submissions carry `direct_init_weight` `"0.15"` /
-    `"0.6"` respectively (bench inspector on the created sessions).
+37. SUBTLE and STRONG submissions carry `direct_init_weight` `"1.5"` /
+    `"10"` respectively (bench inspector on the created sessions).
 38. ⚑ HOLD MEANING on: the INIT row shows the `torch engine` note; the
     submitted config has `semantic_init_weight` `"0.3"` **and**
     `perceptor_backend` `"torch"`; the render completes.
@@ -1473,8 +1473,8 @@ Mask editor (toplayer, lightbox-class):
     holds.
 41. ⚑ SAVE uploads a white-on-black PNG (`POST /api/uploads`, `mask-*.png`),
     closes the editor, and the chip reads `MASK ✓`; the submitted
-    `direct_init_weight` is `0.3_[/abs/.../mask-*.png]`. With INVERT on, the
-    bracket carries the leading `-`: `0.3_[-/abs/.../mask-*.png]`.
+    `direct_init_weight` is `4_[/abs/.../mask-*.png]`. With INVERT on, the
+    bracket carries the leading `-`: `4_[-/abs/.../mask-*.png]`.
 42. Saving an all-black (empty) mask toasts `mask is empty — paint where the
     image should hold` and keeps the editor open.
 43. Esc layering: Esc in the editor with unsaved strokes opens the discard

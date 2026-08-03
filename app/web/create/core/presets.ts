@@ -25,7 +25,7 @@
 //     composer with null ids (caller-contract violations). Tweak dims rule: width/height
 //     override only when aspect != null; its size class comes from quality when non-null,
 //     else from exact-matching the BASE dims against the 256 table (miss -> 512 class).
-//     Init rule (§15.6): fresh emits init_image + formatInitWeight (+ semantic '0.3' and
+//     Init rule (§15.6): fresh emits init_image + formatInitWeight (+ semantic '4' and
 //     perceptor_backend torch iff holdMeaning); no attachment -> keys ABSENT, never ''.
 //     Tweak overrides only on diff (an untouched simple/opaque base weight rides
 //     verbatim, preserving bench cutoffs); chip removal deletes the three init keys
@@ -203,7 +203,7 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       values['init_image'] = init.path
       values['direct_init_weight'] = formatInitWeight(strengthWeight(init.strength), init.mask)
       if (init.holdMeaning) {
-        values['semantic_init_weight'] = '0.3'
+        values['semantic_init_weight'] = '4'
         values['perceptor_backend'] = 'torch' // semantic init is torch-only by design
       }
     }
@@ -264,10 +264,10 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       values['direct_init_weight'] = formatInitWeight(weight, init.mask)
     }
     // semantic: no override while the toggle matches the base (a non-0.3 base value
-    // rides verbatim); toggled on -> '0.3'; toggled off -> delete.
+    // rides verbatim); toggled on -> '4'; toggled off -> delete.
     const baseOn = semanticOn(composer.tweak.baseValues)
     if (init.holdMeaning !== baseOn) {
-      if (init.holdMeaning) values['semantic_init_weight'] = '0.3'
+      if (init.holdMeaning) values['semantic_init_weight'] = '4'
       else delete values['semantic_init_weight']
     }
     // backend: pinned unconditionally while hold is on (covers legacy/imported bases

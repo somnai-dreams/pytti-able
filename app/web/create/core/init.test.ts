@@ -13,21 +13,21 @@ import {
 
 describe('strength table', () => {
   test('the exact values (spec §15.5)', () => {
-    expect(strengthWeight('subtle')).toBe('0.15')
-    expect(strengthWeight('medium')).toBe('0.3')
-    expect(strengthWeight('strong')).toBe('0.6')
+    expect(strengthWeight('subtle')).toBe('1.5')
+    expect(strengthWeight('medium')).toBe('4')
+    expect(strengthWeight('strong')).toBe('10')
   })
 })
 
 describe('formatInitWeight', () => {
   test('no mask -> the weight alone', () => {
-    expect(formatInitWeight('0.3', null)).toBe('0.3')
+    expect(formatInitWeight('4', null)).toBe('4')
   })
   test('mask -> bracketed path', () => {
-    expect(formatInitWeight('0.3', { path: '/abs/mask.png', inverted: false })).toBe('0.3_[/abs/mask.png]')
+    expect(formatInitWeight('4', { path: '/abs/mask.png', inverted: false })).toBe('4_[/abs/mask.png]')
   })
   test("inversion '-' goes INSIDE the bracket (engine grammar)", () => {
-    expect(formatInitWeight('0.6', { path: '/abs/mask.png', inverted: true })).toBe('0.6_[-/abs/mask.png]')
+    expect(formatInitWeight('10', { path: '/abs/mask.png', inverted: true })).toBe('10_[-/abs/mask.png]')
   })
 })
 
@@ -41,23 +41,23 @@ describe('parseInitWeight', () => {
     expect(parseInitWeight('0.0')).toEqual({ kind: 'none' })
   })
   test('plain weight -> simple, no mask', () => {
-    expect(parseInitWeight('0.3')).toEqual({ kind: 'simple', weight: '0.3', mask: null })
+    expect(parseInitWeight('4')).toEqual({ kind: 'simple', weight: '4', mask: null })
     expect(parseInitWeight('1')).toEqual({ kind: 'simple', weight: '1', mask: null })
   })
   test('non-numeric weight expression stays simple (weights are expression strings)', () => {
     expect(parseInitWeight('sin(t)')).toEqual({ kind: 'simple', weight: 'sin(t)', mask: null })
   })
   test('bracketed image mask -> simple with mask', () => {
-    expect(parseInitWeight('0.3_[/abs/mask.png]')).toEqual({
+    expect(parseInitWeight('4_[/abs/mask.png]')).toEqual({
       kind: 'simple',
-      weight: '0.3',
+      weight: '4',
       mask: { path: '/abs/mask.png', inverted: false },
     })
   })
   test("'-' inside the bracket -> inverted", () => {
-    expect(parseInitWeight('0.3_[-/abs/mask.png]')).toEqual({
+    expect(parseInitWeight('4_[-/abs/mask.png]')).toEqual({
       kind: 'simple',
-      weight: '0.3',
+      weight: '4',
       mask: { path: '/abs/mask.png', inverted: true },
     })
   })
@@ -75,10 +75,10 @@ describe('parseInitWeight', () => {
   })
   test('cutoff field -> opaque', () => {
     expect(parseInitWeight('1_r_0.3')).toEqual({ kind: 'opaque', raw: '1_r_0.3' })
-    expect(parseInitWeight('0.3_[/abs/mask.png]_0.5')).toEqual({ kind: 'opaque', raw: '0.3_[/abs/mask.png]_0.5' })
+    expect(parseInitWeight('4_[/abs/mask.png]_0.5')).toEqual({ kind: 'opaque', raw: '4_[/abs/mask.png]_0.5' })
   })
   test('video mask -> opaque', () => {
-    expect(parseInitWeight('0.3_[/abs/mask.mp4]').kind).toBe('opaque')
+    expect(parseInitWeight('4_[/abs/mask.mp4]').kind).toBe('opaque')
   })
   test('geometric / semantic / bare-path mask tokens -> opaque', () => {
     expect(parseInitWeight('0.3_r').kind).toBe('opaque')
@@ -92,9 +92,9 @@ describe('parseInitWeight', () => {
 
 describe('matchStrength', () => {
   test('the three preset strings match exactly', () => {
-    expect(matchStrength('0.15')).toBe('subtle')
-    expect(matchStrength('0.3')).toBe('medium')
-    expect(matchStrength('0.6')).toBe('strong')
+    expect(matchStrength('1.5')).toBe('subtle')
+    expect(matchStrength('4')).toBe('medium')
+    expect(matchStrength('10')).toBe('strong')
   })
   test('no normalization, no nearest-neighbor (§5.3 doctrine)', () => {
     expect(matchStrength('0.30')).toBeNull()
@@ -122,7 +122,7 @@ describe('semanticOn', () => {
     expect(semanticOn({ semantic_init_weight: 0 })).toBe(false)
   })
   test('on for any other value, string or number', () => {
-    expect(semanticOn({ semantic_init_weight: '0.3' })).toBe(true)
+    expect(semanticOn({ semantic_init_weight: '4' })).toBe(true)
     expect(semanticOn({ semantic_init_weight: 1 })).toBe(true)
   })
 })
@@ -159,7 +159,7 @@ describe('maskEditingLocked', () => {
   })
   test('null strength on a simple base stays unlocked (CUSTOM weight, editable mask)', () => {
     expect(maskEditingLocked(null, { direct_init_weight: '0.45' })).toBe(false)
-    expect(maskEditingLocked(null, { direct_init_weight: '0.3_[/m.png]' })).toBe(false)
+    expect(maskEditingLocked(null, { direct_init_weight: '4_[/m.png]' })).toBe(false)
   })
   test('null strength on an opaque or empty base locks', () => {
     expect(maskEditingLocked(null, { direct_init_weight: '1_r_0.3' })).toBe(true)
@@ -178,8 +178,8 @@ describe('deriveInitFromBase (§15.8)', () => {
     expect(
       deriveInitFromBase({
         init_image: '/up/tree.png',
-        direct_init_weight: '0.3_[-/up/mask-tree.png]',
-        semantic_init_weight: '0.3',
+        direct_init_weight: '4_[-/up/mask-tree.png]',
+        semantic_init_weight: '4',
       }),
     ).toEqual({
       image: { kind: 'ready', name: 'tree.png', path: '/up/tree.png', localUrl: null },
@@ -202,7 +202,7 @@ describe('deriveInitFromBase (§15.8)', () => {
     expect(maskEditingLocked(init!.strength, { direct_init_weight: '1_r_0.3' })).toBe(true)
   })
   test('numeric legacy weight values are stringified before parsing', () => {
-    const init = deriveInitFromBase({ init_image: '/up/a.png', direct_init_weight: 0.3 })
+    const init = deriveInitFromBase({ init_image: '/up/a.png', direct_init_weight: 4 })
     expect(init!.strength).toBe('medium')
   })
 })
