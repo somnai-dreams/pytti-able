@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+    "target": "es2022",
+    "noEmit": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "incremental": false, // causes subtle wrong caching at module boundaries
+
+    // The kit's required strictness (kit/README.md "Checking") + the vibescript set
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": true,
+    "allowUnreachableCode": true, // kit files were authored under this; pair with a linter's no-unreachable if one lands here
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+
+    "paths": {
+      "@kit/*": ["./kit/*"]
+    }
+  },
+  "include": ["kit", "create", "fr-audit.ts"]
+}

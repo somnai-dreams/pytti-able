@@ -1,0 +1,13 @@
+{
+  "name": "pytti-create-web",
+  "private": true,
+  "scripts": {
+    "build": "bun build create/dom/main.ts --outdir ../static --entry-naming create.[ext] --target browser --minify --sourcemap=linked",
+    "check": "bun test && tsc --noEmit && bun fr-audit.ts"
+  },
+  "devDependencies": {
+    "@chenglou/freerange": "^0.0.2",
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.9.3"
+  }
+}
