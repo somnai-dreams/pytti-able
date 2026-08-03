@@ -108,7 +108,9 @@ backups: 3
 
 gradient_accumulation_steps: 1
 device: null  # null = auto (cuda > mps > cpu); or e.g. cuda:1, mps, cpu
-# mlx: CLIP towers + prompt losses on Apple Metal in fp16, ~1.75x step
-# rate (A/B verified at parity quality vs the same-seed null pair).
-# Set to torch for image prompts, semantic [mask]s, or non-ViT towers.
-perceptor_backend: mlx
+# mlx_full: the ENTIRE still-image step on Apple Metal as one compiled
+# graph — A/B judged at parity quality, 2.1x torch at these settings
+# (2.9x at draft sizes). Stills only: switch to mlx for animation/VQGAN
+# (the error names this), torch for image prompts / semantic masks /
+# non-ViT towers.
+perceptor_backend: mlx_full
