@@ -1,0 +1,460 @@
+/* create.css — Create mode. Dark, chrome recedes; the gallery images are the only
+   saturated thing until hover. Geometry constants mirror app/web/create/core/feel.ts. */
+
+:root {
+  --bg: #0a0a0c;
+  --tile: #16161a;
+  --text: #9aa3ad;
+  --dim: #5c636b;
+  --accent: #00e5ff;
+  --danger: #ff3a3a;
+  /* kit/env safe-area contract */
+  --kit-safe-area-top: env(safe-area-inset-top);
+  --kit-safe-area-right: env(safe-area-inset-right);
+  --kit-safe-area-bottom: env(safe-area-inset-bottom);
+  --kit-safe-area-left: env(safe-area-inset-left);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.dim { color: var(--dim); }
+
+/* ── corner link + sse dot ─────────────────────────────────────────────── */
+
+#advanced-link {
+  position: fixed;
+  top: 22px;
+  right: 24px;
+  z-index: 40; /* above #bar-wrap (30): the corner link stays clickable even if a
+                  degenerate viewport makes the bar's corner graze it */
+  color: var(--dim);
+  text-decoration: none;
+  letter-spacing: 1px;
+}
+#advanced-link:hover { color: var(--accent); }
+
+#sse-dot {
+  position: fixed;
+  top: 52px;
+  right: 24px;
+  z-index: 20;
+  color: var(--danger);
+  animation: sse-blink 1.2s ease-in-out infinite;
+}
+@keyframes sse-blink { 50% { opacity: 0.3; } }
+
+/* ── the bar (fixed band: barTop 18 + barHeight 46 inside barAreaY 78) ─── */
+
+#bar-wrap {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(680px, calc(100vw - 32px));
+  z-index: 30;
+}
+
+/* Below ~932px the centered 680px bar would run under the ADVANCED corner link (the
+   bar's right edge passes 100vw - 126px, the link's clear zone). The bar cedes exactly
+   that corner — still centered, still the hero — so the link stays clickable at 800px.
+   The 300px floor keeps the bar usable at degenerate widths (where the z-order above
+   keeps the link clickable regardless). */
+@media (max-width: 932px) {
+  #bar-wrap { width: max(calc(100vw - 252px), 300px); }
+}
+
+#bar {
+  display: flex;
+  align-items: center;
+  height: 46px;
+  background: var(--tile);
+  border: 1px solid #26262c;
+  border-radius: 8px;
+  padding: 0 8px 0 14px;
+  gap: 8px;
+}
+#bar:focus-within { border-color: #3a3a44; }
+
+#bar-glyph { color: var(--dim); }
+
+#prompt {
+  flex: 1;
+  height: 100%;
+  background: none;
+  border: none;
+  outline: none;
+  color: #cdd6df;
+  font-family: inherit;
+  font-size: 14px;
+}
+#prompt::placeholder { color: var(--dim); }
+#prompt.tweaking { color: var(--accent); }
+#prompt:disabled { opacity: 0.4; }
+
+#gear, #go {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  color: var(--dim);
+  font-size: 15px;
+}
+#gear:hover, #go:hover { color: var(--accent); background: #1d1d23; }
+#go:disabled { opacity: 0.4; }
+
+/* ── popover (anchored to the bar by layout, springs from JS) ──────────── */
+
+#popover {
+  position: absolute;
+  top: 54px; /* barHeight 46 + popoverGapY 8 */
+  right: 0;
+  width: 344px;
+  background: var(--tile);
+  border: 1px solid #26262c;
+  border-radius: 8px;
+  padding: 12px;
+  transform-origin: top right;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pop-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pop-label {
+  width: 62px;
+  flex: none;
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 1px;
+}
+
+.chip {
+  padding: 5px 8px;
+  border: 1px solid #26262c;
+  border-radius: 5px;
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.chip:hover { color: var(--text); border-color: #3a3a44; }
+.chip.sel { color: var(--accent); border-color: var(--accent); }
+.chip.custom { display: none; pointer-events: none; }
+
+/* ── gallery ───────────────────────────────────────────────────────────── */
+
+#gallery-scroll {
+  position: fixed;
+  top: 78px; /* barAreaY */
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+#gallery-canvas { position: relative; }
+
+.tile {
+  position: absolute;
+  top: 0;
+  left: 0;
+  background: var(--tile);
+  border-radius: 6px;
+  overflow: hidden;
+  will-change: transform;
+}
+.tile.clickable { cursor: pointer; }
+.tile.pending { background: none; border: 1px dashed #2e2e36; }
+
+.tile-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.tile-skel { position: absolute; inset: 0; background: var(--tile); }
+.tile.failed .tile-skel { background: #131013; }
+.tile-skel.dead { background: #131013; } /* thumb load error — static slab, no shimmer */
+
+.shimmer {
+  background-image: linear-gradient(105deg, transparent 40%, #ffffff0d 50%, transparent 60%);
+  background-size: 250% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+@keyframes shimmer { from { background-position: 160% 0; } to { background-position: -60% 0; } }
+
+.tile-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 12px;
+  color: var(--dim);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.tile-chip {
+  position: absolute;
+  left: 8px;
+  bottom: 10px;
+  padding: 2px 6px;
+  background: #000000b0;
+  border-radius: 4px;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: var(--text);
+  pointer-events: none;
+}
+.tile-chip.danger { color: var(--danger); }
+.tile-chip.hover-only { opacity: 0; transition: opacity 120ms; }
+.tile:hover .tile-chip.hover-only { opacity: 1; }
+
+.tile-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  background: #000000b0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1;
+}
+.tile-x:hover { color: var(--danger); }
+
+.tile-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: #ffffff14;
+  pointer-events: none;
+}
+.tile-bar-fill { height: 100%; background: var(--accent); }
+.tile-bar.pulse .tile-bar-fill { animation: bar-breath 2s ease-in-out infinite; }
+@keyframes bar-breath { 50% { opacity: 0.45; } }
+.tile-bar.indeterminate .tile-bar-fill { animation: indeterminate 1.4s ease-in-out infinite; }
+@keyframes indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(333%); }
+}
+
+.tile-foot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 6px 8px;
+  background: linear-gradient(transparent, #000000d0);
+  color: #cdd6df;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  transition: opacity 120ms;
+  pointer-events: none;
+}
+.tile:hover .tile-foot { opacity: 1; }
+.tile.pending .tile-foot { display: none; }
+
+/* ── empty / boot states ───────────────────────────────────────────────── */
+
+#empty-state, #boot-fail {
+  position: fixed;
+  top: 40%;
+  left: 0;
+  right: 0;
+  text-align: center;
+  line-height: 2;
+  z-index: 5;
+}
+
+#boot-retry {
+  margin-top: 12px;
+  padding: 6px 18px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--accent);
+  letter-spacing: 1px;
+}
+
+#boot-skel {
+  position: fixed;
+  top: 88px;
+  left: 24px;
+  right: 24px;
+  bottom: 0;
+  columns: 4 220px;
+  column-gap: 14px;
+  z-index: 4;
+  overflow: hidden;
+}
+.skel {
+  break-inside: avoid;
+  height: 220px;
+  margin-bottom: 14px;
+  border-radius: 6px;
+  background-color: var(--tile);
+}
+.skel:nth-child(2n) { height: 300px; }
+.skel:nth-child(3n) { height: 180px; }
+
+/* ── lightbox ──────────────────────────────────────────────────────────── */
+
+#lightbox { position: fixed; inset: 0; }
+
+#lb-scrim { position: absolute; inset: 0; background: #050507f2; }
+
+#lb-stage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  will-change: transform;
+}
+#lb-stage img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+#lb-strip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 104px; /* stripBandX */
+  bottom: 0;
+  overflow: hidden;
+}
+.lb-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  object-fit: cover;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.6;
+  will-change: transform;
+}
+.lb-thumb:hover { opacity: 1; }
+.lb-thumb.focused { opacity: 1; outline: 1px solid var(--accent); }
+
+#lb-chrome {
+  position: absolute;
+  left: 24px;
+  right: 128px;
+  bottom: 0;
+  height: 148px; /* chromeBandY */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+#lb-prompt {
+  color: #cdd6df;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+#lb-prompt.expanded {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+#lb-params { color: var(--dim); font-size: 12px; }
+
+#lb-actions { display: flex; gap: 18px; }
+#lb-actions button {
+  color: var(--dim);
+  font-size: 12px;
+  letter-spacing: 1px;
+  padding: 4px 0;
+}
+#lb-actions button:hover:not(:disabled) { color: var(--accent); }
+#lb-actions button:disabled { opacity: 0.35; cursor: default; }
+#lb-actions #lb-delete:hover:not(:disabled) { color: var(--danger); }
+#lb-actions button.busy { color: var(--accent); }
+
+/* ── confirm + toast (toplayer) ────────────────────────────────────────── */
+
+#confirm {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #05050780;
+}
+#confirm-card {
+  background: var(--tile);
+  border: 1px solid #2e2e36;
+  border-radius: 8px;
+  padding: 20px 24px;
+  max-width: 440px;
+  line-height: 1.8;
+}
+#confirm-actions { margin-top: 14px; display: flex; gap: 14px; }
+#confirm-actions button {
+  padding: 5px 16px;
+  border-radius: 5px;
+  border: 1px solid #3a3a44;
+  letter-spacing: 1px;
+}
+#confirm-yes { color: var(--danger); border-color: var(--danger); }
+#confirm-no:hover { color: var(--text); }
+
+#toast {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--tile);
+  border: 1px solid #2e2e36;
+  border-radius: 6px;
+  padding: 9px 16px;
+  color: #cdd6df;
+  max-width: 70vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>PYTTI STUDIO</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="create.css">
+</head>
+<body>
+  <a id="advanced-link" href="/bench.html" target="_blank" rel="noopener">ADVANCED ↗</a>
+  <div id="sse-dot" style="display:none">◌ sse</div>
+
+  <div id="bar-wrap">
+    <div id="bar">
+      <span id="bar-glyph">⌕</span>
+      <input id="prompt" type="text" placeholder="describe a scene…" autocomplete="off" spellcheck="false">
+      <button id="gear" title="settings">⚙</button>
+      <button id="go" title="render (Enter)">▶</button>
+    </div>
+    <div id="popover" style="display:none">
+      <div class="pop-row">
+        <span class="pop-label">ASPECT</span>
+        <button class="chip" data-aspect="1:1">1:1</button>
+        <button class="chip" data-aspect="3:4">3:4</button>
+        <button class="chip" data-aspect="4:3">4:3</button>
+        <button class="chip" data-aspect="16:9">16:9</button>
+        <button class="chip custom" data-aspect="custom">CUSTOM</button>
+      </div>
+      <div class="pop-row">
+        <span class="pop-label">QUALITY</span>
+        <button class="chip" data-quality="draft">DRAFT</button>
+        <button class="chip" data-quality="standard">STANDARD</button>
+        <button class="chip" data-quality="deep">DEEP</button>
+        <button class="chip custom" data-quality="custom">CUSTOM</button>
+      </div>
+      <div class="pop-row">
+        <span class="pop-label">LOOK</span>
+        <button class="chip" data-look="limited">LIMITED</button>
+        <button class="chip" data-look="unlimited">UNLIMITED</button>
+        <button class="chip" data-look="vqgan">VQGAN</button>
+        <button class="chip custom" data-look="custom">CUSTOM</button>
+      </div>
+      <div class="pop-row">
+        <span class="pop-label">SEED</span>
+        <button class="chip" data-seed="random">⚄ RANDOM</button>
+        <button class="chip" data-seed="locked">🔒 LOCK</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="gallery-scroll">
+    <div id="gallery-canvas"></div>
+  </div>
+
+  <div id="empty-state" style="display:none">
+    <div>type a prompt and press Enter</div>
+    <div class="dim">( / focuses the bar · ⚙ sets size &amp; look )</div>
+  </div>
+
+  <div id="boot-skel">
+    <div class="skel shimmer"></div><div class="skel shimmer"></div><div class="skel shimmer"></div><div class="skel shimmer"></div>
+    <div class="skel shimmer"></div><div class="skel shimmer"></div><div class="skel shimmer"></div><div class="skel shimmer"></div>
+  </div>
+
+  <div id="boot-fail" style="display:none">
+    <div>can't reach the studio server</div>
+    <div id="boot-fail-msg" class="dim"></div>
+    <button id="boot-retry">RETRY</button>
+  </div>
+
+  <div id="lightbox" style="display:none">
+    <div id="lb-scrim"></div>
+    <div id="lb-stage">
+      <img id="lb-img-a" alt="" draggable="false">
+      <img id="lb-img-b" alt="" draggable="false">
+    </div>
+    <div id="lb-strip"></div>
+    <div id="lb-chrome">
+      <div id="lb-prompt"></div>
+      <div id="lb-params"></div>
+      <div id="lb-actions">
+        <button id="lb-rerun">⟳ RE-RUN</button>
+        <button id="lb-tweak">✎ TWEAK</button>
+        <button id="lb-advanced">⚙ ADVANCED</button>
+        <button id="lb-download">↓ DOWNLOAD</button>
+        <button id="lb-delete">✕ DELETE</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirm" style="display:none">
+    <div id="confirm-card">
+      <div id="confirm-text"></div>
+      <div id="confirm-note" class="dim"></div>
+      <div id="confirm-actions">
+        <button id="confirm-yes">CONFIRM</button>
+        <button id="confirm-no">CANCEL</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" style="display:none"></div>
+
+  <script type="module" src="create.js"></script>
+</body>
+</html>

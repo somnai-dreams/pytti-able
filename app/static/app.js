@@ -4161,6 +4161,13 @@ async function boot() {
     state.live.seed = running.seed ?? null
   }
 
+  // deep link: /bench.html#s=<id> stages that session (Create's "Advanced" handoff).
+  // Read once at boot; no hashchange listener — a handoff always loads a fresh document.
+  const dl = /^#s=([A-Za-z0-9_-]+)$/.exec(location.hash)
+  if (dl != null && byId[dl[1]] != null) {
+    state.sel.sessionId = dl[1] === state.live.sessionId ? null : dl[1]
+  }
+
   state.queue = queue.queued ?? null
   state.presets = req(presets, 'presets', 'array', '/api/presets')
 

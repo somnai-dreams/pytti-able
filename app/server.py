@@ -559,6 +559,13 @@ class SessionStore:
         # travel only on SSE state events
         if out["state"] in ("launching", "loading_models", "stopping"):
             out["state"] = "rendering"
+        # Create-mode gallery needs prompt text + frame aspect before any thumb
+        # loads (masonry heights come from data, not image measurement). All
+        # three are null for sessions without a config snapshot (legacy imports).
+        cfg = s.get("config") or {}
+        out["scenes"] = cfg.get("scenes")
+        out["width"] = cfg.get("width")
+        out["height"] = cfg.get("height")
         return out
 
     def summaries(self) -> list[dict]:
@@ -1392,7 +1399,7 @@ class Handler(BaseHTTPRequestHandler):
                 from PIL import Image
                 thumb_dir.mkdir(exist_ok=True)
                 im = Image.open(frame)
-                im.thumbnail((192, 192))
+                im.thumbnail((384, 384))
                 im.convert("RGB").save(thumb, "JPEG", quality=80)
             self._send_file(thumb, "image/jpeg", immutable=True)
         elif kind == "artifacts":
