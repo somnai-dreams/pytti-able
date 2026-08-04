@@ -196,6 +196,19 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       // the modern pair's flat spells (cut renders at 129/200 in live use,
       // 2026-08-03). Re-enable when the detector judges the semantic
       // component with consecutive-verdict confirmation.
+      // No prompt ramp on a single scene: the shared draft's
+      // interpolation_steps otherwise scales the prompt in over the first
+      // 50 steps, ceding the composition-forming window to TV smoothing.
+      interpolation_steps: 0,
+    }
+    // Coarse-to-fine: composition forms at half res where full-frame views
+    // dominate, then refines — the measured difference between a composed
+    // scene and the allover tapestry (judged +0.016 held-out; reproduced
+    // on the modern ensemble 2026-08-04, same seed, only flag changed).
+    // The engine refuses c2f + semantic init, so HOLD MEANING sessions
+    // stay plain-render.
+    if (composer.init == null || !composer.init.holdMeaning) {
+      values['coarse_to_fine'] = true
     }
     if (composer.seedMode.kind === 'locked') values['seed'] = composer.seedMode.seed
     // Init (§15.6): with no attachment NONE of the four keys appear (ruling 5 — schema

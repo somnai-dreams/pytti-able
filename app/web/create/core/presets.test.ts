@@ -36,7 +36,7 @@ describe('quality/look tables', () => {
 })
 
 describe('composeDraft (fresh)', () => {
-  test('overrides-over-defaults: exactly the six fields, no seed when random', () => {
+  test('overrides-over-defaults: exactly the eight fields, no seed when random', () => {
     const payload = composeDraft({
       prompt: '  a mushroom forest ',
       aspect: '16:9',
@@ -53,6 +53,8 @@ describe('composeDraft (fresh)', () => {
       steps_per_scene: 200,
       image_model: 'Limited Palette',
       animation_mode: 'off',
+      interpolation_steps: 0,
+      coarse_to_fine: true,
     })
     expect(payload.forkOf).toBeNull()
     expect(payload.seedLocked).toBe(false)
@@ -407,4 +409,24 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
     expect('semantic_init_weight' in payload.values).toBe(false)
     expect(payload.values['perceptor_backend']).toBe('torch')
   })
+})
+
+
+test('fresh composeDraft with HOLD MEANING omits coarse_to_fine (engine refuses the pair)', () => {
+  const payload = composeDraft({
+    prompt: 'x',
+    aspect: '1:1',
+    quality: 'draft',
+    look: 'limited',
+    seedMode: { kind: 'random' },
+    tweak: null,
+    init: {
+      path: '/up/a.png',
+      strength: 'medium',
+      holdMeaning: true,
+      mask: null,
+    },
+  })
+  expect('coarse_to_fine' in payload.values).toBe(false)
+  expect(payload.values['perceptor_backend']).toBe('torch')
 })
