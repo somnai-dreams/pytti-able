@@ -1267,6 +1267,22 @@ llamagen_model:
     ds8 doubles the token grid for finer texture at higher cost. Torch
     backend only.
 
+coherence_weighting:
+  label: COHERENCE WEIGHTING
+  type: BOOL
+  section: null
+  group: seeing
+  hint: >-
+    Weight full-frame views above detail crops in the semantic loss —
+    global structure outvotes per-patch prompt-stuffing.
+  prose: >-
+    Re-balances the semantic gradient: the smart sampler's full-frame
+    anchors count ~3x and detail crops' text loss scales with their size
+    (total gradient mass unchanged). The aim is compositional coherence —
+    stopping every small crop from being pushed to look like the whole
+    prompt, which is the mechanism behind the classic allover-tapestry
+    look.
+
 phase_scheduling:
   label: PHASE SCHEDULING
   type: BOOL
