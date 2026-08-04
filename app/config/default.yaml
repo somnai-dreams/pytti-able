@@ -41,9 +41,10 @@ steps_per_frame: 20    # -> 30 frames per scene
 interpolation_steps: 50
 
 seed: null  # null = fresh random seed each run
-# 16 is tuned for the default smart sampler (global anchors + stratified
-# detail); switch to ~40 if you select the batched/classic samplers.
-cutouts: 16
+# 40 for the modern default ensemble — held-out adherence is monotonic
+# in cut count with FARE+SigLIP2 (16: 0.284 / 40: 0.314) and 40 is the
+# judged config. Drop to 16 for faster drafts at some composition cost.
+cutouts: 40
 cut_pow: 2.1
 
 border_mode: wrap
