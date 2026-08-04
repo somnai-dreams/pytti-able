@@ -46,6 +46,10 @@ seed: null  # null = fresh random seed each run
 # judged config. Drop to 16 for faster drafts at some composition cost.
 cutouts: 40
 cut_pow: 2.1
+# Judged winner on BOTH held-out judge families (+2.5x and +4.5x the
+# noise floor): full-frame views outvote detail crops in the semantic
+# loss - composed scenes instead of per-patch prompt stuffing.
+coherence_weighting: true
 
 border_mode: wrap
 
