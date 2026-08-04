@@ -1251,6 +1251,21 @@ perceptor_backend:
   costNote: >-
     Free speedup on Apple Silicon; mlx_full is fastest for stills.
 
+llamagen_model:
+  label: LLAMAGEN MODEL
+  type: CHOICE
+  section: engine
+  group: image model
+  hint: >-
+    LlamaGen VQ decoder variant: ds16 (standard) or ds8 (finer texture,
+    heavier).
+  prose: >-
+    Which LlamaGen tokenizer decodes the canvas when IMAGE MODEL is
+    LlamaGen — a modern VQ decoder (rFID ~1 vs taming's ~4-5) with the
+    same codebook-snapping character. ds16 matches VQGAN's f16 geometry;
+    ds8 doubles the token grid for finer texture at higher cost. Torch
+    backend only.
+
 phase_scheduling:
   label: PHASE SCHEDULING
   type: BOOL
