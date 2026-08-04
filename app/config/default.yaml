@@ -51,7 +51,11 @@ cut_pow: 2.1
 # loss - composed scenes instead of per-patch prompt stuffing.
 coherence_weighting: true
 
-border_mode: wrap
+# clamp = crops stay inside the canvas (the judged-reference setting).
+# wrap is the 2021 tileable-texture mode: edge-crossing cutouts sample
+# the OPPOSITE edge, training the image to tile - it actively destroys
+# scene structure (sky gets gradient to continue into ground).
+border_mode: clamp
 
 ##########
 # Camera #
