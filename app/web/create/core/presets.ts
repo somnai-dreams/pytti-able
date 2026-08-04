@@ -191,6 +191,10 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       // leftover animation_mode in the shared draft cannot leak into fresh
       // submissions (the mlx_full default engine refuses animation configs).
       animation_mode: 'off',
+      // Convergence auto-stop: quality presets set the step CAP; the render
+      // ends itself when the loss plateaus (engine fences this to stills,
+      // which the pin above guarantees).
+      auto_stop: true,
     }
     if (composer.seedMode.kind === 'locked') values['seed'] = composer.seedMode.seed
     // Init (§15.6): with no attachment NONE of the four keys appear (ruling 5 — schema

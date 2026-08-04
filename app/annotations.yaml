@@ -1241,7 +1241,8 @@ perceptor_backend:
     step (image decode, cutouts, augs, CLIP towers, losses, Adam) on Apple's
     MLX framework as one compiled graph — the fastest option, biggest win at
     draft sizes. Requires macOS, stills, Limited/Unlimited Palette, the
-    batched or smart sampler, plain adam, and classic ViT towers. mlx runs
+    batched or smart sampler, plain adam, and the classic ViT towers plus
+    FARE-4 B/32 and SigLIP2 B/16 (the default modern pair). mlx runs
     just the towers + prompt losses on Metal (~1.75x) and also covers
     animation and VQGAN. torch is the reference engine: everything, every
     platform. Unsupported configs fail at startup naming the backend to
@@ -1319,9 +1320,10 @@ auto_stop_window:
   type: NUM
   section: null
   group: optimizer
+  relevantWhen: {field: auto_stop, in: [true]}
   hint: >-
     Trailing window (steps) over which convergence is measured. Larger =
-    more patient.
+    more patient. Minimum 20.
   prose: >-
     How many steps of history the convergence detector looks at. Larger
     windows tolerate noisy plateaus before stopping; smaller windows stop
@@ -1332,6 +1334,7 @@ auto_stop_threshold:
   type: NUM
   section: null
   group: optimizer
+  relevantWhen: {field: auto_stop, in: [true]}
   hint: >-
     Relative loss improvement per window below which the render counts as
     converged.

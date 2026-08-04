@@ -88,10 +88,16 @@ direct_stabilization_weight: '1'
 ############
 
 # Each additional model costs step time roughly by its size. The default
-# MLX backend runs the classic ViT towers; RN* ResNets and the modern
-# towers (FARE/SigLIP2) need perceptor_backend: torch.
-ViTB32: true
-ViTB16: true
+# The modern pair: FARE-4 B/32 (robust, perceptually-aligned gradients)
+# + SigLIP2 B/16 (2025-grade prompt comprehension) — judged better prompt
+# interpretation than the classic pair at matched cost, and both run on
+# the MLX backends at classic-pair speed. Classic ViTs remain one click
+# away for the 2021 look. Still torch-only: RN* ResNets, FARE2-L/14,
+# SigLIP2-SO400M.
+ViTB32: false
+ViTB16: false
+FARE4ViTB32: true
+SigLIP2B16: true
 RN50x4: false
 
 ###############
