@@ -46,10 +46,10 @@ seed: null  # null = fresh random seed each run
 # judged config. Drop to 16 for faster drafts at some composition cost.
 cutouts: 40
 cut_pow: 2.1
-# Judged winner on BOTH held-out judge families (+2.5x and +4.5x the
-# noise floor): full-frame views outvote detail crops in the semantic
-# loss - composed scenes instead of per-patch prompt stuffing.
-coherence_weighting: true
+# Opt-in: won its single-prompt A/B but WASHED on the 10-prompt battery
+# (2026-08-05, both judges ~0.40-0.45 win-rate vs off) - no earned
+# authority as a default. Harmless to enable per-render.
+coherence_weighting: false
 
 # clamp = crops stay inside the canvas (the judged-reference setting).
 # wrap is the 2021 tileable-texture mode: edge-crossing cutouts sample

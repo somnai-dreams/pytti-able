@@ -201,15 +201,11 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       // 50 steps, ceding the composition-forming window to TV smoothing.
       interpolation_steps: 0,
     }
-    // Coarse-to-fine: composition forms at half res where full-frame views
-    // dominate, then refines — the measured difference between a composed
-    // scene and the allover tapestry (judged +0.016 held-out; reproduced
-    // on the modern ensemble 2026-08-04, same seed, only flag changed).
-    // The engine refuses c2f + semantic init, so HOLD MEANING sessions
-    // stay plain-render.
-    if (composer.init == null || !composer.init.holdMeaning) {
-      values['coarse_to_fine'] = true
-    }
+    // Coarse-to-fine deliberately NOT pinned (2026-08-05): its 512px
+    // single-prompt win did not survive the screening-tier battery
+    // (wash-to-negative), and screening structurally hobbles it (128px
+    // coarse stage) — unresolved pending a full-tier battery run. Users
+    // can enable it in the bench; no unearned authority as a default.
     if (composer.seedMode.kind === 'locked') values['seed'] = composer.seedMode.seed
     // Init (§15.6): with no attachment NONE of the four keys appear (ruling 5 — schema
     // defaults cover absence; never emit empty-string init keys).
