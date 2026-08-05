@@ -171,7 +171,7 @@ button {
   position: absolute;
   top: 54px; /* barHeight 46 + popoverGapY 8 */
   right: 0;
-  width: 344px;
+  width: 384px; /* fits the STEPS row's five numeric chips + the tweak CUSTOM chip */
   background: var(--tile);
   border: 1px solid #26262c;
   border-radius: 8px;

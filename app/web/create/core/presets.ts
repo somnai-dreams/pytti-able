@@ -1,5 +1,5 @@
 // @cs
-// create/core/presets: THE preset tables (aspect / quality / look / seed) and the two
+// create/core/presets: THE preset tables (aspect / size / steps / look / seed) and the two
 // maps across them — composeSubmission (composer -> the self-contained POST /api/sessions
 // payload; the server composes it over the versioned tuned defaults, spec §5.6) and
 // matchPresets (config snapshot -> preset ids, exact-match only). Also
@@ -7,16 +7,22 @@
 // coercion would 400 on from ever leaving the client. Create never touches /api/draft —
 // the shared draft is the advanced bench's private working state.
 //
+// SIZE and STEPS are independent controls (2026-08-06, decoupled from the retired
+// QUALITY preset that bundled them): size picks the dims class, steps is
+// steps_per_scene VERBATIM — the chips show the raw numbers ("its the biggest
+// lever" — the lead; the detail-recovery battery made steps the dominant lever).
+//
 // String/JSON domain — outside freerange's numeric subset; presets.test.ts is the
 // checked surface.
 //
 // types:
-//   AspectId = '1:1'|'3:4'|'4:3'|'16:9'    QualityId = 'draft'|'standard'|'deep'
-//   LookId = 'limited'|'unlimited'|'vqgan' SeedMode = {kind:'random'} | {kind:'locked', seed}
-//   ComposerSubmitInput = { prompt, aspect|null, quality|null, look|null, seedMode, tweak|null,
-//     init: InitSubmitInput|null }   (null preset ids = "inherit tweak base", reachable
-//     only while tweak != null; init per §15.6 — main maps the attachment through
-//     core/init toInitSubmitInput, which enforces the image-is-ready contract)
+//   AspectId = '1:1'|'3:4'|'4:3'|'16:9'    SizeId = 'draft'|'full'  (256- / 512-class)
+//   StepsId = 150|200|300|450|600          LookId = 'limited'|'unlimited'|'vqgan'
+//   SeedMode = {kind:'random'} | {kind:'locked', seed}
+//   ComposerSubmitInput = { prompt, aspect|null, size|null, steps|null, look|null,
+//     seedMode, tweak|null, init: InitSubmitInput|null }   (null preset ids = "inherit
+//     tweak base", reachable only while tweak != null; init per §15.6 — main maps the
+//     attachment through core/init toInitSubmitInput, which enforces image-is-ready)
 //   SubmissionPayload = { values, forkOf, seedLocked }   — POST /api/sessions body fields
 //
 // constants:
@@ -27,12 +33,14 @@
 //     Enforced by presets.test.ts over the full composer-option product.
 //
 // functions:
-//   resolveDims(aspect, quality) -> {width, height}     pure table lookup
-//   qualitySteps(quality) -> steps_per_scene            draft 150 / standard 200 / deep 300
+//   resolveDims(aspect, size) -> {width, height}        pure table lookup
+//   parseStepsId(raw) -> StepsId                        the STEPS chips' dataset boundary:
+//     exact match against STEPS_IDS, throws on unknown markup (never a nearest number)
 //   lookModel(look) -> image_model string
 //   composeSubmission(composer) -> SubmissionPayload    throws on empty prompt or a fresh
-//     composer with null ids (caller-contract violations). Tweak dims rule: width/height
-//     override only when aspect != null; its size class comes from quality when non-null,
+//     composer with null ids (caller-contract violations). Tweak rules: steps_per_scene
+//     overrides only when steps != null (null inherits the base verbatim); width/height
+//     override only when aspect != null; their size class comes from size when non-null,
 //     else from exact-matching the BASE dims against the 256 table (miss -> 512 class).
 //     Init rule (§15.6): fresh emits init_image + formatInitWeight (+ semantic '4' and
 //     perceptor_backend torch iff holdMeaning); no attachment -> keys ABSENT, never ''.
@@ -41,9 +49,10 @@
 //     (perceptor_backend untouched); holdMeaning pins torch unconditionally when on.
 //   composerDims(composer) -> {width, height}          the dims the submission renders at
 //     (optimistic tile sizing); same dims rule as composeSubmission, base-dims fallback 512x512
-//   matchPresets(values) -> {aspect|null, quality|null, look|null}   exact-match only,
-//     no nearest-neighbor guessing; quality requires steps in {150,200,300} AND its class
-//     to match the dims-derived class
+//   matchPresets(values) -> {aspect|null, size|null, steps|null, look|null}   exact-match
+//     only, no nearest-neighbor guessing; dims match one class table -> aspect + size
+//     together (miss -> both null); steps matches a preset number exactly, independent
+//     of the dims class (the controls are decoupled)
 //   submittableValues(config, schemaFields) -> Record       whitelist filter
 // @/cs
 import {
@@ -56,17 +65,21 @@ import {
 } from './init'
 
 export type AspectId = '1:1' | '3:4' | '4:3' | '16:9'
-export type QualityId = 'draft' | 'standard' | 'deep'
+export type SizeId = 'draft' | 'full'
+export type StepsId = 150 | 200 | 300 | 450 | 600
 export type LookId = 'limited' | 'unlimited' | 'vqgan'
 export type SeedMode = { kind: 'random' } | { kind: 'locked'; seed: number }
 
 export const ASPECT_IDS: readonly AspectId[] = ['1:1', '3:4', '4:3', '16:9']
-export const QUALITY_IDS: readonly QualityId[] = ['draft', 'standard', 'deep']
+export const SIZE_IDS: readonly SizeId[] = ['draft', 'full']
+// steps_per_scene VERBATIM — the gear shows these numbers, no euphemism labels
+// ("its the biggest lever" — the lead; spec §5.1).
+export const STEPS_IDS: readonly StepsId[] = [150, 200, 300, 450, 600]
 export const LOOK_IDS: readonly LookId[] = ['limited', 'unlimited', 'vqgan']
 
 type SizeClass = 256 | 512
 
-// aspect -> [width, height] per size class. Quality picks the class; aspect the shape.
+// aspect -> [width, height] per size class. Size picks the class; aspect the shape.
 const DIMS_256: Record<AspectId, readonly [number, number]> = {
   '1:1': [256, 256],
   '3:4': [224, 288],
@@ -80,11 +93,7 @@ const DIMS_512: Record<AspectId, readonly [number, number]> = {
   '16:9': [640, 360],
 }
 
-const QUALITY: Record<QualityId, { steps: number; sizeClass: SizeClass }> = {
-  draft: { steps: 150, sizeClass: 256 },
-  standard: { steps: 200, sizeClass: 512 },
-  deep: { steps: 300, sizeClass: 512 },
-}
+const SIZE_CLASS: Record<SizeId, SizeClass> = { draft: 256, full: 512 }
 
 const LOOK: Record<LookId, string> = {
   limited: 'Limited Palette',
@@ -93,20 +102,25 @@ const LOOK: Record<LookId, string> = {
 }
 
 // Popover display labels.
-export const QUALITY_LABELS: Record<QualityId, string> = { draft: 'DRAFT', standard: 'STANDARD', deep: 'DEEP' }
 export const LOOK_LABELS: Record<LookId, string> = { limited: 'LIMITED', unlimited: 'UNLIMITED', vqgan: 'VQGAN' }
 
 function dimsTable(sizeClass: SizeClass): Record<AspectId, readonly [number, number]> {
   return sizeClass === 256 ? DIMS_256 : DIMS_512
 }
 
-export function resolveDims(aspect: AspectId, quality: QualityId): { width: number; height: number } {
-  const entry = dimsTable(QUALITY[quality].sizeClass)[aspect]
+export function resolveDims(aspect: AspectId, size: SizeId): { width: number; height: number } {
+  const entry = dimsTable(SIZE_CLASS[size])[aspect]
   return { width: entry[0], height: entry[1] }
 }
 
-export function qualitySteps(quality: QualityId): number {
-  return QUALITY[quality].steps
+// The STEPS chips' dataset strings enter core through this exact match — unknown
+// markup throws (fail loud, §5.3 doctrine: never a nearest number).
+export function parseStepsId(raw: string): StepsId {
+  const n = Number(raw)
+  for (const steps of STEPS_IDS) {
+    if (steps === n) return steps
+  }
+  throw new Error(`parseStepsId: unknown steps preset "${raw}"`)
 }
 
 export function lookModel(look: LookId): string {
@@ -116,7 +130,8 @@ export function lookModel(look: LookId): string {
 export type ComposerSubmitInput = {
   prompt: string
   aspect: AspectId | null
-  quality: QualityId | null
+  size: SizeId | null
+  steps: StepsId | null
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
@@ -141,9 +156,9 @@ export type SubmissionPayload = {
 // Field -> the visible control that determines it.
 export const VISIBLE_CONTROL_FIELDS: readonly string[] = [
   'scenes', // the prompt bar
-  'width', // ASPECT x QUALITY chips (dims table, §5.1)
-  'height', // ASPECT x QUALITY chips
-  'steps_per_scene', // QUALITY chips
+  'width', // ASPECT x SIZE chips (dims table, §5.1)
+  'height', // ASPECT x SIZE chips
+  'steps_per_scene', // STEPS chips — the raw numbers, steps_per_scene verbatim
   'image_model', // LOOK chips
   'seed', // SEED toggle — the locked value is displayed next to it
   'init_image', // the attachment chip (thumb + name)
@@ -175,12 +190,12 @@ function matchAspectInClass(
   return null
 }
 
-// The size class to use for a tweak dims override when quality is CUSTOM (null):
+// The size class to use for a tweak dims override when size is CUSTOM (null):
 // inherit the base's class by exact-matching its dims against the 256 table; any miss
-// (including non-preset base dims) falls to the 512 class — the standard/deep class,
+// (including non-preset base dims) falls to the 512 class — the full class,
 // never a guess at a third size.
-function tweakDimsClass(quality: QualityId | null, baseValues: Record<string, unknown>): SizeClass {
-  if (quality != null) return QUALITY[quality].sizeClass
+function tweakDimsClass(size: SizeId | null, baseValues: Record<string, unknown>): SizeClass {
+  if (size != null) return SIZE_CLASS[size]
   const width = baseValues['width']
   const height = baseValues['height']
   if (typeof width === 'number' && typeof height === 'number' && matchAspectInClass(width, height, 256) != null) {
@@ -191,17 +206,17 @@ function tweakDimsClass(quality: QualityId | null, baseValues: Record<string, un
 
 // The dims the submission will actually render at — the optimistic tile's aspect must
 // match the session tile that replaces it. Mirrors composeSubmission's dims rule: concrete
-// aspect resolves against the (quality- or base-derived) class table; a tweak CUSTOM
+// aspect resolves against the (size- or base-derived) class table; a tweak CUSTOM
 // aspect inherits the base dims; a base without numeric dims falls to 512x512.
 export function composerDims(composer: ComposerSubmitInput): { width: number; height: number } {
   if (composer.tweak == null) {
-    if (composer.aspect == null || composer.quality == null) {
+    if (composer.aspect == null || composer.size == null) {
       throw new Error('composerDims: a fresh composer must have concrete preset ids')
     }
-    return resolveDims(composer.aspect, composer.quality)
+    return resolveDims(composer.aspect, composer.size)
   }
   if (composer.aspect != null) {
-    const entry = dimsTable(tweakDimsClass(composer.quality, composer.tweak.baseValues))[composer.aspect]
+    const entry = dimsTable(tweakDimsClass(composer.size, composer.tweak.baseValues))[composer.aspect]
     return { width: entry[0], height: entry[1] }
   }
   const width = composer.tweak.baseValues['width']
@@ -218,15 +233,15 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
   const seedLocked = composer.seedMode.kind === 'locked'
 
   if (composer.tweak == null) {
-    if (composer.aspect == null || composer.quality == null || composer.look == null) {
+    if (composer.aspect == null || composer.size == null || composer.steps == null || composer.look == null) {
       throw new Error('composeSubmission: a fresh composer must have concrete preset ids')
     }
-    const dims = resolveDims(composer.aspect, composer.quality)
+    const dims = resolveDims(composer.aspect, composer.size)
     const values: Record<string, unknown> = {
       scenes: prompt,
       width: dims.width,
       height: dims.height,
-      steps_per_scene: qualitySteps(composer.quality),
+      steps_per_scene: composer.steps,
       image_model: lookModel(composer.look),
       // Create is a stills surface by construction: pin animation off —
       // self-containment must hold regardless of what the tuned defaults
@@ -276,11 +291,11 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
   }
   values['scenes'] = prompt
   if (composer.aspect != null) {
-    const entry = dimsTable(tweakDimsClass(composer.quality, composer.tweak.baseValues))[composer.aspect]
+    const entry = dimsTable(tweakDimsClass(composer.size, composer.tweak.baseValues))[composer.aspect]
     values['width'] = entry[0]
     values['height'] = entry[1]
   }
-  if (composer.quality != null) values['steps_per_scene'] = qualitySteps(composer.quality)
+  if (composer.steps != null) values['steps_per_scene'] = composer.steps
   if (composer.look != null) values['image_model'] = lookModel(composer.look)
   switch (composer.seedMode.kind) {
     case 'locked':
@@ -339,31 +354,36 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
 
 export function matchPresets(values: Record<string, unknown>): {
   aspect: AspectId | null
-  quality: QualityId | null
+  size: SizeId | null
+  steps: StepsId | null
   look: LookId | null
 } {
   const width = values['width']
   const height = values['height']
   let aspect: AspectId | null = null
-  let matchedClass: SizeClass | null = null
+  let size: SizeId | null = null
   if (typeof width === 'number' && typeof height === 'number') {
+    // aspect and size come from the SAME exact dims match — a pair in the 256 table is
+    // draft, in the 512 table full; a miss leaves both CUSTOM (never one without the other).
     const in256 = matchAspectInClass(width, height, 256)
     const in512 = matchAspectInClass(width, height, 512)
     if (in256 != null) {
       aspect = in256
-      matchedClass = 256
+      size = 'draft'
     } else if (in512 != null) {
       aspect = in512
-      matchedClass = 512
+      size = 'full'
     }
   }
 
-  const steps = values['steps_per_scene']
-  let quality: QualityId | null = null
-  if (typeof steps === 'number' && matchedClass != null) {
-    for (const q of QUALITY_IDS) {
-      if (QUALITY[q].steps === steps && QUALITY[q].sizeClass === matchedClass) {
-        quality = q
+  // Decoupled from the dims class (unlike the retired quality preset): any exact preset
+  // number rematerializes concrete, whatever the base renders at.
+  const rawSteps = values['steps_per_scene']
+  let steps: StepsId | null = null
+  if (typeof rawSteps === 'number') {
+    for (const s of STEPS_IDS) {
+      if (s === rawSteps) {
+        steps = s
         break
       }
     }
@@ -380,7 +400,7 @@ export function matchPresets(values: Record<string, unknown>): {
     }
   }
 
-  return { aspect, quality, look }
+  return { aspect, size, steps, look }
 }
 
 // Keep only keys the config schema knows — parse-at-the-boundary: a snapshot key the

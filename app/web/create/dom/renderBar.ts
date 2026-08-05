@@ -14,7 +14,7 @@ let goEl: HTMLButtonElement
 let attachEl: HTMLButtonElement
 let popEl: HTMLElement
 let sseEl: HTMLElement
-let chips: { el: HTMLElement; row: 'aspect' | 'quality' | 'look' | 'init'; value: string | null }[] = []
+let chips: { el: HTMLElement; row: 'aspect' | 'size' | 'steps' | 'look' | 'init'; value: string | null }[] = []
 let seedRandomEl: HTMLElement
 let seedLockedEl: HTMLElement
 let initRowEl: HTMLElement
@@ -66,8 +66,11 @@ export function initBar(deps: {
   for (const el of popEl.querySelectorAll<HTMLElement>('[data-aspect]')) {
     chips.push({ el, row: 'aspect', value: el.dataset['aspect'] === 'custom' ? null : el.dataset['aspect']! })
   }
-  for (const el of popEl.querySelectorAll<HTMLElement>('[data-quality]')) {
-    chips.push({ el, row: 'quality', value: el.dataset['quality'] === 'custom' ? null : el.dataset['quality']! })
+  for (const el of popEl.querySelectorAll<HTMLElement>('[data-size]')) {
+    chips.push({ el, row: 'size', value: el.dataset['size'] === 'custom' ? null : el.dataset['size']! })
+  }
+  for (const el of popEl.querySelectorAll<HTMLElement>('[data-steps]')) {
+    chips.push({ el, row: 'steps', value: el.dataset['steps'] === 'custom' ? null : el.dataset['steps']! })
   }
   for (const el of popEl.querySelectorAll<HTMLElement>('[data-look]')) {
     chips.push({ el, row: 'look', value: el.dataset['look'] === 'custom' ? null : el.dataset['look']! })
@@ -88,12 +91,16 @@ function mustQuery(selector: string): HTMLElement {
   return el
 }
 
-function rowValue(state: CreateState, row: 'aspect' | 'quality' | 'look' | 'init'): string | null {
+function rowValue(state: CreateState, row: 'aspect' | 'size' | 'steps' | 'look' | 'init'): string | null {
   switch (row) {
     case 'aspect':
       return state.composer.aspect
-    case 'quality':
-      return state.composer.quality
+    case 'size':
+      return state.composer.size
+    case 'steps':
+      // The chips' dataset strings are the numbers verbatim — String() is the dual of
+      // main's parseStepsId at the same dom boundary.
+      return state.composer.steps == null ? null : String(state.composer.steps)
     case 'look':
       return state.composer.look
     case 'init':
