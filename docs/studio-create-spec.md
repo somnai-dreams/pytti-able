@@ -185,7 +185,7 @@ app/web/
       feel.ts               # Create policy constants: gaps, card min width, spring k/b,
                             #   toast ms, starting-grace ms, strip metrics (adopts kit
                             #   mjFeel values where unchanged)
-      presets.ts            # aspect/quality/look/seed tables; resolveDims;
+      presets.ts            # aspect/size/steps/look/seed tables; resolveDims;
                             #   composeSubmission; matchPresets (reverse map);
                             #   the §5.6 invariant whitelists              [+ .test.ts]
       api.ts                # THE parse boundary: parseSessionSummary, parseSessionDetail,
@@ -286,7 +286,8 @@ type Pending =
       deadline: number }  // wake-loop drops it if no SSE 'state' arrives by deadline
 
 type AspectId = '1:1' | '3:4' | '4:3' | '16:9'
-type QualityId = 'draft' | 'standard' | 'deep'
+type SizeId = 'draft' | 'full'
+type StepsId = 150 | 200 | 300 | 450 | 600   // steps_per_scene verbatim (§5.1)
 type LookId = 'limited' | 'unlimited' | 'vqgan'
 type SeedMode = { kind: 'random' } | { kind: 'locked'; seed: number }
 
@@ -295,7 +296,8 @@ type Composer = {
   // null = "inherit tweak base" — reachable ONLY while tweak != null (a fresh
   // composer always has concrete ids). Renders as a CUSTOM chip in the popover.
   aspect: AspectId | null
-  quality: QualityId | null
+  size: SizeId | null
+  steps: StepsId | null
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
@@ -355,21 +357,33 @@ Data-modeling notes (binding):
 
 ### 5.1 The tables — exact values, exhaustive
 
-Quality picks the size class and step count; aspect picks the shape within the
-class. `resolveDims(aspect, quality)` is a pure table lookup:
+(Changed 2026-08-06: the QUALITY preset — which bundled the size class with the
+step count — is retired, decoupled into the two first-class controls below. The
+dims values are unchanged; `standard`'s pair became the defaults.)
 
-| aspect | Draft (256-class) | Standard / Deep (512-class) |
+Size picks the size class, steps is `steps_per_scene` verbatim, aspect picks the
+shape within the class. `resolveDims(aspect, size)` is a pure table lookup:
+
+| aspect | `draft` (256-class) | `full` (512-class) |
 |---|---|---|
 | `1:1`  | 256 × 256 | 512 × 512 |
 | `3:4`  | 224 × 288 | 448 × 576 |
 | `4:3`  | 288 × 224 | 576 × 448 |
 | `16:9` | 320 × 180 | 640 × 360 |
 
-| quality | steps_per_scene | class |
-|---|---|---|
-| `draft` | 150 | 256 |
-| `standard` | 200 | 512 |
-| `deep` | 300 | 512 |
+| size | class |
+|---|---|
+| `draft` | 256 |
+| `full` | 512 |
+
+**STEPS** is the literal union `150 | 200 | 300 | 450 | 600` — `steps_per_scene`
+**verbatim** in the payload, displayed in the gear as the actual numbers, no
+euphemism labels. The lead's directive, verbatim: "i desperately need to be able
+to control the step count from the settings dropdown, its the biggest lever."
+The detail-recovery battery (2026-08-06, `/tmp/pytti-eval/detail-recovery/report.md`)
+established steps as the dominant detail lever — 300 beat 200 at 7W/1L on the
+calibrated judge. The user controls the count now; nothing in Create adjusts it
+behind the gear.
 
 | look | `image_model` value |
 |---|---|
@@ -377,10 +391,13 @@ class. `resolveDims(aspect, quality)` is a pure table lookup:
 | `unlimited` | `Unlimited Palette` |
 | `vqgan` | `VQGAN` |
 
-Popover display labels: `1:1 · 3:4 · 4:3 · 16:9`; `DRAFT · STANDARD · DEEP`;
-`LIMITED · UNLIMITED · VQGAN`; `SEED ⚄ RANDOM / 🔒 <n>`.
+Popover display labels: `1:1 · 3:4 · 4:3 · 16:9`; `DRAFT · FULL`;
+`150 · 200 · 300 · 450 · 600`; `LIMITED · UNLIMITED · VQGAN`;
+`SEED ⚄ RANDOM / 🔒 <n>`.
 
-Fresh composer defaults: `1:1`, `standard`, `limited`, random seed.
+Fresh composer defaults: `1:1`, `full`, `200`, `limited`, random seed — exactly
+what the retired `standard` quality resolved to (512-class dims, 200 steps), so
+a user who never opens the gear submits the identical payload.
 
 ### 5.2 `composeSubmission(composer): { values, forkOf, seedLocked }`
 
@@ -397,8 +414,11 @@ its exact meaning.)
   `forkOf: null`; `seedLocked: seedMode.kind === 'locked'`.
 - Tweak (tweak != null):
   `values = { ...tweak.baseValues, ...overrides, scenes: prompt }` where
-  `overrides` includes width/height/steps only for **non-null** aspect/quality,
-  `image_model` only for non-null look, and seed per seedMode. `forkOf: tweak.of`.
+  `overrides` includes width/height only for **non-null** aspect (their size
+  class from `size` when non-null, else exact-matched from the base dims —
+  miss → 512 class), `steps_per_scene` only for non-null steps (null inherits
+  the base's `steps_per_scene` verbatim), `image_model` only for non-null look,
+  and seed per seedMode. `forkOf: tweak.of`.
   The fork snapshot **is** the values set (already complete); no defaults-merge
   semantics are needed for it to replay faithfully.
 - `tweak.baseValues` is built by `submittableValues(config, schemaFields)`: keep
@@ -406,12 +426,16 @@ its exact meaning.)
   fetched at boot). This is parse-at-the-boundary: a snapshot key the server's
   coercion would 400 on (e.g. anything non-schema) never leaves the client.
 
-### 5.3 `matchPresets(values): { aspect, quality, look }` (reverse map, for Tweak)
+### 5.3 `matchPresets(values): { aspect, size, steps, look }` (reverse map, for Tweak)
 
-Exact-match only: `(width,height)` against the dims table → aspect + class;
-`steps_per_scene` ∈ {150,200,300} AND its class matches the dims class → quality;
-`image_model` against the look table → look. Any miss → `null` for that control
-(renders as `CUSTOM`, inherits base on submit). No nearest-neighbor guessing.
+Exact-match only: `(width,height)` against the dims table → aspect **and** size
+together (a pair in the 256 table is `draft`, in the 512 table `full`; a miss
+leaves both `null` — never one without the other); `steps_per_scene` ∈
+{150,200,300,450,600} → steps, **independent of the dims class** (the controls
+are decoupled — 512×512 at 150 steps rematerializes `full` + `150`, both
+concrete); `image_model` against the look table → look. Any miss → `null` for
+that control (renders as `CUSTOM`, inherits base on submit). No nearest-neighbor
+guessing — 275 steps is `CUSTOM`, never rounded to 300.
 
 ### 5.4 Seed control
 
@@ -464,8 +488,8 @@ Visible controls (field → the control that determines it):
 | field | control |
 |---|---|
 | `scenes` | the prompt bar |
-| `width`, `height` | ASPECT × QUALITY chips (§5.1 dims table) |
-| `steps_per_scene` | QUALITY chips |
+| `width`, `height` | ASPECT × SIZE chips (§5.1 dims table) |
+| `steps_per_scene` | STEPS chips (the raw numbers, verbatim) |
 | `image_model` | LOOK chips |
 | `seed` | SEED toggle (the locked value is displayed next to it) |
 | `init_image` | the attachment chip (thumb + name) |
@@ -532,7 +556,7 @@ not same pixels.)
 **A4 — Tweak (lightbox action on session S): prefill bar + popover.**
 1. Ensure `tile.detail` as in A3.
 2. `composer.prompt = String(config.scenes)`; `composer.tweak = { of: S,
-   baseValues: submittableValues(config) }`; `{aspect, quality, look} =
+   baseValues: submittableValues(config) }`; `{aspect, size, steps, look} =
    matchPresets(config)` (nulls → CUSTOM chips); `seedMode = { kind: 'locked',
    seed: config.seed }` (deterministic iteration; lineage matches the bench's
    fork-locks-seed convention).
@@ -854,7 +878,8 @@ Exactly the chassis-notes composition:
                                             │
                           ┌─────────────────▼──────────────────┐
                           │ ASPECT   [1:1] [3:4] [4:3] [16:9]  │
-                          │ QUALITY  [DRAFT] [STANDARD] [DEEP] │
+                          │ SIZE     [DRAFT] [FULL]            │
+                          │ STEPS    [150][200][300][450][600] │
                           │ LOOK     [LIMITED] [UNLTD] [VQGAN] │
                           │ SEED     [⚄ RANDOM] [🔒 3982117]   │
                           └────────────────────────────────────┘
@@ -984,7 +1009,7 @@ Environment: build (`cd app/web && bun run build`), then start a **dedicated**
 server instance — `PYTTI_STUDIO_PORT=7911 python app/server.py` from the repo
 root (or the launch script with that env). **Never open, curl, or automate
 anything on port 7860.** Items marked ⚑ need a second short render; keep renders
-Draft/1:1 so each finishes in ~1 minute on this machine.
+DRAFT size / 1:1 / 150 steps so each finishes in ~1 minute on this machine.
 
 1. `GET http://127.0.0.1:7911/` serves the Create shell; no console errors on
    load; the gallery shows existing sessions (or the §10.6 empty state on a
@@ -995,9 +1020,9 @@ Draft/1:1 so each finishes in ~1 minute on this machine.
    with that session staged (stage header shows its id).
 4. On Create, pressing `/` focuses the prompt bar; typing echoes without caret
    jumps; Esc blurs.
-5. ⚙ opens the settings popover with a spring; it contains exactly four rows —
-   aspect (4 chips), quality (3), look (3), seed toggle — and nothing else;
-   outside-click and Esc close it.
+5. ⚙ opens the settings popover with a spring; it contains exactly five rows —
+   aspect (4 chips), size (2), steps (5 numeric chips: 150–600), look (3), seed
+   toggle — and nothing else; outside-click and Esc close it.
 6. Type a prompt, Enter: an optimistic tile appears at the top-left **in the
    same frame** (before any network response — verify via throttled network),
    then transitions through `warming up…`/`loading models…` into a live
@@ -1006,9 +1031,10 @@ Draft/1:1 so each finishes in ~1 minute on this machine.
    events swapping the derived thumb URL), and the progress bar advances.
 8. ⚑ On completion the tile settles to its newest thumb with no chrome; hover
    shows the one-line footer with the prompt text.
-9. Popover 16:9 + Standard, submit: the finished session's params line in the
-   lightbox reads `640×360 · 200/200 steps`. Draft + 1:1 reads
-   `256×256 · 150/150 steps`.
+9. Popover 16:9 + FULL + 200, submit: the finished session's params line in the
+   lightbox reads `640×360 · 200/200 steps`. 1:1 + DRAFT + 150 reads
+   `256×256 · 150/150 steps`. 1:1 + DRAFT + 300 reads `256×256 · 300/300 steps`
+   (steps decoupled from size).
 10. Seed: two consecutive submits with seed RANDOM and identical prompt produce
     different seeds (params lines differ). Toggle seed LOCKED (a number
     appears), submit twice: both sessions show that same seed.
@@ -1073,7 +1099,7 @@ Draft/1:1 so each finishes in ~1 minute on this machine.
     panel).
 
 Items 33–48 (image input + mask, §15) continue this list in §15.11. Item 5's
-"exactly four rows" holds only while no image is attached — see §15.5.
+"exactly five rows" holds only while no image is attached — see §15.5.
 
 ---
 
@@ -1177,7 +1203,7 @@ type InitAttachment = {
   image: InitImage
   strength: InitStrengthId | null   // null = CUSTOM — inherit the base's weight
                                     //   expression; reachable ONLY while tweak != null
-                                    //   (mirrors aspect/quality/look, §4)
+                                    //   (mirrors aspect/size/steps/look, §4)
   holdMeaning: boolean              // semantic_init_weight + torch pin (§15.6)
   mask: InitMask | null
 }
@@ -1255,17 +1281,18 @@ base's weight is opaque (§15.6). A saved mask renders the affordance as
 toast `image still uploading`, no optimistic tile, stop. **Bar-clear rule
 extension** (A1 step 4): clearing the bar resets the *whole* composer — tweak
 AND attachment (chip, mask, INIT row) — so `strength: null` stays unreachable
-outside tweak mode, mirroring the aspect/quality invariant.
+outside tweak mode, mirroring the aspect/size/steps invariant.
 
 ### 15.5 INIT row (settings popover — amends §10.2 and checklist item 5)
 
-The row exists **iff** `composer.init != null` (the popover has four rows
-without an attachment, five with — item 5 is amended accordingly):
+The row exists **iff** `composer.init != null` (the popover has five rows
+without an attachment, six with — item 5 is amended accordingly):
 
 ```
    ┌─────────────────────────────────────────────┐
    │ ASPECT   [1:1] [3:4] [4:3] [16:9]           │
-   │ QUALITY  [DRAFT] [STANDARD] [DEEP]          │
+   │ SIZE     [DRAFT] [FULL]                     │
+   │ STEPS    [150] [200] [300] [450] [600]      │
    │ LOOK     [LIMITED] [UNLTD] [VQGAN]          │
    │ SEED     [⚄ RANDOM] [🔒 3982117]            │
    │ INIT     [SUBTLE] [MEDIUM] [STRONG]  ◈ HOLD │
