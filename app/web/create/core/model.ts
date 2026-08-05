@@ -50,7 +50,7 @@ import type { SwipeDirection } from '@kit/reel-strip/core'
 import type { Env } from '@kit/env/core'
 import { feel } from './feel'
 import type { InitAttachment } from './init'
-import type { AspectId, LookId, QualityId, SeedMode } from './presets'
+import type { AspectId, LookId, SeedMode, SizeId, StepsId } from './presets'
 
 export type SessionState = 'rendering' | 'stopped' | 'done' | 'failed' | 'imported'
 export type TerminalState = 'done' | 'stopped' | 'failed'
@@ -118,7 +118,8 @@ export type Composer = {
   prompt: string
   // null = "inherit tweak base" — reachable ONLY while tweak != null.
   aspect: AspectId | null
-  quality: QualityId | null
+  size: SizeId | null
+  steps: StepsId | null // steps_per_scene verbatim (§5.1 — the biggest lever)
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null

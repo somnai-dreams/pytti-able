@@ -12,7 +12,7 @@ function state(over: Partial<CreateState> = {}): CreateState {
     tiles: [],
     pending: null,
     queue: [],
-    composer: { prompt: '', aspect: '1:1', quality: 'standard', look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null, popoverOpen: false },
+    composer: { prompt: '', aspect: '1:1', size: 'full', steps: 200, look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null, popoverOpen: false },
     lastRun: null,
     lastSeed: null,
     lightbox: null,

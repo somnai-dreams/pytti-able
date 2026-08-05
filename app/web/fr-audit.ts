@@ -43,7 +43,10 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // -failSubmission (one-slot contract dead), +findQueueItem, +removeQueueItem —
   // same domain, same checked surface.
   { file: 'create/core/model.ts', coverage: '3/15', partial: 0 },
-  { file: 'create/core/presets.ts', coverage: '1/10', partial: 0 },
+  // 1/10 -> 2/10 with the SIZE/STEPS split: qualitySteps (unsupported Record read)
+  // retired; parseStepsId (numeric exact-match loop, ensures return in 150..600) is
+  // fully analyzed alongside dimsTable.
+  { file: 'create/core/presets.ts', coverage: '2/10', partial: 0 },
   { file: 'create/core/surfaces.ts', coverage: '1/2', partial: 0 },
 ]
 

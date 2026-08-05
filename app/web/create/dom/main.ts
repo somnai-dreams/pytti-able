@@ -32,7 +32,7 @@ import {
   type SseEvent,
   type Tile,
 } from '../core/model'
-import { composeSubmission, composerDims, submittableValues, type SubmissionPayload, matchPresets } from '../core/presets'
+import { composeSubmission, composerDims, matchPresets, parseStepsId, type SubmissionPayload, submittableValues } from '../core/presets'
 import { topmostDismissable } from '../core/surfaces'
 import * as net from './net'
 import { initBar, renderBar } from './renderBar'
@@ -94,7 +94,8 @@ const state: CreateState = {
   composer: {
     prompt: '',
     aspect: '1:1',
-    quality: 'standard',
+    size: 'full', // the retired 'standard' quality's pair: 512-class dims + 200 steps —
+    steps: 200, //   the never-opened-gear payload is byte-identical (§5.1)
     look: 'limited',
     seedMode: { kind: 'random' },
     tweak: null,
@@ -415,7 +416,8 @@ function submit(): void {
   const submitInput = {
     prompt: composer.prompt,
     aspect: composer.aspect,
-    quality: composer.quality,
+    size: composer.size,
+    steps: composer.steps,
     look: composer.look,
     seedMode: composer.seedMode,
     tweak: composer.tweak,
@@ -474,7 +476,8 @@ async function tweakSession(id: string): Promise<void> {
   composer.tweak = { of: id, baseValues: submittableValues(config, state.schemaFields) }
   const match = matchPresets(config)
   composer.aspect = match.aspect
-  composer.quality = match.quality
+  composer.size = match.size
+  composer.steps = match.steps
   composer.look = match.look
   const seed = config['seed']
   composer.seedMode = typeof seed === 'number' ? { kind: 'locked', seed } : { kind: 'random' }
@@ -773,7 +776,8 @@ promptEl.addEventListener('input', () => {
     if (state.composer.tweak != null) {
       state.composer.tweak = null
       state.composer.aspect = '1:1'
-      state.composer.quality = 'standard'
+      state.composer.size = 'full'
+      state.composer.steps = 200
       state.composer.look = 'limited'
       state.composer.seedMode = { kind: 'random' }
     }
@@ -824,13 +828,15 @@ popoverEl.addEventListener('click', (e) => {
   const chip = target.closest<HTMLElement>('.chip')
   if (chip == null) return
   const aspect = chip.dataset['aspect']
-  const quality = chip.dataset['quality']
+  const size = chip.dataset['size']
+  const steps = chip.dataset['steps']
   const look = chip.dataset['look']
   const seed = chip.dataset['seed']
   const initStrength = chip.dataset['initStrength']
   const init = state.composer.init
   if (aspect != null && aspect !== 'custom') state.composer.aspect = aspect as CreateState['composer']['aspect']
-  else if (quality != null && quality !== 'custom') state.composer.quality = quality as CreateState['composer']['quality']
+  else if (size != null && size !== 'custom') state.composer.size = size as CreateState['composer']['size']
+  else if (steps != null && steps !== 'custom') state.composer.steps = parseStepsId(steps)
   else if (look != null && look !== 'custom') state.composer.look = look as CreateState['composer']['look']
   else if (seed === 'random') state.composer.seedMode = { kind: 'random' }
   else if (seed === 'locked') state.composer.seedMode = { kind: 'locked', seed: pinnedSeed() }

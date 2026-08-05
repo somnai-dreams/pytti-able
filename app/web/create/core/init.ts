@@ -15,7 +15,7 @@
 //   InitMask    = { path, inverted }                   abs path of the mask PNG upload
 //   InitAttachment = { image, strength|null, holdMeaning, mask|null }
 //     strength null = CUSTOM (inherit the base's weight expression) — reachable ONLY
-//     while composer.tweak != null, mirroring aspect/quality/look
+//     while composer.tweak != null, mirroring aspect/size/steps/look
 //   InitSubmitInput = { path, strength|null, holdMeaning, mask|null }  composeSubmission's view
 //   ParsedInitWeight = none | simple{weight, mask|null} | opaque{raw}
 //
