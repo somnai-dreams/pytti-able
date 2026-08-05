@@ -31,7 +31,10 @@ scene_suffix: '| signature:-1.0:-.95 | signatures:-1.0:-.95 | text:-1.0:-.95'
 
 image_model: Limited Palette
 vqgan_model: coco
-animation_mode: '2D'   # 3D needs the depth model — parked on Mac for now
+# off: the default mlx_full backend is stills-only and refuses animation
+# configs. To animate: set perceptor_backend torch + pick 2D (3D needs the
+# depth model — parked on Mac for now).
+animation_mode: 'off'
 
 width: 512
 height: 512
@@ -75,7 +78,10 @@ infill_mode: wrap
 ##################################
 
 pixel_size: 1
-smoothing_weight: 1
+# Engine schema default. The old STUDIO value (1 = 50x) was never
+# battery-tested and TV-smooths composition flat — the documented
+# contamination set (spec §5.6) shipped it to every render for weeks.
+smoothing_weight: 0.02
 
 #######################
 ### Limited Palette ###
@@ -84,13 +90,14 @@ smoothing_weight: 1
 palette_size: 50
 palettes: 18
 gamma: 1.5
-hdr_weight: 0.35
-palette_normalization_weight: 0.75
+# Engine schema defaults — the old 0.35/0.75 were untested 2021 carryovers.
+hdr_weight: 0.01
+palette_normalization_weight: 0.2
 
 ##################################
 
 frames_per_second: 12
-direct_stabilization_weight: '1'
+direct_stabilization_weight: ''
 
 ############
 ### CLIP ###
