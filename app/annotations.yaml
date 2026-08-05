@@ -1315,6 +1315,23 @@ coarse_to_fine:
   costNote: >-
     Faster overall — early steps run at quarter cost.
 
+coarse_stages:
+  label: COARSE STAGES
+  type: NUM
+  section: null
+  group: optimizer
+  relevantWhen: {field: coarse_to_fine, in: [true]}
+  hint: >-
+    Pyramid depth: 2 = half-res then full; 3 = thumbnail, half, full
+    (composition fully observed at the smallest stage).
+  prose: >-
+    How many progressive stages COARSE TO FINE renders. At 3, a 512
+    render opens at 128px — smaller than the perceptors' own input, so
+    the whole composition is observed rather than sampled — then 256,
+    then full resolution, each stage growing from the last. Judged at
+    full tier: the 3-stage pyramid beat single-stage 16-4 on the
+    eye-calibrated judge with no texture penalty.
+
 auto_stop:
   label: AUTO STOP
   type: BOOL

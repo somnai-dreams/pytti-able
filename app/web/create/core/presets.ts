@@ -201,11 +201,15 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       // 50 steps, ceding the composition-forming window to TV smoothing.
       interpolation_steps: 0,
     }
-    // Coarse-to-fine deliberately NOT pinned (2026-08-05): its 512px
-    // single-prompt win did not survive the screening-tier battery
-    // (wash-to-negative), and screening structurally hobbles it (128px
-    // coarse stage) — unresolved pending a full-tier battery run. Users
-    // can enable it in the bench; no unearned authority as a default.
+    // Pyramid rendering (full-tier battery, 2026-08-05: pyramid3 beat
+    // single-stage 16W/4L on the eye-calibrated judge, no texture penalty
+    // per ViT-L/14; compare sheets confirmed by eye): thumbnail -> half ->
+    // full, composition observed before it is refined. The engine refuses
+    // c2f + semantic init, so HOLD MEANING sessions stay plain-render.
+    if (composer.init == null || !composer.init.holdMeaning) {
+      values['coarse_to_fine'] = true
+      values['coarse_stages'] = 3
+    }
     if (composer.seedMode.kind === 'locked') values['seed'] = composer.seedMode.seed
     // Init (§15.6): with no attachment NONE of the four keys appear (ruling 5 — schema
     // defaults cover absence; never emit empty-string init keys).

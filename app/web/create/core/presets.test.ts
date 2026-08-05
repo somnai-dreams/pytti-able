@@ -36,7 +36,7 @@ describe('quality/look tables', () => {
 })
 
 describe('composeDraft (fresh)', () => {
-  test('overrides-over-defaults: exactly the seven fields, no seed when random', () => {
+  test('overrides-over-defaults: exactly the nine fields, no seed when random', () => {
     const payload = composeDraft({
       prompt: '  a mushroom forest ',
       aspect: '16:9',
@@ -54,6 +54,8 @@ describe('composeDraft (fresh)', () => {
       image_model: 'Limited Palette',
       animation_mode: 'off',
       interpolation_steps: 0,
+      coarse_to_fine: true,
+      coarse_stages: 3,
     })
     expect(payload.forkOf).toBeNull()
     expect(payload.seedLocked).toBe(false)
