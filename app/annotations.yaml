@@ -1389,3 +1389,40 @@ optimizer:
     schedule question and saves frames from a smoothed average of recent
     optimization states — steadier structure in stills and less shimmer in
     animations. Opt-in while A/B testing runs.
+
+init_spectrum:
+  label: INIT SPECTRUM
+  type: CHOICE
+  section: null
+  group: seeding
+  relevantWhen: {field: image_model, in: ["Limited Palette", "Unlimited Palette"]}
+  hint: >-
+    Noise texture of the blank-canvas start: white (classic static), gray,
+    pink (1/f clouds), fractal. Ignored when an init image is set.
+  prose: >-
+    Shapes the random noise the render starts from when no INIT IMAGE is
+    set (with an init image this knob is never consulted). white = the
+    historical iid uniform noise, bit-for-bit. gray = mid-gray with
+    one-bit symmetry-breaking noise. pink = FFT-shaped 1/f^alpha gaussian
+    noise — natural images live near alpha 1, so the canvas opens as soft
+    clouds instead of static. fractal = multi-octave pyramid noise, a
+    second power-law family with no FFT. Shaped fields match white's
+    brightness moments per channel; Limited Palette shapes both the value
+    plane and the palette-selection logits. VQGAN and LlamaGen start from
+    a categorical codebook draw — no spectrum to shape — so any non-white
+    value fails loudly at startup there.
+
+init_spectrum_falloff:
+  label: INIT SPECTRUM FALLOFF
+  type: NUM
+  section: null
+  group: seeding
+  relevantWhen: {field: init_spectrum, in: ["pink"]}
+  hint: >-
+    Amplitude decay power for pink init noise: 1 = the natural 1/f^2 power
+    spectrum; higher = smoother/cloudier, lower = closer to white.
+  prose: >-
+    The alpha in the pink spectrum's amplitude ~ 1/f^alpha decay. 1 gives
+    the natural ~1/f^2 power spectrum of photographs; higher values push
+    energy into low frequencies for smoother, cloudier starts; values near
+    0 approach white noise. Only consulted when INIT SPECTRUM is pink.

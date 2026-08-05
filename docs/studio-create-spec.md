@@ -156,14 +156,75 @@ defaults + `config/default.yaml` curation, the same base a fresh draft starts
 from — with `coerce_values(body.values)` applied on top. Then the **same**
 `preflight` + mode dispatch as the draft path. 400 on: an unknown envelope key,
 non-object `values`, mistyped `forkOf`/`seedLocked`, any unknown or mistyped
-config field, or preflight errors. Responses are unchanged: `201 {sessionId,
-seed}` / `202 {queued, replaced}` / `400 {error, issues?}` / `409` (mode `now`,
-busy).
+config field, preflight errors, or a full queue (§2.5). Responses:
+
+| status | body | when |
+|---|---|---|
+| `201` | `{sessionId, seed}` | started immediately (`now` idle, `queue` idle+empty queue, `preempt` idle) |
+| `202` | `{queuedId, position}` | `queue`, busy — APPENDED to the FIFO; `position` is 1-based |
+| `202` | `{preempting, queuedId, position: 1}` | `preempt`, busy — live render stopped, preemptor parked at the head |
+| `400` | `{error, issues?}` | coercion, preflight, or queue-cap failure |
+| `409` | `{error, live}` | `now`, busy — unchanged |
+
+(The pre-queue-rework `202 {queued, replaced}` shape — and the whole silent-replace
+contract behind it — is dead. There is no `replaced` field anywhere.)
 
 Covered by `app/test_server.py` (in-process handler tests, stdlib unittest —
 `.venv/bin/python app/test_server.py`): defaults+values composition, draft
 byte/mtime-untouched on the self-contained path, unknown-field 400s, preflight
-firing on both paths, and the draft-based regression suite.
+firing on both paths, the draft-based regression suite, and the §2.5 queue
+suites (append/positions, cap, cancel renumber, auto-start on done AND failed,
+preflight-fail-at-start robustness, cancel-vs-autostart, preempt-queue-intact,
+draft-composed-at-enqueue immutability).
+
+### 2.5 The render queue — a real FIFO (reworked 2026-08-06)
+
+> "why do you replace my queued render instead of adding it to the queue, wtf is
+> the point of a queue if it can only have one item lol" — the user directive
+> that killed the one-slot queue.
+
+`MANAGER.queue` is an ordered FIFO, **cap 20** (`QUEUE_CAP`). Over-cap `queue`
+submissions get `400 {error}` naming the cap; nothing is ever evicted. Every
+item stores its FULL composed submission at enqueue time — `{id, slug, values,
+forkOf, seedLocked, enqueuedAt}` — self-contained per the §5.6 isolation
+invariant: a bodyless (bench, draft-based) submission composes the draft **at
+enqueue**, so later draft edits never mutate a queued item. Item ids are minted
+at enqueue and become the session id at start.
+
+Endpoints:
+
+| method + path | behavior |
+|---|---|
+| `POST /api/sessions {mode:'queue'}` | idle + empty queue → starts (`201`); otherwise **APPENDS** (`202 {queuedId, position}`) — never replaces |
+| `POST /api/sessions {mode:'preempt'}` | the EXPLICIT jump-the-line verb (bench-only): live render killed, preemptor parked at the **head**, existing queue intact behind it (`202 {preempting, queuedId, position: 1}`); idle → plain start (`201`). Bypasses the cap but holds exactly ONE slot: while the previous preemptor is still parked (the live render takes up to 5 s to die — SIGTERM grace), another preempt REPLACES it — N impatient clicks = one render, and the backlog never grows past cap+1 |
+| `GET /api/queue` | `{items: [{id, position, slug, scenes, width, height, stepsPerScene, enqueuedAt}, …]}` — ordered, 1-based positions, enough per item to render a tile without another fetch |
+| `DELETE /api/queue/{id}` | cancel ONE item → `204`, positions renumber; `404` if it already started or was cancelled. Never touches the running render |
+| `DELETE /api/queue` | clear the whole queue (the bench's CLEAR QUEUE) → `204` |
+
+Lifecycle: when the running render reaches ANY terminal state (done, failed, or
+stopped/cancelled — preemption included), `_finalize` → `_start_next()` starts
+the head under the item's pre-minted id. The head is **peeked, not popped**: it
+stays in the queue — still cancellable, still counted by enqueue's idle check,
+its id still taken for minting — until the spawn (or its failure record) commits
+under the lock, so no window exists where an item lives outside both the queue
+and the live slot. Head-of-line start is robust: the item is **re-preflighted at
+start** (its init image may have vanished since enqueue) and a failure —
+including an exception inside preflight or the failure-record write itself —
+surfaces as a `failed` session (failExcerpt = the errors) while the next item
+starts; nothing that happens to one item can wedge the drain. A manual start
+winning the peek→commit window simply leaves the head queued for the next
+`_finalize`. Every queue mutation (append, cancel, drain, preempt, clear)
+publishes the full `{items}` list as the `queue` SSE event.
+
+Thread-safety: all queue mutations, the busy check, the start-vs-append
+decision, and the head's peek→commit spawn happen under `MANAGER._lock` in
+single acquisitions (`_spawn_locked` exists so enqueue and `_start_next` can
+spawn atomically with their checks) — no lost items, no double-starts, no
+start-after-cancel, no FIFO jumps by latecomer submissions, no minted-id
+collisions. `_publish_queue` snapshots AND publishes under the lock (callers
+never hold it — non-reentrant), so racing mutations land their snapshots in
+the SSE ring in snapshot order and a client replacing its mirror wholesale can
+never see an older list after a newer one.
 
 ---
 
@@ -278,12 +339,17 @@ type Tile = {
                                           //   forever (snapshots are immutable)
 }
 
-// At most ONE pending creation exists at a time (single-slot queue).
+// Pending covers ONLY Create's own optimistic submission lifecycle: the in-flight POST
+// and the enqueue->launching handoff gap. QUEUED tiles are NOT pending — they derive
+// from `queue`, the server-truth FIFO mirror, directly (one representation per fact).
 type Pending =
   | { kind: 'posting'; prompt: string; sizeX: number; sizeY: number }
-  | { kind: 'queued'; id: string; prompt: string; sizeX: number; sizeY: number }
   | { kind: 'starting'; id: string; prompt: string; sizeX: number; sizeY: number;
       deadline: number }  // wake-loop drops it if no SSE 'state' arrives by deadline
+
+// One queued render as the server sends it (§2.5): enough to render a tile. position is
+// 1-based, server-sent, and index-verified at the parse boundary.
+type QueueItem = { id: string; position: number; prompt: string; sizeX: number; sizeY: number }
 
 type AspectId = '1:1' | '3:4' | '4:3' | '16:9'
 type QualityId = 'draft' | 'standard' | 'deep'
@@ -316,7 +382,8 @@ type CreateState = {
   schemaFields: string[]                          // schema field-name whitelist (§5.2)
   tiles: Tile[]                                   // newest-first (server order preserved)
   pending: Pending | null
-  queue: { id: string; slug: string } | null      // server-truth mirror, SSE-driven
+  queue: QueueItem[]                              // server-truth FIFO mirror, SSE-driven;
+                                                  //   queued tiles derive from it
   composer: Composer
   lastRun: { values: Record<string, unknown>; forkOf: string | null;
              seedLocked: boolean } | null         // Cmd+Enter replays this verbatim
@@ -344,8 +411,9 @@ Data-modeling notes (binding):
 - The newest thumb URL is **derived**: `thumbUrl(id, tile.frames)` — never stored.
   Same for the newest frame URL. (`/api/sessions/{id}/thumbs/{i}` is immutable per
   index; the index moving IS the invalidation.)
-- No field mirrors another. `queue` mirrors the server slot; `pending` is Create's
-  own submission lifecycle; they reference each other by id only.
+- No field mirrors another. `queue` mirrors the server FIFO and queued tiles derive
+  from it directly; `pending` is Create's own submission lifecycle (posting/starting
+  only); they reference each other by id only.
 - Tile identity keys everything (DOM node map, springs, anchor pin) — never
   view-tree position.
 
@@ -500,15 +568,18 @@ Guards: `boot.phase === 'ready'`, `prompt.trim() !== ''`.
 2. `POST /api/sessions {mode: 'queue', ...composeSubmission(composer)}` — the
    **one** network call: a self-contained submission (S4, §2.4); the shared
    draft is untouched (§5.6). Create always uses `queue` (idle → starts
-   immediately; busy → the one-slot queue). **Never `preempt` from Create** —
-   killing a live render is a bench verb.
+   immediately; busy → APPENDS to the FIFO, §2.5). **Never `preempt` from
+   Create** — killing a live render is a bench verb.
    - `201 {sessionId, seed}` → `pending = { kind: 'starting', id: sessionId, …,
      deadline: now + feel.startingGraceMs }`; `lastSeed = seed`; set `lastRun`.
-   - `202 {queued, replaced}` → `pending = { kind: 'queued', id: queued, … }`;
-     set `lastRun`; if `replaced` → toast `replaced queued render`.
+   - `202 {queuedId, position}` → `pending = null` and the item is pushed onto
+     `state.queue` (unless the SSE echo already landed it) — the optimistic
+     tile hands over to the queued tile with the 202's position; set `lastRun`.
    - `400 {error: "preflight failed", issues}` → toast the first
      `severity === 'error'` issue's `message` (prefixed by its `field`);
-     `pending = null`. A coercion 400 (plain `{error}`) toasts the same way.
+     `pending = null` — queued tiles stay (append semantics: a failed POST
+     never touched the queue). A coercion or queue-cap 400 (plain `{error}`)
+     toasts the same way.
 3. Composer keeps its prompt (Midjourney grammar: the bar retains text). Tweak
    mode persists until the user clears the bar (which resets `tweak = null` and
    restores concrete preset ids) or submits — after a tweak submit, `tweak` stays
@@ -561,9 +632,13 @@ close lightbox if it shows S, `confirm = null`. Note in the confirm copy for
 `imported` tiles: "imported session — files stay on disk and reappear after a
 server restart".
 
-**A8 — Cancel queued (× on the queued tile).**
-`DELETE /api/queue` → 204 → `pending = null` immediately (the `queue {queued:
-null}` SSE echo is then a no-op, §6.2 Q-rule).
+**A8 — Cancel ONE queued item (× on its tile).**
+Optimistic local removal FIRST (`removeQueueItem`: splice + renumber) so the SSE
+echo — published by the server DURING the DELETE — can never see the cancelled
+item as a drained head and phantom a `starting` tile. Then
+`DELETE /api/queue/{id}` → 204 (echo re-asserts the list). A 404 means the item
+auto-started or was cancelled elsewhere: re-fetch `GET /api/queue`, toast
+`no longer queued…`. Cancelling a queued item never touches the running render.
 
 **A9 — Open lightbox.** Click a session tile with `frames >= 1` (0-frame tiles
 ignore clicks — nothing to show). `lightbox = { sessionId, frame:
@@ -597,7 +672,7 @@ delegates to `core/model.ts` appliers. `X` = `payload.sessionId`.
 | `state` (terminal: `done` \| `stopped` \| `failed`) | `tile.state = payload.state`; `tile.live = null`; `tile.frames = summary.frames`; `tile.stepsDone = summary.steps`; `tile.seed = payload.seed`; `tile.endedAt = eventArrivalEpoch`. If `failed` → `GET /api/sessions/{X}` to pick up `failExcerpt` (not in the event). If `lightbox` shows X with `'follow'` → freeze `frame = summary.frames`. |
 | `progress` | Update `tile.live` fields (`step, stepsTotal, scene, sceneCount, phase, sPerStep, etaSec`). Create `tile.live` if null (reconnect case — REST only said `rendering`). |
 | `frame` | `tile.frames = payload.savedTotal`. Newest thumb/frame URLs are derived from `frames`, so the tile re-renders with the new index. Lightbox on X in `'follow'` → stage advances (double-buffer swap on image load, never blanks). |
-| `queue` | `state.queue = payload.queued`. Reconciliation rules (**Q-rules**): (1) `queued == null` && `pending?.kind === 'queued'` → `pending` becomes `{ kind: 'starting', deadline: now + feel.startingGraceMs }` — the slot draining normally precedes `state: launching` (inventory gotcha 5); the wake loop drops the tile at the deadline if no `state` event claimed it (covers "cleared from another tab"). (2) `queued != null` && `pending?.kind === 'queued'` && ids differ → ours was replaced externally → `pending = null`, toast. (3) `queued != null` && `pending == null` → queued from the bench: `pending = { kind: 'queued', id, prompt: slug, sizeX: 512, sizeY: 512 }` (slug is the only text the slot carries). |
+| `queue` | `{items}` — the full ordered list on every queue mutation. **Q-rules** (`applyQueueEvent`): the server list replaces `state.queue` wholesale (queued tiles derive from it, so appends/renumbers/bench enqueues need no special handling). The ONE derived transition: the **old head** vanishing from the new list — with no session tile for its id yet and no `posting` in flight — bridges into `pending = { kind: 'starting', …, deadline: now + feel.startingGraceMs }`: the drain normally precedes `state: launching` (inventory gotcha 5) and must not flicker; the wake loop drops the tile at the deadline if no `state` event claims it (covers a head cancelled from another tab). Non-head removals are cancels by construction (only the head can start) and just disappear. |
 | `encode` | `state.download?.jobId === payload.jobId` → update `framesDone/framesTotal`; on `done` → trigger `<a download>` of `outUrl`, `download = null`, `GET /api/sessions/{sessionId}` to refresh `artifacts`; on `failed`/`cancelled` → toast, `download = null`. Other jobs' events: ignored. |
 | `log` | Ignored. The Create surface has no log chrome; the bench renders logs. |
 
@@ -625,11 +700,15 @@ delegates to `core/model.ts` appliers. `X` = `payload.sessionId`.
 // core/gallery.ts
 type GalleryEntry =
   | { kind: 'pending'; pending: Pending }
+  | { kind: 'queued'; item: QueueItem }
   | { kind: 'session'; tile: Tile }
 
 // Rebuilt each render (derived, ephemeral — recompute over cache):
-//   [pending?, ...tiles]  — pending first, tiles already newest-first.
-function deriveGallery(state: CreateState): GalleryEntry[]
+//   [pending?, ...queue reversed, ...tiles] — pending first, then queued items
+//   newest-enqueued-first so the head (#1, next to start) sits closest to the
+//   live render, then tiles newest-first. A queued item's id IS its future
+//   session id, so the DOM node (and its entry spring) carries over at start.
+function deriveGallery(pending, queue, tiles): GalleryEntry[]
 
 function makeMasonrySource(entries: GalleryEntry[]): MasonrySource<GalleryEntry> {
   return {
@@ -680,7 +759,7 @@ lightbox). Exhaustive tile states:
 | entry state | visual |
 |---|---|
 | pending `posting` | dashed 1px border, shimmer sweep, prompt's first words centered, no image |
-| pending `queued` | as posting + `QUEUED` chip + `×` cancel (A8) |
+| queued (one tile PER queue item) | as posting + `QUEUED #n` chip (its 1-based position, refreshed by every queue SSE event as the queue drains) + its own `×` cancel (A8) |
 | pending `starting` | as posting + `STARTING` chip, no cancel |
 | session `rendering` / `launching`/`loading_models` substate | skeleton shimmer (0 frames) or latest thumb; substate label (`warming up…` / `loading models…`); indeterminate bar |
 | session `rendering` / `rendering` substate | latest thumb, swaps on every `frame` event; bottom progress bar `step/stepsTotal`; thin cyan pulse |
@@ -870,10 +949,10 @@ Exactly the chassis-notes composition:
 │ ▒▒shimmer▒▒▒ │          │              │          │   dark slab  │
 │  "infinite   │          │  live thumb  │          │              │
 │   fractal…"  │          │              │          │  ✕ FAILED    │
-│ QUEUED     × │          │ warming up…  │          │              │
+│ QUEUED #2  × │          │ warming up…  │          │              │
 └╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘          │━━━━━━╸ 62%   │          └──────────────┘
  dashed border            └──────────────┘           hover: failExcerpt
-                           bar = step/stepsTotal
+ one per queue item        bar = step/stepsTotal
  done (hover)
 ┌──────────────┐
 │              │
@@ -1012,13 +1091,15 @@ Draft/1:1 so each finishes in ~1 minute on this machine.
 10. Seed: two consecutive submits with seed RANDOM and identical prompt produce
     different seeds (params lines differ). Toggle seed LOCKED (a number
     appears), submit twice: both sessions show that same seed.
-11. ⚑ Submit while a render is live: the new tile shows `QUEUED` with an ×.
-    Submitting again while queued replaces it (toast `replaced queued render`;
-    still exactly one queued tile).
-12. Clicking × on the queued tile removes it (`GET /api/queue` on 7911 returns
-    `{"queued": null}`).
-13. ⚑ A queued tile auto-starts when the live render finishes — it becomes a
-    rendering tile without any page interaction.
+11. ⚑ Submit while a render is live: the new tile shows `QUEUED #1` with an ×.
+    Submitting again ADDS a second tile showing `QUEUED #2` (§2.5 — never
+    replaces); a third shows `#3`. Positions refresh as the queue drains.
+12. Clicking × on ONE queued tile removes exactly that item; the tiles behind
+    it renumber (`GET /api/queue` on 7911 shows the remaining items with
+    positions 1..n). The running render is untouched.
+13. ⚑ The `#1` queued tile auto-starts when the live render finishes (done,
+    failed, OR stopped) — it becomes a rendering tile without any page
+    interaction, and the remaining queued tiles each move up one position.
 14. Masonry: resizing the window changes the column count (2–5); no
     overlapping tiles at any width; tiles keep their aspect ratios.
 15. While scrolled down the gallery, a new session prepending does not shift

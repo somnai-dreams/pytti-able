@@ -14,7 +14,8 @@
 //     a hole — the ONE documented-lenient rule, legacy snapshots are a shaky boundary)
 //   parseSessions(raw) -> Tile[]
 //   parseSessionDetail(raw) -> { tile, config }      GET /api/sessions/{id}
-//   parseQueue(raw) -> QueueSlot | null              GET /api/queue
+//   parseQueue(raw) -> QueueItem[]                   GET /api/queue {items} (ordered FIFO;
+//     server-sent 1-based positions verified against index — a contract skew throws)
 //   parseSchemaFields(raw) -> string[]               GET /api/schema (field names only)
 //   parseStartResult(status, raw) -> StartResult     POST /api/sessions 201/202/400
 //   parseEncodeStart(raw) -> jobId                   POST /api/sessions/{id}/encode 201
@@ -30,7 +31,7 @@
 import type {
   Artifact,
   Phase,
-  QueueSlot,
+  QueueItem,
   SessionState,
   SseEvent,
   Substate,
@@ -168,12 +169,26 @@ export function parseSessionDetail(raw: unknown): { tile: Tile; config: Record<s
   return { tile, config }
 }
 
-export function parseQueue(raw: unknown): QueueSlot | null {
-  const r = asRecord(raw, 'GET /api/queue body')
-  const queued = r['queued']
-  if (queued == null) return null
-  const q = asRecord(queued, 'queue.queued')
-  return { id: asString(q['id'], 'queue.queued.id'), slug: asString(q['slug'], 'queue.queued.slug') }
+// The queue payload (GET /api/queue and the queue SSE event share it): the ordered FIFO.
+// The server sends 1-based positions; a position that disagrees with the list index is a
+// contract violation and throws.
+export function parseQueue(raw: unknown): QueueItem[] {
+  const r = asRecord(raw, 'queue body')
+  const list = asArray(r['items'], 'queue.items')
+  const items: QueueItem[] = []
+  for (let i = 0; i < list.length; i++) {
+    const q = asRecord(list[i], `queue.items[${i}]`)
+    const position = asNumber(q['position'], `queue.items[${i}].position`)
+    if (position !== i + 1) throw ctxErr(`queue.items[${i}].position`, `${i + 1} (1-based, index-consistent)`, position)
+    items.push({
+      id: asString(q['id'], `queue.items[${i}].id`),
+      position,
+      prompt: asString(q['scenes'], `queue.items[${i}].scenes`),
+      sizeX: asNumber(q['width'], `queue.items[${i}].width`),
+      sizeY: asNumber(q['height'], `queue.items[${i}].height`),
+    })
+  }
+  return items
 }
 
 export function parseSchemaFields(raw: unknown): string[] {
@@ -191,12 +206,13 @@ export function parseErrorBody(raw: unknown): string {
 
 export type StartResult =
   | { kind: 'started'; sessionId: string; seed: number }
-  | { kind: 'queued'; queuedId: string; replaced: boolean }
+  | { kind: 'queued'; queuedId: string; position: number } // appended to the FIFO, 1-based position
   | { kind: 'rejected'; message: string }
 
 // The self-contained POST /api/sessions {mode:'queue', values, forkOf, seedLocked} can
 // only produce 201 / 202 / 400 (409 is the "now"-mode busy answer and never fires for
-// queue) — anything else throws. A 400 is coercion (unknown/mistyped field) or preflight.
+// queue) — anything else throws. A 400 is coercion (unknown/mistyped field), preflight,
+// or the queue cap.
 export function parseStartResult(status: number, raw: unknown): StartResult {
   if (status === 201) {
     const r = asRecord(raw, 'POST /api/sessions 201 body')
@@ -208,9 +224,11 @@ export function parseStartResult(status: number, raw: unknown): StartResult {
   }
   if (status === 202) {
     const r = asRecord(raw, 'POST /api/sessions 202 body')
-    const replaced = r['replaced']
-    if (typeof replaced !== 'boolean') throw ctxErr('start.replaced', 'boolean', replaced)
-    return { kind: 'queued', queuedId: asString(r['queued'], 'start.queued'), replaced }
+    return {
+      kind: 'queued',
+      queuedId: asString(r['queuedId'], 'start.queuedId'),
+      position: asNumber(r['position'], 'start.position'),
+    }
   }
   if (status === 400) {
     const r = asRecord(raw, 'POST /api/sessions 400 body')
@@ -292,7 +310,7 @@ export function parseSseEvent(type: string, raw: unknown): SseEvent {
     }
     case 'queue': {
       const r = asRecord(raw, 'sse queue')
-      return { kind: 'queue', queued: parseQueue(r) }
+      return { kind: 'queue', items: parseQueue(r) }
     }
     case 'encode': {
       const r = asRecord(raw, 'sse encode')

@@ -64,6 +64,9 @@ PORT = int(os.environ.get("PYTTI_STUDIO_PORT", "7860"))
 # fields the server owns; never taken from the draft when minting a session
 MANAGED_FIELDS = ("file_namespace", "allow_overwrite", "restore", "config_version")
 
+# the render queue is a bounded FIFO; over-cap submissions are refused (400), never evicted
+QUEUE_CAP = 20
+
 # ── ported from the retired gradio ui.py ────────────────────────────────────
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 LOG_NOISE = re.compile(r"\| DEBUG\s+\||UserWarning:|warnings\.warn\(")
@@ -611,7 +614,15 @@ class RenderManager:
         self.proc: subprocess.Popen | None = None
         self.live_id: str | None = None
         self.live_values: dict | None = None
-        self.queued: dict | None = None  # {id, slug, values, forkOf}
+        # Ordered FIFO of queued renders, cap QUEUE_CAP. Each item is SELF-CONTAINED
+        # (§5.6 isolation invariant): the FULL composed values snapshot is frozen at
+        # enqueue time — later draft edits never mutate a queued item.
+        #   {id, slug, values, forkOf, seedLocked, enqueuedAt}
+        self.queue: list[dict] = []
+        # id of a preemptor parked at the head that has NOT started yet (the live
+        # render takes up to 5s to die): another preempt in that window REPLACES it
+        # instead of stacking. Only meaningful while queue[0] carries this id.
+        self._preempt_head_id: str | None = None
         self.stop_requested = False
         # live telemetry
         self.step = 0
@@ -624,80 +635,89 @@ class RenderManager:
 
     # ── spawn ──────────────────────────────────────────────────────────────
 
-    def start(self, values: dict, fork_of: str | None, seed_locked: bool, session_id: str | None = None):
+    def start(self, values: dict, fork_of: str | None, seed_locked: bool):
         with self._lock:
-            if self.proc is not None:
-                raise RuntimeError("busy")
-            taken = [self.queued["id"]] if self.queued else []
-            sid = session_id or STORE.mint_id(values.get("scenes", ""), taken=taken)
-            values = dict(values)
-            if not seed_locked or values.get("seed") in (None, ""):
-                values["seed"] = random.randint(0, 2**32 - 1)
-            values["seed"] = int(values["seed"])
-            values["scene_prefix"] = clean_prompt_field(values.get("scene_prefix", ""), trailing_pipe=True)
-            values["scene_suffix"] = clean_prompt_field(values.get("scene_suffix", ""), leading_pipe=True)
+            sid, seed, proc = self._spawn_locked(values, fork_of, seed_locked)
+        self._announce_spawn(sid, seed, proc)
+        return sid, seed
 
-            # NB: session YAML must be serialized with yaml.dump, never string
-            # templates — YAML 1.1 parses an unquoted `off` as boolean False
-            # (animation_mode!); yaml.dump quotes it correctly.
-            snapshot = {k: v for k, v in values.items() if k not in MANAGED_FIELDS}
-            SESSIONS_CONF_DIR.mkdir(parents=True, exist_ok=True)
-            conf_path = SESSIONS_CONF_DIR / f"{sid}.yaml"
-            atomic_write(conf_path, "# @package _global_\n" + yaml.dump(snapshot, default_flow_style=False, allow_unicode=True))
+    def _spawn_locked(self, values: dict, fork_of: str | None, seed_locked: bool, session_id: str | None = None):
+        """Busy-check + spawn, caller holds self._lock. Split from start() so enqueue
+        can decide start-vs-append atomically with the proc state (a check-then-start
+        across two lock acquisitions can park an item in an idle queue forever)."""
+        if self.proc is not None:
+            raise RuntimeError("busy")
+        taken = [item["id"] for item in self.queue]
+        sid = session_id or STORE.mint_id(values.get("scenes", ""), taken=taken)
+        values = dict(values)
+        if not seed_locked or values.get("seed") in (None, ""):
+            values["seed"] = random.randint(0, 2**32 - 1)
+        values["seed"] = int(values["seed"])
+        values["scene_prefix"] = clean_prompt_field(values.get("scene_prefix", ""), trailing_pipe=True)
+        values["scene_suffix"] = clean_prompt_field(values.get("scene_suffix", ""), leading_pipe=True)
 
-            run_dir = OUTPUTS_DIR / sid
-            run_dir.mkdir(parents=True, exist_ok=True)
+        # NB: session YAML must be serialized with yaml.dump, never string
+        # templates — YAML 1.1 parses an unquoted `off` as boolean False
+        # (animation_mode!); yaml.dump quotes it correctly.
+        snapshot = {k: v for k, v in values.items() if k not in MANAGED_FIELDS}
+        SESSIONS_CONF_DIR.mkdir(parents=True, exist_ok=True)
+        conf_path = SESSIONS_CONF_DIR / f"{sid}.yaml"
+        atomic_write(conf_path, "# @package _global_\n" + yaml.dump(snapshot, default_flow_style=False, allow_unicode=True))
 
-            n_scenes = scene_count(values.get("scenes", ""))
-            steps_total = n_scenes * int(values.get("steps_per_scene", 100) or 0)
+        run_dir = OUTPUTS_DIR / sid
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-            cmd = [
-                sys.executable, "-W", "ignore", "-m", "pytti.workhorse",
-                f"conf=_sessions/{sid}",
-                f"hydra.run.dir=outputs/{sid}",
-                f"file_namespace={sid}",
-            ]
-            proc = subprocess.Popen(
-                cmd, cwd=str(APP_DIR), env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
-                start_new_session=True,  # own process group: kill takes grandchildren (ffmpeg) too
-            )
-            (run_dir / "pid").write_text(str(proc.pid))
+        n_scenes = scene_count(values.get("scenes", ""))
+        steps_total = n_scenes * int(values.get("steps_per_scene", 100) or 0)
 
-            session = {
-                "schemaVersion": 1,
-                "id": sid,
-                "slug": slugify(values.get("scenes", "")),
-                "state": "launching",
-                "seed": values["seed"],
-                "startedAt": now_ms(),
-                "stepsDone": 0,
-                "stepsTotal": steps_total,
-                "frames": 0,
-                "forkedFrom": fork_of,
-                "deltaSummary": STORE.delta_summary(snapshot, fork_of),
-                "artifacts": [],
-                "config": snapshot,
-            }
-            STORE.put(session)
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        cmd = [
+            sys.executable, "-W", "ignore", "-m", "pytti.workhorse",
+            f"conf=_sessions/{sid}",
+            f"hydra.run.dir=outputs/{sid}",
+            f"file_namespace={sid}",
+        ]
+        proc = subprocess.Popen(
+            cmd, cwd=str(APP_DIR), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            start_new_session=True,  # own process group: kill takes grandchildren (ffmpeg) too
+        )
+        (run_dir / "pid").write_text(str(proc.pid))
 
-            self.proc = proc
-            self.live_id = sid
-            self.live_values = values
-            self.stop_requested = False
-            self.step = 0
-            self.steps_total = steps_total
-            self.scene = 0
-            self.s_per_step_ewma = 0.0
-            self.samples = 0
-            self.started_at = time.time()
-            self.resume_offset = 0
+        session = {
+            "schemaVersion": 1,
+            "id": sid,
+            "slug": slugify(values.get("scenes", "")),
+            "state": "launching",
+            "seed": values["seed"],
+            "startedAt": now_ms(),
+            "stepsDone": 0,
+            "stepsTotal": steps_total,
+            "frames": 0,
+            "forkedFrom": fork_of,
+            "deltaSummary": STORE.delta_summary(snapshot, fork_of),
+            "artifacts": [],
+            "config": snapshot,
+        }
+        STORE.put(session)
 
-        HUB.publish("state", {"sessionId": sid, "state": "launching", "seed": values["seed"]})
+        self.proc = proc
+        self.live_id = sid
+        self.live_values = values
+        self.stop_requested = False
+        self.step = 0
+        self.steps_total = steps_total
+        self.scene = 0
+        self.s_per_step_ewma = 0.0
+        self.samples = 0
+        self.started_at = time.time()
+        self.resume_offset = 0
+        return sid, values["seed"], proc
+
+    def _announce_spawn(self, sid: str, seed: int, proc: subprocess.Popen):
+        HUB.publish("state", {"sessionId": sid, "state": "launching", "seed": seed})
         threading.Thread(target=self._pump_stdout, args=(proc, sid), daemon=True).start()
         threading.Thread(target=self._watch_frames, args=(sid,), daemon=True).start()
-        return sid, values["seed"]
 
     def resume(self, session_id: str):
         s = STORE.sessions.get(session_id)
@@ -771,48 +791,118 @@ class RenderManager:
 
         threading.Thread(target=enforcer, daemon=True).start()
 
+    def _make_item(self, values: dict, fork_of: str | None, seed_locked: bool) -> dict:
+        """Freeze a self-contained queue item, caller holds self._lock (mint must see
+        the queued ids as taken, atomically with the insert)."""
+        taken = [item["id"] for item in self.queue]
+        sid = STORE.mint_id(values.get("scenes", ""), taken=taken)
+        return {
+            "id": sid, "slug": slugify(values.get("scenes", "")),
+            "values": dict(values), "forkOf": fork_of, "seedLocked": seed_locked,
+            "enqueuedAt": now_ms(),
+        }
+
+    @staticmethod
+    def _item_tile(item: dict, position: int) -> dict:
+        """The per-item projection GET /api/queue and the queue SSE event carry —
+        enough to render a queued tile without another fetch."""
+        values = item["values"]
+        return {
+            "id": item["id"],
+            "position": position,  # 1-based
+            "slug": item["slug"],
+            "scenes": str(values.get("scenes", "")),
+            "width": values.get("width"),
+            "height": values.get("height"),
+            "stepsPerScene": values.get("steps_per_scene"),
+            "enqueuedAt": item["enqueuedAt"],
+        }
+
+    def queue_snapshot(self) -> list[dict]:
+        with self._lock:
+            return [self._item_tile(item, i + 1) for i, item in enumerate(self.queue)]
+
+    def _publish_queue(self):
+        # Snapshot AND publish under the lock: clients replace their mirror wholesale
+        # ("server list wins"), so racing mutations must land in the SSE ring in
+        # snapshot order — a pre-mutation snapshot published last would show a queue
+        # missing the newer item until the next mutation. NEVER call while holding
+        # self._lock (non-reentrant).
+        with self._lock:
+            HUB.publish("queue", {"items": [self._item_tile(item, i + 1) for i, item in enumerate(self.queue)]})
+
     def enqueue(self, values: dict, fork_of: str | None, seed_locked: bool) -> dict:
+        """mode 'queue': APPEND to the FIFO — never replaces. Starts immediately only
+        when nothing is running AND nothing is queued (queue-when-idle would park a
+        session forever). The start-vs-append decision and the spawn/append happen
+        under ONE lock acquisition: a check-then-start across two acquisitions races
+        _finalize and can strand an item in an idle queue."""
         with self._lock:
-            idle = self.proc is None
-        if idle:
-            # queue-when-idle would park a session forever; just run it
-            sid, seed = self.start(values, fork_of, seed_locked)
-            return {"sessionId": sid, "seed": seed, "startedImmediately": True}
-        sid = STORE.mint_id(values.get("scenes", ""))
-        with self._lock:
-            replaced = self.queued is not None
-            self.queued = {
-                "id": sid, "slug": slugify(values.get("scenes", "")),
-                "values": dict(values), "forkOf": fork_of, "seedLocked": seed_locked,
-            }
-        HUB.publish("queue", {"queued": {"id": sid, "slug": self.queued["slug"]}})
-        return {"queued": sid, "replaced": replaced}
+            if self.proc is None and not self.queue:
+                sid, seed, proc = self._spawn_locked(values, fork_of, seed_locked)
+                item = None
+            else:
+                if len(self.queue) >= QUEUE_CAP:
+                    raise ValueError(f"queue is full ({QUEUE_CAP} items max) — cancel something first")
+                item = self._make_item(values, fork_of, seed_locked)
+                self.queue.append(item)
+                position = len(self.queue)
+        if item is None:
+            self._announce_spawn(sid, seed, proc)
+            return {"sessionId": sid, "seed": seed}
+        self._publish_queue()
+        return {"queuedId": item["id"], "position": position}
 
     def preempt(self, values: dict, fork_of: str | None, seed_locked: bool) -> dict:
-        """Park the draft in the queue slot and stop the live render; the
-        finalize path spawns the parked session. Atomic against finalize."""
+        """mode 'preempt', the EXPLICIT jump-the-line action: the preemptor is parked
+        at the HEAD of the queue and the live render is stopped; _finalize's auto-start
+        spawns it next. The existing queue stays intact behind it. Preempt bypasses
+        QUEUE_CAP but holds exactly ONE slot: while a previous preemptor is still
+        parked at the head (the live render takes up to 5s to die — SIGTERM grace),
+        another preempt REPLACES it instead of stacking — N impatient clicks = one
+        render, and the backlog never grows past cap+1."""
         with self._lock:
             live = self.live_id
             if live is None:
-                idle = True
+                sid, seed, proc = self._spawn_locked(values, fork_of, seed_locked)
             else:
-                idle = False
-                sid = STORE.mint_id(values.get("scenes", ""))
-                self.queued = {
-                    "id": sid, "slug": slugify(values.get("scenes", "")),
-                    "values": dict(values), "forkOf": fork_of, "seedLocked": seed_locked,
-                }
-        if idle:
-            sid, seed = self.start(values, fork_of, seed_locked)
+                item = self._make_item(values, fork_of, seed_locked)
+                if self.queue and self.queue[0]["id"] == self._preempt_head_id:
+                    self.queue[0] = item  # the parked preemptor never started; newest wins
+                else:
+                    self.queue.insert(0, item)
+                self._preempt_head_id = item["id"]
+                sid = item["id"]
+        if live is None:
+            self._announce_spawn(sid, seed, proc)
             return {"sessionId": sid, "seed": seed}
-        HUB.publish("queue", {"queued": {"id": self.queued["id"], "slug": self.queued["slug"]}})
-        self.stop(live)
-        return {"preempting": live, "queued": sid}
+        self._publish_queue()
+        try:
+            self.stop(live)
+        except KeyError:
+            pass  # the live render finished in the gap; _finalize's auto-start takes over
+        return {"preempting": live, "queuedId": sid, "position": 1}
+
+    def cancel_queued(self, queue_id: str):
+        """Per-item cancel. Removing an item renumbers everything behind it (positions
+        are 1..len). Never touches the running render. KeyError -> 404: the item
+        already started or was cancelled elsewhere."""
+        with self._lock:
+            for i, item in enumerate(self.queue):
+                if item["id"] == queue_id:
+                    self.queue.pop(i)
+                    if self._preempt_head_id == queue_id:
+                        self._preempt_head_id = None
+                    break
+            else:
+                raise KeyError(queue_id)
+        self._publish_queue()
 
     def clear_queue(self):
         with self._lock:
-            self.queued = None
-        HUB.publish("queue", {"queued": None})
+            self.queue.clear()
+            self._preempt_head_id = None
+        self._publish_queue()
 
     # ── subprocess plumbing ────────────────────────────────────────────────
 
@@ -933,8 +1023,6 @@ class RenderManager:
             self.proc = None
             self.live_id = None
             self.live_values = None
-            queued = self.queued
-            self.queued = None
 
         frames = len(STORE.frame_files(sid))
         if stop_requested:
@@ -965,13 +1053,93 @@ class RenderManager:
             "summary": {"steps": step, "frames": frames, "elapsedSec": elapsed,
                         "sPerStepAvg": session.get("sPerStepAvg")},
         })
+        self._start_next()
 
-        if queued is not None:
-            HUB.publish("queue", {"queued": None})
+    def _start_next(self):
+        """Auto-start the head of the queue after any terminal render (done, failed,
+        or cancelled). The head is PEEKED, not popped: it stays in the queue — still
+        cancellable, still counted by enqueue's idle check, its id still taken for
+        minting — until the spawn (or its failure record) COMMITS under the lock, so
+        no window exists where an item lives outside both the queue and the live slot
+        (start-after-cancel, FIFO jumps by latecomer submissions, and minted-id
+        collisions all lived in that window). Robust head-of-line start: an item that
+        fails preflight at start time (its init image vanished, etc.) surfaces as a
+        FAILED session and the next item starts. This runs on the pump thread via
+        _finalize — NOTHING may escape (an exception here unwinds the drain loop and
+        wedges every queued item), so per-item errors are contained per item."""
+        import traceback
+        while True:
+            with self._lock:
+                if self.proc is not None or not self.queue:
+                    return
+                item = self.queue[0]  # peek — see docstring
+            failure: list[str] | None = None
             try:
-                self.start(queued["values"], queued["forkOf"], queued["seedLocked"], session_id=queued["id"])
-            except RuntimeError as e:  # pragma: no cover — race with a manual start
-                print(f"[queue] could not start queued session: {e}", file=sys.stderr)
+                check = preflight(item["values"])
+                if not check["ok"]:
+                    messages = [f"{i['field']}: {i['message']}" for i in check["issues"] if i["severity"] == "error"]
+                    failure = messages or ["preflight failed"]
+            except Exception as e:  # preflight itself blew up — fail the item, not the drain
+                traceback.print_exc()
+                failure = [f"{type(e).__name__}: {e}"]
+            spawned = None
+            with self._lock:
+                if not self.queue or self.queue[0] is not item:
+                    continue  # cancelled/cleared/replaced while preflighting — re-evaluate
+                if self.proc is not None:
+                    return  # a manual start won the window; the head stays queued for the next _finalize
+                self.queue.pop(0)
+                if self._preempt_head_id == item["id"]:
+                    self._preempt_head_id = None
+                if failure is None:
+                    try:
+                        spawned = self._spawn_locked(item["values"], item["forkOf"], item["seedLocked"], session_id=item["id"])
+                    except Exception as e:  # spawn failure (disk, exec) — surface, keep draining
+                        traceback.print_exc()
+                        failure = [f"{type(e).__name__}: {e}"]
+            self._publish_queue()
+            if spawned is not None:
+                self._announce_spawn(*spawned)
+                return
+            try:
+                self._fail_queued_item(item, failure)
+            except Exception:
+                # even the failure record failing (disk full mid-write) must not wedge
+                # the drain — the loss is loud on stderr, the next item still starts
+                traceback.print_exc()
+
+    def _fail_queued_item(self, item: dict, messages: list):
+        """A queued item that cannot start becomes a failed session — visible in the
+        gallery with the reason as its failExcerpt, exactly like a crashed render."""
+        values = item["values"]
+        seed = values.get("seed")
+        snapshot = {k: v for k, v in values.items() if k not in MANAGED_FIELDS}
+        (OUTPUTS_DIR / item["id"]).mkdir(parents=True, exist_ok=True)
+        session = {
+            "schemaVersion": 1,
+            "id": item["id"],
+            "slug": item["slug"],
+            "state": "failed",
+            "seed": seed if isinstance(seed, int) else None,
+            "startedAt": now_ms(),
+            "endedAt": now_ms(),
+            "stepsDone": 0,
+            "stepsTotal": 0,
+            "frames": 0,
+            "forkedFrom": item["forkOf"],
+            "deltaSummary": STORE.delta_summary(snapshot, item["forkOf"]),
+            "artifacts": [],
+            "config": snapshot,
+            "exitCode": None,
+            "failExcerpt": messages[-2:],
+        }
+        STORE.put(session)
+        print(f"[queue] {item['id']} failed at start: {'; '.join(messages)}", file=sys.stderr)
+        HUB.publish("state", {
+            "sessionId": item["id"], "state": "failed", "exitCode": None,
+            "seed": session["seed"],
+            "summary": {"steps": 0, "frames": 0, "elapsedSec": 0, "sPerStepAvg": None},
+        })
 
     def _watch_frames(self, sid: str):
         frames_dir = OUTPUTS_DIR / sid / "images_out" / sid
@@ -1359,9 +1527,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/sessions":
                 self._json(200, {"sessions": STORE.summaries()})
             elif path == "/api/queue":
-                with MANAGER._lock:
-                    queued = MANAGER.queued
-                self._json(200, {"queued": {"id": queued["id"], "slug": queued["slug"]} if queued else None})
+                self._json(200, {"items": MANAGER.queue_snapshot()})
             elif path == "/api/presets":
                 self._json(200, {"presets": list_presets()})
             elif path == "/api/calibration":
@@ -1549,7 +1715,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if mode == "queue":
             result = MANAGER.enqueue(values, fork_of, seed_locked)
-            self._json(201 if result.get("startedImmediately") else 202, result)
+            self._json(201 if "sessionId" in result else 202, result)
             return
         if mode == "preempt":
             result = MANAGER.preempt(values, fork_of, seed_locked)
@@ -1593,6 +1759,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/queue":
                 MANAGER.clear_queue()
+                self._no_content()
+            elif re.fullmatch(r"/api/queue/[^/]+", path):
+                MANAGER.cancel_queued(urllib.parse.unquote(path.split("/")[3]))
                 self._no_content()
             elif re.fullmatch(r"/api/sessions/[^/]+", path):
                 sid = urllib.parse.unquote(path.split("/")[3])

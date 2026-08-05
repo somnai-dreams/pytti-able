@@ -1,13 +1,22 @@
 """
-Server tests for the two POST /api/sessions submission paths (stdlib unittest,
-in-process: requests run through the real Handler over a fake socket, no port
-is ever bound — never touches a live STUDIO).
+Server tests for POST /api/sessions submission paths and the FIFO render queue
+(stdlib unittest, in-process: requests run through the real Handler over a fake
+socket, no port is ever bound — never touches a live STUDIO).
 
-The isolation invariant under test (docs/studio-create-spec.md §5.6):
-a self-contained submission ({values, forkOf?, seedLocked?}) composes
-config/default.yaml over schema defaults + the caller's values and NEVER
-reads or writes the shared draft; a body without "values" keeps the
-draft-based behavior byte-identical (the bench's path).
+Invariants under test:
+- §5.6 isolation: a self-contained submission ({values, forkOf?, seedLocked?})
+  composes config/default.yaml over schema defaults + the caller's values and
+  NEVER reads or writes the shared draft; a body without "values" keeps the
+  draft-based behavior byte-identical (the bench's path), and the draft is
+  composed AT ENQUEUE — later draft edits never mutate a queued item.
+- The queue is a real FIFO (§2.5): mode 'queue' APPENDS (cap QUEUE_CAP,
+  over-cap -> 400, nothing evicted), per-item cancel renumbers, the head
+  auto-starts on any terminal render via peek->commit (it stays in the queue —
+  cancellable, FIFO-visible, id-taken — until the spawn commits under the
+  lock), a head that fails preflight at start surfaces as a failed session
+  without wedging the queue (even when preflight raises or the failure record
+  cannot be written), and preempt parks at the head with the rest of the queue
+  intact behind it, REPLACING a previous still-parked preemptor.
 
 Run: .venv/bin/python app/test_server.py
 """
@@ -18,6 +27,7 @@ import io
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -70,13 +80,13 @@ class SessionsPostBase(unittest.TestCase):
     def setUp(self):
         self.calls: list[tuple] = []
 
-        def fake_start(values, fork_of, seed_locked, session_id=None):
+        def fake_start(values, fork_of, seed_locked):
             self.calls.append(("start", values, fork_of, seed_locked))
             return "s-9999-test", 1234
 
         def fake_enqueue(values, fork_of, seed_locked):
             self.calls.append(("enqueue", values, fork_of, seed_locked))
-            return {"queued": "s-9999-test", "replaced": False}
+            return {"queuedId": "s-9999-test", "position": 1}
 
         server.MANAGER.start = fake_start
         server.MANAGER.enqueue = fake_enqueue
@@ -201,7 +211,8 @@ class TestSelfContainedPath(SessionsPostBase):
     def test_queue_mode_reaches_enqueue(self):
         status, resp = http("POST", "/api/sessions", {"mode": "queue", "values": dict(VALID_VALUES)})
         self.assertEqual(status, 202)
-        self.assertEqual(resp, {"queued": "s-9999-test", "replaced": False})
+        self.assertEqual(resp, {"queuedId": "s-9999-test", "position": 1})
+        self.assertNotIn("replaced", resp)  # the one-slot replace contract is dead
         self.assertEqual(self.calls[0][0], "enqueue")
 
 
@@ -243,6 +254,404 @@ class TestDraftBasedPathRegression(SessionsPostBase):
         self.assertEqual(status, 204)
         draft = server.read_draft()
         self.assertEqual(draft["values"]["scenes"], "bench edit")
+
+
+class FakeProc:
+    """Sentinel standing in for a live subprocess: MANAGER only checks `is not None`."""
+    pid = 424242
+
+
+class QueueBase(unittest.TestCase):
+    """A FRESH RenderManager swapped in for the global (the Handler routes to
+    server.MANAGER), draft + outputs sandboxed to a temp dir."""
+
+    def setUp(self):
+        self.manager = server.RenderManager()
+        self._orig_manager = server.MANAGER
+        server.MANAGER = self.manager
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self._draft_orig = server.DRAFT_PATH
+        server.DRAFT_PATH = Path(self._tmp.name) / "draft.yaml"
+        self._outputs_orig = server.OUTPUTS_DIR
+        server.OUTPUTS_DIR = Path(self._tmp.name) / "outputs"
+        server.OUTPUTS_DIR.mkdir()
+        self._store_ids_before = set(server.STORE.sessions)
+
+    def tearDown(self):
+        server.MANAGER = self._orig_manager
+        server.DRAFT_PATH = self._draft_orig
+        server.OUTPUTS_DIR = self._outputs_orig
+        for sid in set(server.STORE.sessions) - self._store_ids_before:
+            server.STORE.sessions.pop(sid, None)
+        self._tmp.cleanup()
+
+    def make_busy(self, live_id="s-8000-live"):
+        self.manager.proc = FakeProc()
+        self.manager.live_id = live_id
+
+    def queue_ids(self):
+        return [item["id"] for item in self.manager.queue]
+
+
+class TestQueueHttpContract(QueueBase):
+    def test_202_carries_queue_id_and_position_appending(self):
+        self.make_busy()
+        status, first = http("POST", "/api/sessions", {"mode": "queue", "values": dict(VALID_VALUES)})
+        self.assertEqual(status, 202)
+        self.assertEqual(set(first), {"queuedId", "position"})
+        self.assertEqual(first["position"], 1)
+        status, second = http("POST", "/api/sessions",
+                              {"mode": "queue", "values": {**VALID_VALUES, "scenes": "second prompt"}})
+        self.assertEqual(status, 202)
+        self.assertEqual(second["position"], 2)
+        self.assertNotEqual(first["queuedId"], second["queuedId"])
+        # append, never replace: both items live, FIFO order
+        self.assertEqual(self.queue_ids(), [first["queuedId"], second["queuedId"]])
+
+    def test_get_queue_returns_tile_ready_items_in_order(self):
+        self.make_busy()
+        http("POST", "/api/sessions", {"mode": "queue", "values": dict(VALID_VALUES)})
+        http("POST", "/api/sessions", {"mode": "queue", "values": {**VALID_VALUES, "scenes": "second prompt", "width": 640, "height": 360}})
+        status, resp = http("GET", "/api/queue")
+        self.assertEqual(status, 200)
+        items = resp["items"]
+        self.assertEqual(len(items), 2)
+        for n, item in enumerate(items):
+            self.assertEqual(set(item), {"id", "position", "slug", "scenes", "width", "height", "stepsPerScene", "enqueuedAt"})
+            self.assertEqual(item["position"], n + 1)
+        self.assertEqual(items[0]["scenes"], VALID_VALUES["scenes"])
+        self.assertEqual(items[1]["width"], 640)
+        self.assertEqual(items[1]["height"], 360)
+
+    def test_cap_enforced_400_nothing_evicted(self):
+        self.make_busy()
+        for n in range(server.QUEUE_CAP):
+            status, _ = http("POST", "/api/sessions",
+                             {"mode": "queue", "values": {**VALID_VALUES, "scenes": f"prompt {n}"}})
+            self.assertEqual(status, 202)
+        head = self.queue_ids()[0]
+        status, resp = http("POST", "/api/sessions", {"mode": "queue", "values": dict(VALID_VALUES)})
+        self.assertEqual(status, 400)
+        self.assertIn(str(server.QUEUE_CAP), resp["error"])
+        self.assertEqual(len(self.manager.queue), server.QUEUE_CAP)
+        self.assertEqual(self.queue_ids()[0], head)  # nothing evicted
+
+    def test_cancel_by_id_renumbers(self):
+        self.make_busy()
+        ids = []
+        for n in range(3):
+            _, resp = http("POST", "/api/sessions",
+                           {"mode": "queue", "values": {**VALID_VALUES, "scenes": f"prompt {n}"}})
+            ids.append(resp["queuedId"])
+        status, _ = http("DELETE", f"/api/queue/{ids[1]}")
+        self.assertEqual(status, 204)
+        _, resp = http("GET", "/api/queue")
+        self.assertEqual([i["id"] for i in resp["items"]], [ids[0], ids[2]])
+        self.assertEqual([i["position"] for i in resp["items"]], [1, 2])
+
+    def test_cancel_unknown_id_404_and_never_touches_live(self):
+        self.make_busy(live_id="s-8000-live")
+        status, _ = http("DELETE", "/api/queue/s-8000-live")
+        self.assertEqual(status, 404)
+        self.assertIsNotNone(self.manager.proc)  # the running render is untouched
+
+    def test_mode_now_busy_409_unchanged(self):
+        self.make_busy(live_id="s-8000-live")
+        status, resp = http("POST", "/api/sessions", {"mode": "now", "values": dict(VALID_VALUES)})
+        self.assertEqual(status, 409)
+        self.assertEqual(resp["live"], "s-8000-live")
+
+    def test_queue_mode_idle_starts_immediately(self):
+        started = []
+
+        def fake_spawn(values, fork_of, seed_locked, session_id=None):
+            started.append(values)
+            self.manager.proc = FakeProc()
+            return "s-9999-test", 1234, FakeProc()
+
+        self.manager._spawn_locked = fake_spawn
+        self.manager._announce_spawn = lambda sid, seed, proc: None
+        status, resp = http("POST", "/api/sessions", {"mode": "queue", "values": dict(VALID_VALUES)})
+        self.assertEqual(status, 201)
+        # exact wire shape — the spec table (§2.4) documents 201 as {sessionId, seed};
+        # internal discriminators must not leak
+        self.assertEqual(set(resp), {"sessionId", "seed"})
+        self.assertEqual(resp["sessionId"], "s-9999-test")
+        self.assertEqual(resp["seed"], 1234)
+        self.assertEqual(len(started), 1)
+        self.assertEqual(self.manager.queue, [])
+
+    def test_draft_composed_at_enqueue_not_at_start(self):
+        # A bodyless bench submission freezes the draft into the queue item; a later
+        # draft edit must not reach it (self-contained items, §5.6).
+        self.make_busy()
+        server.write_draft({"values": {"scenes": "the draft at enqueue time"}, "forkOf": None, "seedLocked": False})
+        status, _ = http("POST", "/api/sessions", {"mode": "queue"})
+        self.assertEqual(status, 202)
+        status, _ = http("PUT", "/api/draft", {"values": {"scenes": "edited AFTER enqueue"}})
+        self.assertEqual(status, 204)
+        item = self.manager.queue[0]
+        self.assertEqual(item["values"]["scenes"], "the draft at enqueue time")
+
+    def test_queue_items_are_self_contained(self):
+        self.make_busy()
+        status, _ = http("POST", "/api/sessions", {
+            "mode": "queue",
+            "values": {**VALID_VALUES, "seed": 42},
+            "forkOf": "s-0007-parent",
+            "seedLocked": True,
+        })
+        self.assertEqual(status, 202)
+        item = self.manager.queue[0]
+        # the FULL composed submission is frozen on the item, not a reference to shared state
+        self.assertEqual(set(item["values"]), set(server.tuned_defaults()))
+        self.assertEqual(item["values"]["seed"], 42)
+        self.assertEqual(item["forkOf"], "s-0007-parent")
+        self.assertIs(item["seedLocked"], True)
+        self.assertIsInstance(item["enqueuedAt"], int)
+
+
+class TestQueueAutoStart(QueueBase):
+    """Drive the render-exit path (_finalize) against a stubbed spawn. _start_next
+    commits the head via _spawn_locked UNDER the lock (peek->commit, no pop->spawn
+    window), so that is the seam to stub."""
+
+    LIVE = "s-8000-live"
+
+    def setUp(self):
+        super().setUp()
+        self.started: list[tuple] = []
+
+        def fake_spawn_locked(values, fork_of, seed_locked, session_id=None):
+            self.started.append((values, fork_of, seed_locked, session_id))
+            self.manager.proc = FakeProc()
+            self.manager.live_id = session_id
+            return session_id, 1234, FakeProc()
+
+        self.manager._spawn_locked = fake_spawn_locked
+        self.manager._announce_spawn = lambda sid, seed, proc: None
+
+    def seed_live_session(self):
+        """A finished-render fixture: STORE record + manager live state, so the real
+        _finalize can run end to end."""
+        (server.OUTPUTS_DIR / self.LIVE).mkdir(parents=True, exist_ok=True)
+        server.STORE.put({
+            "schemaVersion": 1, "id": self.LIVE, "slug": "live", "state": "rendering",
+            "seed": 1, "startedAt": server.now_ms(), "stepsDone": 0, "stepsTotal": 100,
+            "frames": 0, "forkedFrom": None, "artifacts": [], "config": {"scenes": "live"},
+        })
+        self.make_busy(self.LIVE)
+        self.manager.started_at = time.time()
+
+    def enqueue_while_busy(self, scenes: str) -> str:
+        result = self.manager.enqueue({"scenes": scenes, "width": 256, "height": 256}, None, False)
+        return result["queuedId"]
+
+    def finalize_live(self, exit_code: int):
+        self.manager._finalize(self.LIVE, exit_code, [])
+
+    def test_autostart_on_completion(self):
+        self.seed_live_session()
+        a = self.enqueue_while_busy("queued item a")
+        b = self.enqueue_while_busy("queued item b")
+        self.finalize_live(0)
+        self.assertEqual(len(self.started), 1)
+        values, fork_of, seed_locked, session_id = self.started[0]
+        self.assertEqual(session_id, a)  # the item keeps its pre-minted id
+        self.assertEqual(values["scenes"], "queued item a")
+        self.assertEqual(self.queue_ids(), [b])  # b waits its turn
+
+    def test_autostart_on_failure_too(self):
+        self.seed_live_session()
+        a = self.enqueue_while_busy("queued item a")
+        self.finalize_live(1)  # the live render FAILED — the queue still drains
+        self.assertEqual(server.STORE.sessions[self.LIVE]["state"], "failed")
+        self.assertEqual([s[3] for s in self.started], [a])
+
+    def test_preflight_failure_at_start_does_not_wedge(self):
+        self.seed_live_session()
+        with self.manager._lock:
+            bad = self.manager._make_item({"scenes": "   "}, None, False)  # fails preflight
+            self.manager.queue.append(bad)
+        good = self.enqueue_while_busy("good prompt behind the bad one")
+        self.finalize_live(0)
+        # the bad item surfaced as a failed session…
+        failed = server.STORE.sessions[bad["id"]]
+        self.assertEqual(failed["state"], "failed")
+        self.assertTrue(any("scenes" in line for line in failed["failExcerpt"]))
+        # …and the good one started anyway
+        self.assertEqual([s[3] for s in self.started], [good])
+        self.assertEqual(self.queue_ids(), [])
+
+    def test_cancel_then_finalize_never_starts_the_cancelled_item(self):
+        self.seed_live_session()
+        a = self.enqueue_while_busy("will be cancelled")
+        b = self.enqueue_while_busy("stays")
+        self.manager.cancel_queued(a)
+        self.finalize_live(0)
+        self.assertEqual([s[3] for s in self.started], [b])
+
+    def test_manual_start_winning_the_window_leaves_the_head_queued(self):
+        # A manual start committing during the peek->commit window (preflight runs
+        # outside the lock) must neither lose the head nor start it — it was never
+        # popped, so it simply stays queued for the next _finalize.
+        self.seed_live_session()
+        a = self.enqueue_while_busy("raced item")
+        b = self.enqueue_while_busy("behind it")
+        real_preflight = server.preflight
+
+        def manual_start_lands_mid_preflight(values):
+            self.manager.proc = FakeProc()  # a mode:'now' start commits while we preflight
+            self.manager.live_id = "s-8001-manual"
+            return real_preflight(values)
+
+        server.preflight = manual_start_lands_mid_preflight
+        try:
+            self.finalize_live(0)
+        finally:
+            server.preflight = real_preflight
+        self.assertEqual(self.started, [])  # the head did NOT start under the winner
+        self.assertEqual(self.queue_ids(), [a, b])  # still queued, order intact
+
+    def test_cancel_during_the_start_window_never_resurrects_the_item(self):
+        # DELETE /api/queue/{id} landing in the peek->commit window: the head is
+        # still IN the queue (peeked, not popped), so the cancel reaches it and it
+        # must never start or reappear — the next item drains instead.
+        self.seed_live_session()
+        a = self.enqueue_while_busy("cancelled mid-window")
+        b = self.enqueue_while_busy("next up")
+        real_preflight = server.preflight
+        fired = []
+
+        def cancel_lands_mid_preflight(values):
+            if not fired:
+                fired.append(True)
+                self.manager.cancel_queued(a)
+            return real_preflight(values)
+
+        server.preflight = cancel_lands_mid_preflight
+        try:
+            self.finalize_live(0)
+        finally:
+            server.preflight = real_preflight
+        self.assertEqual([s[3] for s in self.started], [b])
+        self.assertEqual(self.queue_ids(), [])
+
+    def test_latecomer_enqueue_during_the_start_window_appends_not_starts(self):
+        # A {mode:'queue'} POST landing in the peek->commit window sees a non-empty
+        # queue (the head is still in it) — it APPENDS behind the item that waited
+        # its FIFO turn, never jumps it, and its minted id can never collide with
+        # the head's pre-minted id.
+        self.seed_live_session()
+        a = self.enqueue_while_busy("waited its turn")
+        results = []
+        real_preflight = server.preflight
+
+        def latecomer_lands_mid_preflight(values):
+            if not results:
+                results.append(self.manager.enqueue(
+                    {"scenes": "latecomer", "width": 256, "height": 256}, None, False))
+            return real_preflight(values)
+
+        server.preflight = latecomer_lands_mid_preflight
+        try:
+            self.finalize_live(0)
+        finally:
+            server.preflight = real_preflight
+        self.assertEqual(set(results[0]), {"queuedId", "position"})  # appended, NOT started
+        self.assertEqual(results[0]["position"], 2)
+        self.assertNotEqual(results[0]["queuedId"], a)  # head's id stayed taken for mint
+        self.assertEqual([s[3] for s in self.started], [a])  # FIFO respected
+        self.assertEqual(self.queue_ids(), [results[0]["queuedId"]])
+
+    def test_preflight_exception_fails_the_item_and_drains_on(self):
+        # preflight RAISING (not just returning not-ok) must be contained per item:
+        # the drain runs on the pump thread and an escape wedges every queued render.
+        self.seed_live_session()
+        a = self.enqueue_while_busy("preflight blows up on me")
+        b = self.enqueue_while_busy("still starts")
+        real_preflight = server.preflight
+
+        def exploding_preflight(values):
+            if values["scenes"] == "preflight blows up on me":
+                raise OSError(5, "Input/output error")
+            return real_preflight(values)
+
+        server.preflight = exploding_preflight
+        try:
+            self.finalize_live(0)  # must not raise
+        finally:
+            server.preflight = real_preflight
+        self.assertEqual(server.STORE.sessions[a]["state"], "failed")
+        self.assertTrue(any("OSError" in line for line in server.STORE.sessions[a]["failExcerpt"]))
+        self.assertEqual([s[3] for s in self.started], [b])
+
+    def test_failure_record_error_does_not_wedge_the_drain(self):
+        # Disk full while writing the failed-session record (_fail_queued_item ->
+        # STORE.put) must not unwind the pump thread — the next item still starts.
+        self.seed_live_session()
+        with self.manager._lock:
+            bad = self.manager._make_item({"scenes": "   "}, None, False)  # fails preflight
+            self.manager.queue.append(bad)
+        good = self.enqueue_while_busy("still starts")
+
+        def enospc_put(session):
+            raise OSError(28, "No space left on device")
+
+        server.STORE.put = enospc_put
+        try:
+            self.finalize_live(0)  # must not raise
+        finally:
+            del server.STORE.put  # instance attr; deleting restores the real method
+        self.assertEqual([s[3] for s in self.started], [good])
+        self.assertEqual(self.queue_ids(), [])
+
+    def test_preempt_parks_at_head_queue_intact(self):
+        self.seed_live_session()
+        a = self.enqueue_while_busy("queued a")
+        b = self.enqueue_while_busy("queued b")
+        stopped = []
+        self.manager.stop = lambda sid: stopped.append(sid)
+        result = self.manager.preempt({"scenes": "jump the line", "width": 256, "height": 256}, None, False)
+        self.assertEqual(stopped, [self.LIVE])
+        self.assertEqual(result["preempting"], self.LIVE)
+        self.assertEqual(result["position"], 1)
+        self.assertEqual(self.queue_ids(), [result["queuedId"], a, b])
+        # the preemptor starts when the killed render finalizes; the rest stay behind it
+        self.finalize_live(1)
+        self.assertEqual([s[3] for s in self.started], [result["queuedId"]])
+        self.assertEqual(self.queue_ids(), [a, b])
+
+    def test_preempt_during_the_stop_window_replaces_not_stacks(self):
+        # The live render takes up to 5s to die (SIGTERM grace); impatient repeat
+        # preempts in that window must REPLACE the parked preemptor, not stack N
+        # unwanted full renders (and must not grow the queue past cap+1).
+        self.seed_live_session()
+        a = self.enqueue_while_busy("queued a")
+        self.manager.stop = lambda sid: None  # the render lingers in its grace period
+        self.manager.preempt({"scenes": "preempt one", "width": 256, "height": 256}, None, False)
+        p2 = self.manager.preempt({"scenes": "preempt two", "width": 256, "height": 256}, None, False)
+        p3 = self.manager.preempt({"scenes": "preempt three", "width": 256, "height": 256}, None, False)
+        self.assertEqual(p3["position"], 1)
+        self.assertEqual(self.queue_ids(), [p3["queuedId"], a])  # ONE slot, newest wins
+        self.assertNotEqual(p2["queuedId"], p3["queuedId"])
+        self.finalize_live(1)
+        self.assertEqual([s[3] for s in self.started], [p3["queuedId"]])
+        self.assertEqual(self.queue_ids(), [a])
+
+    def test_preempt_replacement_scope_ends_when_the_preemptor_starts(self):
+        # Once the parked preemptor has started, a later preempt targets the NEW live
+        # render and must park in front of the ordinary queue, replacing nothing.
+        self.seed_live_session()
+        a = self.enqueue_while_busy("queued a")
+        self.manager.stop = lambda sid: None
+        p1 = self.manager.preempt({"scenes": "preempt one", "width": 256, "height": 256}, None, False)
+        self.finalize_live(1)  # p1 starts; queue is [a] again
+        self.assertEqual([s[3] for s in self.started], [p1["queuedId"]])
+        p2 = self.manager.preempt({"scenes": "preempt two", "width": 256, "height": 256}, None, False)
+        self.assertEqual(p2["preempting"], p1["queuedId"])
+        self.assertEqual(self.queue_ids(), [p2["queuedId"], a])  # a survives — no replace
 
 
 if __name__ == "__main__":

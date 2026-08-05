@@ -10,11 +10,13 @@ import {
   applyStateEvent,
   type CreateState,
   dropUnreadableMask,
-  failSubmission,
+  findQueueItem,
   findTile,
   insertTile,
   openMaskEditor,
+  type QueueItem,
   reconcileSessions,
+  removeQueueItem,
   removeTile,
   showToast,
   type Tile,
@@ -45,6 +47,10 @@ function tile(id: string, over: Partial<Tile> = {}): Tile {
   }
 }
 
+function item(id: string, position: number, over: Partial<QueueItem> = {}): QueueItem {
+  return { id, position, prompt: 'queued prompt ' + id, sizeX: 512, sizeY: 512, ...over }
+}
+
 function state(over: Partial<CreateState> = {}): CreateState {
   return {
     boot: { phase: 'ready' },
@@ -52,7 +58,7 @@ function state(over: Partial<CreateState> = {}): CreateState {
     schemaFields: ['scenes'],
     tiles: [],
     pending: null,
-    queue: null,
+    queue: [],
     composer: { prompt: '', aspect: '1:1', quality: 'standard', look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null, popoverOpen: false },
     lastRun: null,
     lastSeed: null,
@@ -183,31 +189,88 @@ describe('applyProgressEvent / applyFrameEvent', () => {
 })
 
 describe('applyQueueEvent (Q-rules)', () => {
-  test('Q1: slot drains while ours is queued -> starting with a grace deadline', () => {
-    const s = state({ pending: { kind: 'queued', id: 'q1', prompt: 'p', sizeX: 640, sizeY: 360 } })
-    applyQueueEvent(s, { kind: 'queue', queued: null }, 1000)
+  test('the server list replaces the mirror wholesale', () => {
+    const s = state({ queue: [item('q1', 1)] })
+    applyQueueEvent(s, { kind: 'queue', items: [item('q1', 1), item('q2', 2)] }, 1000)
+    expect(s.queue.map((i) => i.id)).toEqual(['q1', 'q2'])
+    expect(s.pending).toBeNull() // head still present: append echo, no bridge
+  })
+
+  test('drained head bridges to a starting tile with a grace deadline', () => {
+    const s = state({ queue: [item('q1', 1, { prompt: 'p', sizeX: 640, sizeY: 360 }), item('q2', 2)] })
+    applyQueueEvent(s, { kind: 'queue', items: [item('q2', 1)] }, 1000)
     expect(s.pending).toEqual({ kind: 'starting', id: 'q1', prompt: 'p', sizeX: 640, sizeY: 360, deadline: 1000 + feel.startingGraceMs })
-    expect(s.queue).toBeNull()
+    expect(s.queue.map((i) => i.id)).toEqual(['q2'])
   })
 
-  test('Q2: replaced externally -> pending dropped + toast', () => {
-    const s = state({ pending: { kind: 'queued', id: 'q1', prompt: 'p', sizeX: 512, sizeY: 512 } })
-    applyQueueEvent(s, { kind: 'queue', queued: { id: 'q2', slug: 'other' } }, 1000)
+  test('drained head whose session tile already exists needs no bridge', () => {
+    const s = state({ queue: [item('q1', 1)], tiles: [tile('q1', { state: 'rendering' })] })
+    applyQueueEvent(s, { kind: 'queue', items: [] }, 1000)
     expect(s.pending).toBeNull()
-    expect(s.toast!.text).toContain('replaced')
   })
 
-  test('Q3: queued from the bench -> synthesized pending from the slug', () => {
+  test('an in-flight posting tile is never clobbered by the bridge', () => {
+    const posting = { kind: 'posting' as const, prompt: 'mine', sizeX: 512, sizeY: 512 }
+    const s = state({ queue: [item('q1', 1)], pending: { ...posting } })
+    applyQueueEvent(s, { kind: 'queue', items: [] }, 1000)
+    expect(s.pending).toEqual(posting)
+  })
+
+  test('a non-head removal (cancel) just disappears — no bridge', () => {
+    const s = state({ queue: [item('q1', 1), item('q2', 2)] })
+    applyQueueEvent(s, { kind: 'queue', items: [item('q1', 1)] }, 1000)
+    expect(s.pending).toBeNull()
+    expect(s.queue.map((i) => i.id)).toEqual(['q1'])
+  })
+
+  test('empty -> empty is a no-op', () => {
     const s = state()
-    applyQueueEvent(s, { kind: 'queue', queued: { id: 'q9', slug: 'bench-render' } }, 1000)
-    expect(s.pending).toEqual({ kind: 'queued', id: 'q9', prompt: 'bench-render', sizeX: 512, sizeY: 512 })
+    applyQueueEvent(s, { kind: 'queue', items: [] }, 1000)
+    expect(s.pending).toBeNull()
+    expect(s.queue).toEqual([])
   })
 
-  test('our own 202 echo (same id) is a no-op', () => {
-    const s = state({ pending: { kind: 'queued', id: 'q1', prompt: 'p', sizeX: 512, sizeY: 512 } })
-    applyQueueEvent(s, { kind: 'queue', queued: { id: 'q1', slug: 'p' } }, 1000)
-    expect(s.pending).toEqual({ kind: 'queued', id: 'q1', prompt: 'p', sizeX: 512, sizeY: 512 })
-    expect(s.toast).toBeNull()
+  test("a queued id clears a 'starting' pending it would shadow (queue is truth)", () => {
+    // Reachable when a cancelled head's number is re-minted for a new enqueue inside
+    // the grace window: without the clear, a STARTING tile and a QUEUED tile coexist
+    // for the same id until the wake-loop deadline.
+    const s = state({
+      pending: { kind: 'starting', id: 'q1', prompt: 'p', sizeX: 512, sizeY: 512, deadline: 9999 },
+    })
+    applyQueueEvent(s, { kind: 'queue', items: [item('q1', 1)] }, 1000)
+    expect(s.pending).toBeNull()
+    expect(s.queue.map((i) => i.id)).toEqual(['q1'])
+  })
+
+  test("a 'starting' pending for an id NOT in the list stays for its grace window", () => {
+    const s = state({
+      pending: { kind: 'starting', id: 'q0', prompt: 'p', sizeX: 512, sizeY: 512, deadline: 9999 },
+    })
+    applyQueueEvent(s, { kind: 'queue', items: [item('q1', 1)] }, 1000)
+    expect(s.pending).toEqual({ kind: 'starting', id: 'q0', prompt: 'p', sizeX: 512, sizeY: 512, deadline: 9999 })
+  })
+})
+
+describe('removeQueueItem (optimistic per-item cancel)', () => {
+  test('removes and renumbers the items behind it, reporting true', () => {
+    const s = state({ queue: [item('q1', 1), item('q2', 2), item('q3', 3)] })
+    expect(removeQueueItem(s, 'q2')).toBe(true)
+    expect(s.queue.map((i) => [i.id, i.position])).toEqual([
+      ['q1', 1],
+      ['q3', 2],
+    ])
+  })
+
+  test('unknown id is a no-op reporting false (double-click skips the second DELETE)', () => {
+    const s = state({ queue: [item('q1', 1)] })
+    expect(removeQueueItem(s, 'zzz')).toBe(false)
+    expect(s.queue.map((i) => i.id)).toEqual(['q1'])
+  })
+
+  test('findQueueItem scans by id', () => {
+    const q2 = item('q2', 2)
+    expect(findQueueItem([item('q1', 1), q2], 'q2')).toBe(q2)
+    expect(findQueueItem([item('q1', 1)], 'q2')).toBeNull()
   })
 })
 
@@ -279,23 +342,6 @@ describe('reconcileSessions', () => {
     const s = state({ tiles: [tile('x')], confirm: { kind: 'discard-mask' } })
     reconcileSessions(s, [])
     expect(s.confirm).toEqual({ kind: 'discard-mask' })
-  })
-})
-
-describe('failSubmission', () => {
-  test('queue mirror still holds a slot -> pending restored as its queued tile (no queue lie)', () => {
-    const s = state({
-      queue: { id: 'q-old', slug: 'previous-render' },
-      pending: { kind: 'posting', prompt: 'replacement', sizeX: 640, sizeY: 360 },
-    })
-    failSubmission(s)
-    expect(s.pending).toEqual({ kind: 'queued', id: 'q-old', prompt: 'previous-render', sizeX: 512, sizeY: 512 })
-  })
-
-  test('empty queue mirror -> pending clears', () => {
-    const s = state({ pending: { kind: 'posting', prompt: 'p', sizeX: 512, sizeY: 512 } })
-    failSubmission(s)
-    expect(s.pending).toBeNull()
   })
 })
 

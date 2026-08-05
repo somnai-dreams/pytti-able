@@ -128,11 +128,29 @@ function updateNode(node: TileNodes, entry: GalleryEntry): void {
       node.skel.classList.add('shimmer')
       show(node.label, true)
       node.label.textContent = pending.prompt.length > 64 ? `${pending.prompt.slice(0, 64)}…` : pending.prompt
-      const chipText = pending.kind === 'queued' ? 'QUEUED' : pending.kind === 'starting' ? 'STARTING' : ''
+      const chipText = pending.kind === 'starting' ? 'STARTING' : ''
       show(node.chip, chipText !== '')
       node.chip.textContent = chipText
       node.chip.classList.remove('danger')
-      show(node.cancel, pending.kind === 'queued')
+      show(node.cancel, false)
+      show(node.bar, false)
+      show(node.foot, false)
+      return
+    }
+    case 'queued': {
+      // A queued FIFO item (server truth): position badge + its own × cancel (A8).
+      const item = entry.item
+      node.root.classList.add('pending')
+      node.root.classList.remove('clickable', 'failed')
+      show(node.img, false)
+      show(node.skel, true)
+      node.skel.classList.add('shimmer')
+      show(node.label, true)
+      node.label.textContent = item.prompt.length > 64 ? `${item.prompt.slice(0, 64)}…` : item.prompt
+      show(node.chip, true)
+      node.chip.textContent = `QUEUED #${item.position}`
+      node.chip.classList.remove('danger')
+      show(node.cancel, true)
       show(node.bar, false)
       show(node.foot, false)
       return
@@ -222,7 +240,7 @@ function updateNode(node: TileNodes, entry: GalleryEntry): void {
 export function renderGallery(state: CreateState, springSteps: number): boolean {
   const env = state.env
   const ready = state.boot.phase === 'ready'
-  show(emptyEl, ready && state.tiles.length === 0 && state.pending == null)
+  show(emptyEl, ready && state.tiles.length === 0 && state.pending == null && state.queue.length === 0)
   if (!ready) {
     // Boot loading/failed: evict everything (the shell shows skeletons / the fail card).
     for (const [key, node] of nodes) {
@@ -233,7 +251,7 @@ export function renderGallery(state: CreateState, springSteps: number): boolean 
     return false
   }
 
-  const entries = deriveGallery(state.pending, state.tiles)
+  const entries = deriveGallery(state.pending, state.queue, state.tiles)
   const source = makeMasonrySource(entries)
   const innerX = env.viewportX
   const cols = masonryColumnCount(innerX - 2 * feel.galleryPadX, feel.cardMinX, feel.minCols, feel.maxCols)

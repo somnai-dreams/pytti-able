@@ -15,7 +15,7 @@ import {
   parseUploadResult,
   type StartResult,
 } from '../core/api'
-import type { QueueSlot, SseEvent, Tile } from '../core/model'
+import type { QueueItem, SseEvent, Tile } from '../core/model'
 import type { SubmissionPayload } from '../core/presets'
 
 async function getJson(url: string): Promise<unknown> {
@@ -32,7 +32,7 @@ export async function getSessionDetail(id: string): Promise<{ tile: Tile; config
   return parseSessionDetail(await getJson(`/api/sessions/${id}`))
 }
 
-export async function getQueue(): Promise<QueueSlot | null> {
+export async function getQueue(): Promise<QueueItem[]> {
   return parseQueue(await getJson('/api/queue'))
 }
 
@@ -43,7 +43,7 @@ export async function getSchemaFields(): Promise<string[]> {
 // The self-contained submission (isolation invariant, spec §5.6): the payload carries
 // everything; the server composes it over the versioned tuned defaults and NEVER touches
 // the shared draft — that file is the advanced bench's private working state. Create
-// always uses queue mode: idle -> starts immediately; busy -> the one-slot queue.
+// always uses queue mode: idle -> starts immediately; busy -> APPENDS to the FIFO.
 // Never preempt from Create — killing a live render is a bench verb.
 export async function postStart(payload: SubmissionPayload): Promise<StartResult> {
   const res = await fetch('/api/sessions', {
@@ -59,9 +59,15 @@ export async function postStart(payload: SubmissionPayload): Promise<StartResult
   return parseStartResult(res.status, await res.json())
 }
 
-export async function deleteQueue(): Promise<void> {
-  const res = await fetch('/api/queue', { method: 'DELETE' })
-  if (res.status !== 204) throw new Error(`DELETE /api/queue -> unexpected status ${res.status}`)
+export type CancelQueuedResult = { ok: true } | { ok: false; message: string }
+
+// DELETE /api/queue/{id} — per-item cancel. 404 is expected-recoverable data: the item
+// auto-started or was cancelled elsewhere in the gap; the caller re-fetches the queue.
+export async function deleteQueueItem(id: string): Promise<CancelQueuedResult> {
+  const res = await fetch(`/api/queue/${id}`, { method: 'DELETE' })
+  if (res.status === 204) return { ok: true }
+  if (res.status === 404) return { ok: false, message: parseErrorBody(await res.json()) }
+  throw new Error(`DELETE /api/queue/${id} -> unexpected status ${res.status}`)
 }
 
 export async function deleteSession(id: string): Promise<void> {

@@ -20,12 +20,13 @@ import {
   applyQueueEvent,
   applyStateEvent,
   type CreateState,
-  failSubmission,
+  findQueueItem,
   findTile,
   type FollowUp,
   insertTile,
   openMaskEditor,
   reconcileSessions,
+  removeQueueItem,
   removeTile,
   showToast,
   type SseEvent,
@@ -89,7 +90,7 @@ const state: CreateState = {
   schemaFields: [],
   tiles: [],
   pending: null,
-  queue: null,
+  queue: [],
   composer: {
     prompt: '',
     aspect: '1:1',
@@ -287,10 +288,10 @@ async function resync(): Promise<void> {
   const [tiles, queue] = await Promise.all([net.getSessions(), net.getQueue()])
   reconcileSessions(state, tiles)
   const pending = state.pending
-  if (pending != null && pending.kind !== 'posting' && findTile(state.tiles, pending.id) != null) {
+  if (pending != null && pending.kind === 'starting' && findTile(state.tiles, pending.id) != null) {
     state.pending = null // its session materialized while we were away
   }
-  applyQueueEvent(state, { kind: 'queue', queued: queue }, performance.now())
+  applyQueueEvent(state, { kind: 'queue', items: queue }, performance.now())
   // Encode jobs have NO REST endpoint to reconcile against, and the gap may have
   // swallowed this job's terminal 'encode' event — a slot nobody will ever clear wedges
   // the DOWNLOAD button (and the delete guard) forever. Tradeoff, accepted: dropping the
@@ -328,7 +329,7 @@ async function boot(): Promise<void> {
     const [fields, tiles, queue] = await Promise.all([net.getSchemaFields(), net.getSessions(), net.getQueue()])
     state.schemaFields = fields
     state.tiles = tiles
-    applyQueueEvent(state, { kind: 'queue', queued: queue }, performance.now())
+    applyQueueEvent(state, { kind: 'queue', items: queue }, performance.now())
     state.boot = { phase: 'ready' }
     startSse()
   } catch (err) {
@@ -371,17 +372,29 @@ function beginSubmission(prompt: string, dims: { width: number; height: number }
         break
       case 'queued':
         state.lastRun = { values: payload.values, forkOf: payload.forkOf, seedLocked: payload.seedLocked }
-        state.pending = { kind: 'queued', id: result.queuedId, prompt, sizeX: dims.width, sizeY: dims.height }
-        if (result.replaced) showToast(state, 'replaced queued render', performance.now())
+        // The optimistic tile hands over to the queued tile: queued tiles derive from
+        // state.queue, so append the 202's item unless the SSE echo already landed it.
+        state.pending = null
+        if (findQueueItem(state.queue, result.queuedId) == null) {
+          state.queue.push({
+            id: result.queuedId,
+            position: result.position,
+            prompt,
+            sizeX: dims.width,
+            sizeY: dims.height,
+          })
+        }
         break
       case 'rejected':
-        failSubmission(state)
+        // A failed POST never touched the queue (append semantics) — queued tiles stay;
+        // only the optimistic tile clears.
+        state.pending = null
         showToast(state, result.message, performance.now())
         break
     }
   })()
     .catch((err: unknown) => {
-      failSubmission(state)
+      state.pending = null // network refusal: the POST never landed; the queue is untouched
       toastError(err)
     })
     .finally(() => {
@@ -609,11 +622,23 @@ async function confirmDelete(): Promise<void> {
   loop.scheduleRender()
 }
 
-// A8 — cancel queued: server slot first, then our optimistic clear (the SSE echo no-ops).
-async function cancelQueued(): Promise<void> {
-  await net.deleteQueue()
-  state.pending = null
+// A8 — cancel one queued item (its tile's ×): optimistic local removal FIRST, so the SSE
+// echo (published by the server during the DELETE) can never see the cancelled item as a
+// drained head and phantom a 'starting' tile for it. An id already gone (double-click
+// within one rAF, echo races) sends NO DELETE — the user's cancel already worked and a
+// 404 would toast the misleading 'already started'. A real 404 means the item
+// auto-started or was cancelled elsewhere — re-fetch the truth and say so.
+function cancelQueuedItem(id: string): void {
+  if (!removeQueueItem(state, id)) return
   loop.scheduleRender()
+  void (async () => {
+    const result = await net.deleteQueueItem(id)
+    if (!result.ok) {
+      state.queue = await net.getQueue()
+      toastNow('no longer queued — it already started or was cancelled')
+      loop.scheduleRender()
+    }
+  })().catch(toastError)
 }
 
 // --- lightbox open/close (A9)
@@ -830,12 +855,13 @@ scrollerEl.addEventListener('scroll', () => {
 
 scrollerEl.addEventListener('click', (e) => {
   const target = e.target as HTMLElement
-  if (target.closest('.tile-x') != null) {
-    void cancelQueued().catch(toastError)
-    return
-  }
   const tile = target.closest<HTMLElement>('.tile')
   const key = tile?.dataset['key']
+  if (target.closest('.tile-x') != null) {
+    // × only renders on queued entries, whose key is the queue item id.
+    if (key != null && key !== 'pending') cancelQueuedItem(key)
+    return
+  }
   if (key == null || key === 'pending') return
   openLightbox(key)
 })

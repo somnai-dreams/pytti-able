@@ -39,6 +39,9 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // 3/13 -> 3/15 with §15.7 containment: +openMaskEditor, +dropUnreadableMask — state
   // transitions on the tagged-union store (string/JSON domain, model.test.ts is the
   // checked surface), outside freerange's numeric subset as expected.
+  // 3/15 held through the FIFO queue rework (§2.5): -pendingFromQueueSlot,
+  // -failSubmission (one-slot contract dead), +findQueueItem, +removeQueueItem —
+  // same domain, same checked surface.
   { file: 'create/core/model.ts', coverage: '3/15', partial: 0 },
   { file: 'create/core/presets.ts', coverage: '1/10', partial: 0 },
   { file: 'create/core/surfaces.ts', coverage: '1/2', partial: 0 },

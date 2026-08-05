@@ -11,7 +11,7 @@ function state(over: Partial<CreateState> = {}): CreateState {
     schemaFields: [],
     tiles: [],
     pending: null,
-    queue: null,
+    queue: [],
     composer: { prompt: '', aspect: '1:1', quality: 'standard', look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null, popoverOpen: false },
     lastRun: null,
     lastSeed: null,

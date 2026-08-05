@@ -70,7 +70,7 @@ const state = {
   // ── server-truth mirrors (lifetime: app; mutated only by SSE/REST results) ──
   sessions: { byId: {}, order: [] },   // {[id]: SessionSummary}; order newest-first
   presets: [],                         // [{name, values, savedAt}]
-  queue: null,                         // {id, slug} | null — the one slot
+  queue: [],                           // ordered FIFO [{id, position, slug, scenes, …}] from /api/queue
 
   // ── live render (lifetime: one render; reset on state:done/stopped/failed) ──
   live: {
@@ -346,9 +346,11 @@ function validateSse(type, data) {
     case 'log':
       req(data, 'sessionId', 'string', ctx); req(data, 'line', 'string', ctx); req(data, 'kind', 'string', ctx)
       return data
-    case 'queue':
-      if (data.queued != null) { req(data.queued, 'id', 'string', ctx); req(data.queued, 'slug', 'string', ctx) }
+    case 'queue': {
+      const items = req(data, 'items', 'array', ctx)
+      for (const q of items) { req(q, 'id', 'string', ctx); req(q, 'slug', 'string', ctx); req(q, 'position', 'number', ctx) }
       return data
+    }
     case 'encode':
       req(data, 'jobId', 'string', ctx); req(data, 'sessionId', 'string', ctx)
       req(data, 'framesDone', 'number', ctx); req(data, 'framesTotal', 'number', ctx)
@@ -411,7 +413,7 @@ function loadDetail(id) {
 }
 
 function loadQueue() {
-  api('GET', '/api/queue').then((r) => emit({ k: 'queue-state', queued: r.queued ?? null }))
+  api('GET', '/api/queue').then((r) => emit({ k: 'queue-state', queued: req(r, 'items', 'array', '/api/queue') }))
 }
 
 function loadPresets() {
@@ -443,7 +445,7 @@ function postRun(mode) {
 function postStop(id) { api('POST', `/api/sessions/${id}/stop`).then(() => {}) }
 function postResume(id) { api('POST', `/api/sessions/${id}/resume`).then(() => emit({ k: 'resumed' })) }
 function deleteSession(id) { api('DELETE', `/api/sessions/${id}`).then(() => emit({ k: 'deleted', id })) }
-function clearQueue() { api('DELETE', '/api/queue').then(() => emit({ k: 'queue-state', queued: null })) }
+function clearQueue() { api('DELETE', '/api/queue').then(() => emit({ k: 'queue-state', queued: [] })) }
 
 function postEncode(sessionId, fps, format, proxy) {
   api('POST', `/api/sessions/${sessionId}/encode`, { fps, format, proxy: !!proxy })
@@ -528,8 +530,8 @@ function nextSessionId() {
     const m = /^s-(\d+)-/.exec(id)
     if (m) maxN = Math.max(maxN, Number(m[1]))
   }
-  if (state.queue != null) {
-    const m = /^s-(\d+)-/.exec(state.queue.id)
+  for (const q of state.queue) {
+    const m = /^s-(\d+)-/.exec(q.id)
     if (m) maxN = Math.max(maxN, Number(m[1]))
   }
   const scenes = String(state.draft.values.scenes ?? '')
@@ -1831,7 +1833,7 @@ function applySse(ev) {
       break
     }
     case 'queue':
-      state.queue = data.queued ?? null
+      state.queue = data.items
       state.dirty.status = true; state.dirty.runBar = true
       break
     case 'encode': {
@@ -1863,7 +1865,10 @@ function doAction(action, node, ev) {
       if (state.live.sessionId != null) { postStop(state.live.sessionId); state.live.state = 'stopping'; state.dirty.status = true }
       break
     case 'queue-chip':
-      if (state.queue != null) toast(`⧖ queued: ${state.queue.id}`, [{ label: 'CLEAR QUEUE', event: { ev: 'clear-queue' } }], 10000)
+      if (state.queue.length > 0) {
+        toast(`⧖ ${state.queue.length} queued · next: ${state.queue[0].id}`,
+              [{ label: 'CLEAR QUEUE', event: { ev: 'clear-queue' } }], 10000)
+      }
       break
     case 'open-boot': u.sheet = { kind: 'firstBoot' }; state.dirty.overlay = true; break
     case 'open-help': u.helpOpen = true; break
@@ -2205,10 +2210,10 @@ function tick(now) {
           state.sel.sessionId = null; state.sel.frameIdx = null; state.sel.compare = null
           loadSessions()
           toast(`▶ ${body.sessionId}`, [])
-        } else if (typeof body.queued === 'string' || (body.queued != null && typeof body.queued.id === 'string')) {
+        } else if (typeof body.queuedId === 'string') {
           state.draft.dirtySinceRun = false
           loadQueue()
-          toast(`⧖ queued — runs when the live render finishes`, [])
+          toast(`⧖ queued #${body.position} — runs in turn`, [])
         } else {
           throw new Error(`unrecognized POST /api/sessions response ${JSON.stringify(body)}`)
         }
@@ -2692,9 +2697,9 @@ function renderStatusStrip() {
       : 'READY · reconnecting event stream…'
     dc.stop.style.display = 'none'
   }
-  if (state.queue != null) {
+  if (state.queue.length > 0) {
     dc.queueChip.style.display = 'inline-block'
-    dc.queueChip.textContent = `⧖ ${state.queue.id}`
+    dc.queueChip.textContent = state.queue.length === 1 ? `⧖ ${state.queue[0].id}` : `⧖ ${state.queue.length} queued`
   } else {
     dc.queueChip.style.display = 'none'
     dc.queueChip.textContent = '⧖'
@@ -4168,7 +4173,7 @@ async function boot() {
     state.sel.sessionId = dl[1] === state.live.sessionId ? null : dl[1]
   }
 
-  state.queue = queue.queued ?? null
+  state.queue = req(queue, 'items', 'array', '/api/queue')
   state.presets = req(presets, 'presets', 'array', '/api/presets')
 
   state.firstBoot = order.length === 0 && Object.keys(state.calibration.buckets).length === 0

@@ -31,10 +31,16 @@
 //   applyProgressEvent(state, ev)               telemetry fields only (substate belongs to
 //                                               state events); unknown ids ignored
 //   applyFrameEvent(state, ev)                  frames = savedTotal (thumb URLs derive)
-//   applyQueueEvent(state, ev, now)             the three Q-rules (§6.2)
+//   applyQueueEvent(state, ev, now)             server list wins; a queued id clears a
+//                                               'starting' pending it would shadow;
+//                                               drained-head -> starting bridge (§6.2
+//                                               Q-rules)
+//   findQueueItem(items, id) -> QueueItem|null  linear scan, same shape as findTile
+//   removeQueueItem(state, id) -> boolean       optimistic per-item cancel: splice +
+//                                               renumber; false = already gone (the
+//                                               caller skips the redundant DELETE);
+//                                               the SSE echo re-asserts truth
 //   applyEncodeEvent(state, ev, now) -> FollowUp
-//   failSubmission(state)                       pending falls back to the queue mirror's
-//                                               tile (Q3 shape) — never lies about a slot
 //   reconcileSessions(state, fresh)             fresh wins; live carries over for ids
 //                                               still rendering; detail carries always;
 //                                               closes lightbox/delete-confirm on dropped
@@ -89,10 +95,11 @@ export type Tile = {
   detail: Record<string, unknown> | null
 }
 
-// At most ONE pending creation exists at a time (single-slot queue).
+// Pending covers ONLY Create's own optimistic submission lifecycle: the in-flight POST
+// ('posting') and the enqueue->launching handoff gap ('starting'). QUEUED tiles are not
+// pending — they derive from `state.queue`, the server-truth FIFO mirror, directly.
 export type Pending =
   | { kind: 'posting'; prompt: string; sizeX: number; sizeY: number }
-  | { kind: 'queued'; id: string; prompt: string; sizeX: number; sizeY: number }
   | {
       kind: 'starting'
       id: string
@@ -102,7 +109,10 @@ export type Pending =
       deadline: number // wake loop drops it if no SSE 'state' arrives by then
     }
 
-export type QueueSlot = { id: string; slug: string }
+// One queued render, as GET /api/queue and the queue SSE event carry it (enough to
+// render a tile: prompt text, dims for masonry height, 1-based position for the badge).
+// position is server-sent and index-verified at the parse boundary (parseQueue).
+export type QueueItem = { id: string; position: number; prompt: string; sizeX: number; sizeY: number }
 
 export type Composer = {
   prompt: string
@@ -155,7 +165,7 @@ export type SseEvent =
       etaSec: number
     }
   | { kind: 'frame'; sessionId: string; savedTotal: number }
-  | { kind: 'queue'; queued: QueueSlot | null }
+  | { kind: 'queue'; items: QueueItem[] }
   | {
       kind: 'encode'
       jobId: string
@@ -172,7 +182,7 @@ export type CreateState = {
   schemaFields: string[] // schema field-name whitelist
   tiles: Tile[] // newest-first (server order preserved)
   pending: Pending | null
-  queue: QueueSlot | null // server-truth mirror, SSE-driven
+  queue: QueueItem[] // server-truth FIFO mirror, SSE-driven; queued tiles derive from it
   composer: Composer
   lastRun: { values: Record<string, unknown>; forkOf: string | null; seedLocked: boolean } | null
   lastSeed: number | null // most recent seed returned by POST; seeds the locked toggle
@@ -254,7 +264,7 @@ export function insertTile(state: CreateState, tile: Tile): void {
     state.tiles.splice(at, 0, tile)
   }
   const pending = state.pending
-  if (pending != null && pending.kind !== 'posting' && pending.id === tile.id) {
+  if (pending != null && pending.kind === 'starting' && pending.id === tile.id) {
     state.pending = null
   }
 }
@@ -288,7 +298,7 @@ export function applyStateEvent(
       if (tile.live == null) tile.live = freshLive(ev.substate)
       else tile.live.substate = ev.substate
       const pending = state.pending
-      if (pending != null && pending.kind !== 'posting' && pending.id === ev.sessionId) {
+      if (pending != null && pending.kind === 'starting' && pending.id === ev.sessionId) {
         state.pending = null // the tile already exists; the SSE state claims it
       }
       return NONE
@@ -348,51 +358,55 @@ export function applyFrameEvent(state: CreateState, ev: Extract<SseEvent, { kind
   tile.frames = ev.savedTotal // newest thumb/frame URLs derive from frames
 }
 
-// The Q3 derivation: a queued tile synthesized from the server slot alone — the slug is
-// the only text the slot carries (dims default to 512 pending the real summary).
-function pendingFromQueueSlot(slot: QueueSlot): Pending {
-  return { kind: 'queued', id: slot.id, prompt: slot.slug, sizeX: 512, sizeY: 512 }
+export function findQueueItem(items: readonly QueueItem[], id: string): QueueItem | null {
+  for (const item of items) {
+    if (item.id === id) return item
+  }
+  return null
 }
 
-// Failure paths of a submit (draft PUT 400, POST rejected, network refusal) clear the
-// optimistic tile — but while the queue mirror still holds a slot, the previous queued
-// render is still real on the server (a failed REPLACEMENT never touched it). Restore
-// its tile from the mirror instead of lying with an empty gallery.
-export function failSubmission(state: CreateState): void {
-  state.pending = state.queue == null ? null : pendingFromQueueSlot(state.queue)
+// Optimistic per-item cancel (A8): remove and renumber locally before the DELETE; the
+// SSE echo re-asserts the server list. Returns false when the id is already gone
+// (double-click, races with the echo) so the caller can skip the redundant DELETE —
+// a 404 from it would toast 'already started or was cancelled' for a cancel that worked.
+export function removeQueueItem(state: CreateState, id: string): boolean {
+  const index = state.queue.findIndex((item) => item.id === id)
+  if (index < 0) return false
+  state.queue.splice(index, 1)
+  for (let i = index; i < state.queue.length; i++) state.queue[i]!.position -= 1
+  return true
 }
 
-// The three Q-rules (spec §6.2).
+// The Q-rules (spec §6.2): the server list is truth — replace the mirror wholesale.
+// The ONE derived transition: the head item draining is the auto-start handoff (server
+// ordering: the queue publish precedes `state: launching`), so the drained head bridges
+// into a 'starting' pending tile for the grace window instead of flickering out. A head
+// removed by a cancel from elsewhere takes the same bridge — no state event ever claims
+// it and the wake loop drops it at the deadline. Non-head removals are cancels by
+// construction (only the head can start) and just disappear.
 export function applyQueueEvent(state: CreateState, ev: Extract<SseEvent, { kind: 'queue' }>, now: number): void {
-  state.queue = ev.queued
-  const pending = state.pending
-  if (ev.queued == null) {
-    if (pending != null && pending.kind === 'queued') {
-      // Q1: the slot draining normally precedes `state: launching` — grace window; the
-      // wake loop drops the tile at the deadline if no state event claimed it.
-      state.pending = {
-        kind: 'starting',
-        id: pending.id,
-        prompt: pending.prompt,
-        sizeX: pending.sizeX,
-        sizeY: pending.sizeY,
-        deadline: now + feel.startingGraceMs,
-      }
-    }
-    return
-  }
-  if (pending == null) {
-    // Q3: queued from the bench.
-    state.pending = pendingFromQueueSlot(ev.queued)
-    return
-  }
-  if (pending.kind === 'queued' && pending.id !== ev.queued.id) {
-    // Q2: ours was replaced externally.
+  const oldHead = state.queue.length > 0 ? state.queue[0]! : null
+  state.queue = ev.items
+  // The queue is truth the other way too: an id the server says is queued is not
+  // 'starting' — its tile derives from the list and pending must not shadow it with a
+  // duplicate (reachable when a cancelled head's number is re-minted for a new enqueue
+  // inside the grace window).
+  if (state.pending != null && state.pending.kind === 'starting' && findQueueItem(ev.items, state.pending.id) != null) {
     state.pending = null
-    showToast(state, 'queued render replaced', now)
   }
-  // pending posting/starting with a queued slot: our own POST echo or an unrelated
-  // bench enqueue — the POST result / state events settle it.
+  if (oldHead == null) return
+  if (findQueueItem(ev.items, oldHead.id) != null) return // still queued (append/renumber)
+  if (findTile(state.tiles, oldHead.id) != null) return // its session already materialized
+  const pending = state.pending
+  if (pending != null && pending.kind === 'posting') return // an in-flight POST owns the slot
+  state.pending = {
+    kind: 'starting',
+    id: oldHead.id,
+    prompt: oldHead.prompt,
+    sizeX: oldHead.sizeX,
+    sizeY: oldHead.sizeY,
+    deadline: now + feel.startingGraceMs,
+  }
 }
 
 export function applyEncodeEvent(
