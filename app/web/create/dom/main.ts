@@ -10,7 +10,7 @@ import { createWakeLoop } from '@kit/onestore/core'
 import { rafRenderLoop } from '@kit/onestore/dom'
 import { artifactUrl } from '../core/api'
 import { feel } from '../core/feel'
-import { deriveInitFromBase, type InitAttachment, type InitStrengthId, toInitDraftInput } from '../core/init'
+import { deriveInitFromBase, type InitAttachment, type InitStrengthId, toInitSubmitInput } from '../core/init'
 import { keyIntent } from '../core/keys'
 import { applyWheel, jumpToFrame, stepFrame } from '../core/lightbox'
 import {
@@ -31,7 +31,7 @@ import {
   type SseEvent,
   type Tile,
 } from '../core/model'
-import { composeDraft, composerDims, draftableValues, type DraftPayload, matchPresets } from '../core/presets'
+import { composeSubmission, composerDims, submittableValues, type SubmissionPayload, matchPresets } from '../core/presets'
 import { topmostDismissable } from '../core/surfaces'
 import * as net from './net'
 import { initBar, renderBar } from './renderBar'
@@ -86,7 +86,7 @@ const shellEls = [
 const state: CreateState = {
   boot: { phase: 'loading' },
   env: defaultEnv(),
-  draftFields: [],
+  schemaFields: [],
   tiles: [],
   pending: null,
   queue: null,
@@ -326,7 +326,7 @@ async function boot(): Promise<void> {
   loop.scheduleRender()
   try {
     const [fields, tiles, queue] = await Promise.all([net.getSchemaFields(), net.getSessions(), net.getQueue()])
-    state.draftFields = fields
+    state.schemaFields = fields
     state.tiles = tiles
     applyQueueEvent(state, { kind: 'queue', queued: queue }, performance.now())
     state.boot = { phase: 'ready' }
@@ -341,18 +341,16 @@ async function boot(): Promise<void> {
 
 // --- submissions (A1 optimistic flow, shared by Enter / Cmd+Enter / RE-RUN)
 
-function beginSubmission(prompt: string, dims: { width: number; height: number }, payload: DraftPayload): void {
+// One self-contained POST: the payload rides in the request body and the server
+// composes it over the tuned defaults — the shared draft is never read or written
+// (isolation invariant, spec §5.6). Coercion failures arrive as the 400 'rejected'
+// result, same surface as preflight rejections.
+function beginSubmission(prompt: string, dims: { width: number; height: number }, payload: SubmissionPayload): void {
   if (state.pending != null && state.pending.kind === 'posting') return // one in flight
   state.pending = { kind: 'posting', prompt, sizeX: dims.width, sizeY: dims.height }
   loop.renderNow() // the optimistic tile lands THIS frame, before any network
   void (async () => {
-    const put = await net.putDraft(payload)
-    if (!put.ok) {
-      failSubmission(state) // the queue mirror's tile survives a failed replacement
-      showToast(state, put.message, performance.now())
-      return
-    }
-    const result = await net.postStart()
+    const result = await net.postStart(payload)
     switch (result.kind) {
       case 'started':
         state.lastSeed = result.seed
@@ -401,17 +399,17 @@ function submit(): void {
     toastNow('image still uploading')
     return
   }
-  const draftInput = {
+  const submitInput = {
     prompt: composer.prompt,
     aspect: composer.aspect,
     quality: composer.quality,
     look: composer.look,
     seedMode: composer.seedMode,
     tweak: composer.tweak,
-    init: toInitDraftInput(composer.init),
+    init: toInitSubmitInput(composer.init),
   }
-  const payload = composeDraft(draftInput)
-  const dims = composerDims(draftInput)
+  const payload = composeSubmission(submitInput)
+  const dims = composerDims(submitInput)
   beginSubmission(composer.prompt.trim(), dims, payload)
   // The bar keeps its text; tweak mode AND the attachment persist (iterating on the base).
 }
@@ -423,7 +421,7 @@ function rerunLast(): void {
     return
   }
   const scenes = lastRun.values['scenes']
-  if (typeof scenes !== 'string') throw new Error('lastRun without scenes — composeDraft always sets it')
+  if (typeof scenes !== 'string') throw new Error('lastRun without scenes — composeSubmission always sets it')
   const width = lastRun.values['width']
   const height = lastRun.values['height']
   const dims =
@@ -438,7 +436,7 @@ async function rerunSession(id: string): Promise<void> {
   const tile = findTile(state.tiles, id)
   if (tile == null) throw new Error(`re-run of unknown session ${id}`)
   const config = await ensureDetail(tile)
-  const values = draftableValues(config, state.draftFields)
+  const values = submittableValues(config, state.schemaFields)
   const scenes = values['scenes']
   const width = values['width']
   const height = values['height']
@@ -460,7 +458,7 @@ async function tweakSession(id: string): Promise<void> {
   const composer = state.composer
   const scenes = config['scenes']
   composer.prompt = typeof scenes === 'string' ? scenes : ''
-  composer.tweak = { of: id, baseValues: draftableValues(config, state.draftFields) }
+  composer.tweak = { of: id, baseValues: submittableValues(config, state.schemaFields) }
   const match = matchPresets(config)
   composer.aspect = match.aspect
   composer.quality = match.quality

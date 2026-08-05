@@ -16,7 +16,7 @@
 //   InitAttachment = { image, strength|null, holdMeaning, mask|null }
 //     strength null = CUSTOM (inherit the base's weight expression) — reachable ONLY
 //     while composer.tweak != null, mirroring aspect/quality/look
-//   InitDraftInput = { path, strength|null, holdMeaning, mask|null }  composeDraft's view
+//   InitSubmitInput = { path, strength|null, holdMeaning, mask|null }  composeSubmission's view
 //   ParsedInitWeight = none | simple{weight, mask|null} | opaque{raw}
 //
 // functions:
@@ -29,7 +29,7 @@
 //     strings only — no nearest-neighbor (§5.3 doctrine)
 //   sameMask(a, b) -> boolean
 //   semanticOn(values) -> boolean                     semantic_init_weight not in {'','0'}
-//   toInitDraftInput(init) -> InitDraftInput | null   throws while image is uploading
+//   toInitSubmitInput(init) -> InitSubmitInput | null   throws while image is uploading
 //                                                     (A1 guard is the caller contract)
 //   deriveInitFromBase(baseValues) -> InitAttachment | null   A4 rematerialization:
 //     empty init_image -> null; strength from matchStrength when the base weight parses
@@ -62,7 +62,7 @@ export type InitAttachment = {
   mask: InitMask | null
 }
 
-export type InitDraftInput = {
+export type InitSubmitInput = {
   path: string
   strength: InitStrengthId | null
   holdMeaning: boolean
@@ -165,10 +165,10 @@ export function semanticOn(values: Record<string, unknown>): boolean {
   return raw !== '' && raw !== '0'
 }
 
-export function toInitDraftInput(init: InitAttachment | null): InitDraftInput | null {
+export function toInitSubmitInput(init: InitAttachment | null): InitSubmitInput | null {
   if (init == null) return null
   if (init.image.kind !== 'ready') {
-    throw new Error('toInitDraftInput: image still uploading (caller must guard, §15.4)')
+    throw new Error('toInitSubmitInput: image still uploading (caller must guard, §15.4)')
   }
   return { path: init.image.path, strength: init.strength, holdMeaning: init.holdMeaning, mask: init.mask }
 }

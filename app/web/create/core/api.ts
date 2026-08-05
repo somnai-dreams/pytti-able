@@ -194,8 +194,9 @@ export type StartResult =
   | { kind: 'queued'; queuedId: string; replaced: boolean }
   | { kind: 'rejected'; message: string }
 
-// POST /api/sessions {"mode":"queue"} can only produce 201 / 202 / 400 (409 is the
-// "now"-mode busy answer and never fires for queue) — anything else throws.
+// The self-contained POST /api/sessions {mode:'queue', values, forkOf, seedLocked} can
+// only produce 201 / 202 / 400 (409 is the "now"-mode busy answer and never fires for
+// queue) — anything else throws. A 400 is coercion (unknown/mistyped field) or preflight.
 export function parseStartResult(status: number, raw: unknown): StartResult {
   if (status === 201) {
     const r = asRecord(raw, 'POST /api/sessions 201 body')

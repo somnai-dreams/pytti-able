@@ -1,12 +1,17 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  composeDraft,
+  ASPECT_IDS,
+  composeSubmission,
   composerDims,
-  draftableValues,
+  LOOK_IDS,
   lookModel,
   matchPresets,
+  PIN_FIELDS,
+  QUALITY_IDS,
   qualitySteps,
   resolveDims,
+  submittableValues,
+  VISIBLE_CONTROL_FIELDS,
 } from './presets'
 
 describe('resolveDims', () => {
@@ -35,9 +40,9 @@ describe('quality/look tables', () => {
   })
 })
 
-describe('composeDraft (fresh)', () => {
+describe('composeSubmission (fresh)', () => {
   test('overrides-over-defaults: exactly the nine fields, no seed when random', () => {
-    const payload = composeDraft({
+    const payload = composeSubmission({
       prompt: '  a mushroom forest ',
       aspect: '16:9',
       quality: 'standard',
@@ -62,7 +67,7 @@ describe('composeDraft (fresh)', () => {
   })
 
   test('locked seed adds the seed field and seedLocked', () => {
-    const payload = composeDraft({
+    const payload = composeSubmission({
       prompt: 'x',
       aspect: '1:1',
       quality: 'draft',
@@ -77,22 +82,22 @@ describe('composeDraft (fresh)', () => {
 
   test('empty prompt throws (caller must guard)', () => {
     expect(() =>
-      composeDraft({ prompt: '  ', aspect: '1:1', quality: 'draft', look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null }),
+      composeSubmission({ prompt: '  ', aspect: '1:1', quality: 'draft', look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null }),
     ).toThrow()
   })
 
   test('fresh composer with null ids throws', () => {
     expect(() =>
-      composeDraft({ prompt: 'x', aspect: null, quality: 'draft', look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null }),
+      composeSubmission({ prompt: 'x', aspect: null, quality: 'draft', look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null }),
     ).toThrow()
   })
 })
 
-describe('composeDraft (tweak)', () => {
+describe('composeSubmission (tweak)', () => {
   const base = { scenes: 'old prompt', width: 448, height: 576, steps_per_scene: 200, image_model: 'Limited Palette', seed: 7, cutouts: 16 }
 
   test('null chips inherit the base; prompt always overrides; random seed is REMOVED', () => {
-    const payload = composeDraft({
+    const payload = composeSubmission({
       prompt: 'new prompt',
       aspect: null,
       quality: null,
@@ -107,7 +112,7 @@ describe('composeDraft (tweak)', () => {
   })
 
   test('concrete chips override; locked seed pins', () => {
-    const payload = composeDraft({
+    const payload = composeSubmission({
       prompt: 'new prompt',
       aspect: '16:9',
       quality: 'deep',
@@ -124,7 +129,7 @@ describe('composeDraft (tweak)', () => {
   })
 
   test('aspect override with CUSTOM quality inherits the base size class (256)', () => {
-    const payload = composeDraft({
+    const payload = composeSubmission({
       prompt: 'p',
       aspect: '16:9',
       quality: null,
@@ -138,7 +143,7 @@ describe('composeDraft (tweak)', () => {
   })
 
   test('aspect override over a non-preset base falls to the 512 class', () => {
-    const payload = composeDraft({
+    const payload = composeSubmission({
       prompt: 'p',
       aspect: '1:1',
       quality: null,
@@ -201,17 +206,17 @@ describe('matchPresets (exact-match only)', () => {
   })
 })
 
-describe('draftableValues', () => {
+describe('submittableValues', () => {
   test('keeps only whitelisted keys', () => {
-    expect(draftableValues({ scenes: 'p', seed: 1, _private: true, config_version: 3 }, ['scenes', 'seed', 'width'])).toEqual({
+    expect(submittableValues({ scenes: 'p', seed: 1, _private: true, config_version: 3 }, ['scenes', 'seed', 'width'])).toEqual({
       scenes: 'p',
       seed: 1,
     })
   })
 })
 
-test('fresh composeDraft pins animation_mode off (stills surface)', () => {
-  const payload = composeDraft({
+test('fresh composeSubmission pins animation_mode off (stills surface)', () => {
+  const payload = composeSubmission({
     prompt: 'x',
     aspect: '1:1',
     quality: 'draft',
@@ -223,7 +228,7 @@ test('fresh composeDraft pins animation_mode off (stills surface)', () => {
   expect(payload.values['animation_mode']).toBe('off')
 })
 
-describe('composeDraft init — fresh (§15.6)', () => {
+describe('composeSubmission init — fresh (§15.6)', () => {
   const fresh = {
     prompt: 'p',
     aspect: '1:1' as const,
@@ -234,7 +239,7 @@ describe('composeDraft init — fresh (§15.6)', () => {
   }
 
   test('attached at medium, no mask, hold off: init_image + "4", no semantic/backend keys', () => {
-    const payload = composeDraft({
+    const payload = composeSubmission({
       ...fresh,
       init: { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: null },
     })
@@ -246,24 +251,24 @@ describe('composeDraft init — fresh (§15.6)', () => {
 
   test('subtle / strong map to 1.5 / 10', () => {
     expect(
-      composeDraft({ ...fresh, init: { path: '/up/a.png', strength: 'subtle', holdMeaning: false, mask: null } })
+      composeSubmission({ ...fresh, init: { path: '/up/a.png', strength: 'subtle', holdMeaning: false, mask: null } })
         .values['direct_init_weight'],
     ).toBe('1.5')
     expect(
-      composeDraft({ ...fresh, init: { path: '/up/a.png', strength: 'strong', holdMeaning: false, mask: null } })
+      composeSubmission({ ...fresh, init: { path: '/up/a.png', strength: 'strong', holdMeaning: false, mask: null } })
         .values['direct_init_weight'],
     ).toBe('10')
   })
 
   test('mask rides in the bracket; inverted puts the - inside it', () => {
     expect(
-      composeDraft({
+      composeSubmission({
         ...fresh,
         init: { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: false } },
       }).values['direct_init_weight'],
     ).toBe('4_[/up/m.png]')
     expect(
-      composeDraft({
+      composeSubmission({
         ...fresh,
         init: { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: true } },
       }).values['direct_init_weight'],
@@ -271,7 +276,7 @@ describe('composeDraft init — fresh (§15.6)', () => {
   })
 
   test('hold meaning pins semantic 0.3 AND the torch backend', () => {
-    const payload = composeDraft({
+    const payload = composeSubmission({
       ...fresh,
       init: { path: '/up/a.png', strength: 'medium', holdMeaning: true, mask: null },
     })
@@ -280,7 +285,7 @@ describe('composeDraft init — fresh (§15.6)', () => {
   })
 
   test('no attachment: none of the four keys appear (ruling 5 — absent, never empty strings)', () => {
-    const payload = composeDraft({ ...fresh, init: null })
+    const payload = composeSubmission({ ...fresh, init: null })
     for (const key of ['init_image', 'direct_init_weight', 'semantic_init_weight', 'perceptor_backend']) {
       expect(key in payload.values).toBe(false)
     }
@@ -288,16 +293,16 @@ describe('composeDraft init — fresh (§15.6)', () => {
 
   test('fresh init with null strength throws (unreachable per bar-clear rule)', () => {
     expect(() =>
-      composeDraft({ ...fresh, init: { path: '/up/a.png', strength: null, holdMeaning: false, mask: null } }),
+      composeSubmission({ ...fresh, init: { path: '/up/a.png', strength: null, holdMeaning: false, mask: null } }),
     ).toThrow()
   })
 })
 
-describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
+describe('composeSubmission init — tweak (§15.6, override only on diff)', () => {
   const tweakInput = (
     baseValues: Record<string, unknown>,
-    init: Parameters<typeof composeDraft>[0]['init'],
-  ): Parameters<typeof composeDraft>[0] => ({
+    init: Parameters<typeof composeSubmission>[0]['init'],
+  ): Parameters<typeof composeSubmission>[0] => ({
     prompt: 'p',
     aspect: null,
     quality: null,
@@ -308,7 +313,7 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
   })
 
   test('chip removed: the three init keys are deleted; perceptor_backend is left alone', () => {
-    const payload = composeDraft(
+    const payload = composeSubmission(
       tweakInput(
         {
           init_image: '/up/a.png',
@@ -328,13 +333,13 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
 
   test('untouched OPAQUE base weight rides verbatim (cutoffs survive)', () => {
     const base = { init_image: '/x/a.png', direct_init_weight: '1_r_0.3' }
-    const payload = composeDraft(tweakInput(base, { path: '/x/a.png', strength: null, holdMeaning: false, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/x/a.png', strength: null, holdMeaning: false, mask: null }))
     expect(payload.values['direct_init_weight']).toBe('1_r_0.3')
   })
 
   test('untouched simple base with mask rides verbatim (no recompose)', () => {
     const base = { init_image: '/up/a.png', direct_init_weight: '0.45_[/up/m.png]' }
-    const payload = composeDraft(
+    const payload = composeSubmission(
       tweakInput(base, {
         path: '/up/a.png',
         strength: null,
@@ -347,13 +352,13 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
 
   test('picking a strength recomposes and drops an opaque tail', () => {
     const base = { init_image: '/x/a.png', direct_init_weight: '1_r_0.3' }
-    const payload = composeDraft(tweakInput(base, { path: '/x/a.png', strength: 'strong', holdMeaning: false, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/x/a.png', strength: 'strong', holdMeaning: false, mask: null }))
     expect(payload.values['direct_init_weight']).toBe('10')
   })
 
   test('mask change over a simple base with CUSTOM strength keeps the base weight expr', () => {
     const base = { init_image: '/up/a.png', direct_init_weight: '0.45' }
-    const payload = composeDraft(
+    const payload = composeSubmission(
       tweakInput(base, {
         path: '/up/a.png',
         strength: null,
@@ -367,7 +372,7 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
   test('mask change over a NON-simple base with CUSTOM strength throws (locked by construction)', () => {
     const base = { init_image: '/x/a.png', direct_init_weight: '1_r_0.3' }
     expect(() =>
-      composeDraft(
+      composeSubmission(
         tweakInput(base, {
           path: '/x/a.png',
           strength: null,
@@ -380,21 +385,21 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
 
   test('init_image always rides (replaced image on an untouched weight)', () => {
     const base = { init_image: '/up/old.png', direct_init_weight: '0.45' }
-    const payload = composeDraft(tweakInput(base, { path: '/up/new.png', strength: null, holdMeaning: false, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/up/new.png', strength: null, holdMeaning: false, mask: null }))
     expect(payload.values['init_image']).toBe('/up/new.png')
     expect(payload.values['direct_init_weight']).toBe('0.45')
   })
 
   test('semantic: matching toggle -> a non-0.3 base value rides verbatim, backend pinned', () => {
     const base = { init_image: '/up/a.png', direct_init_weight: '4', semantic_init_weight: '0.7' }
-    const payload = composeDraft(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: true, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: true, mask: null }))
     expect(payload.values['semantic_init_weight']).toBe('0.7')
     expect(payload.values['perceptor_backend']).toBe('torch') // unconditional while on
   })
 
   test('semantic toggled ON over an off base -> 0.3 + torch', () => {
     const base = { init_image: '/up/a.png', direct_init_weight: '4', semantic_init_weight: '' }
-    const payload = composeDraft(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: true, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: true, mask: null }))
     expect(payload.values['semantic_init_weight']).toBe('4')
     expect(payload.values['perceptor_backend']).toBe('torch')
   })
@@ -406,15 +411,15 @@ describe('composeDraft init — tweak (§15.6, override only on diff)', () => {
       semantic_init_weight: '0.7',
       perceptor_backend: 'torch',
     }
-    const payload = composeDraft(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: false, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: false, mask: null }))
     expect('semantic_init_weight' in payload.values).toBe(false)
     expect(payload.values['perceptor_backend']).toBe('torch')
   })
 })
 
 
-test('fresh composeDraft with HOLD MEANING omits coarse_to_fine (engine refuses the pair)', () => {
-  const payload = composeDraft({
+test('fresh composeSubmission with HOLD MEANING omits coarse_to_fine (engine refuses the pair)', () => {
+  const payload = composeSubmission({
     prompt: 'x',
     aspect: '1:1',
     quality: 'draft',
@@ -430,4 +435,67 @@ test('fresh composeDraft with HOLD MEANING omits coarse_to_fine (engine refuses 
   })
   expect('coarse_to_fine' in payload.values).toBe(false)
   expect(payload.values['perceptor_backend']).toBe('torch')
+})
+
+// ── The isolation invariant (spec §5.6) ──────────────────────────────────────
+// "There can be no hidden sticky state or anything like that for features I
+//  can't see on the UI. It needs to be completely separate from the advanced
+//  mode." Every key a submission carries must be a visible control, a documented
+// pin, or (tweak only) a key of the fork base's own snapshot. Walked over the
+// full composer-option product so a new composeSubmission key cannot land
+// undocumented.
+describe('isolation invariant: submissions are reconstructible from what the user sees', () => {
+  const SEED_MODES = [{ kind: 'random' as const }, { kind: 'locked' as const, seed: 7 }]
+  const INITS: Parameters<typeof composeSubmission>[0]['init'][] = [
+    null,
+    { path: '/up/a.png', strength: 'subtle', holdMeaning: false, mask: null },
+    { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: true } },
+    { path: '/up/a.png', strength: 'strong', holdMeaning: true, mask: null },
+  ]
+
+  test('fresh: payload keys ⊆ visible controls ∪ documented pins', () => {
+    const violations: string[] = []
+    for (const aspect of ASPECT_IDS) {
+      for (const quality of QUALITY_IDS) {
+        for (const look of LOOK_IDS) {
+          for (const seedMode of SEED_MODES) {
+            for (const init of INITS) {
+              const payload = composeSubmission({ prompt: 'p', aspect, quality, look, seedMode, tweak: null, init })
+              for (const key of Object.keys(payload.values)) {
+                if (!VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
+                  violations.push(`${aspect}/${quality}/${look}/${seedMode.kind}/${init == null ? 'no-init' : 'init'}: ${key}`)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([])
+  })
+
+  test('tweak: payload keys ⊆ the fork base snapshot ∪ visible controls ∪ pins', () => {
+    // A realistic base: the fork snapshot is complete (every schema field), so
+    // stand-in extras represent the fields Create has no controls for.
+    const base = {
+      scenes: 'old', width: 512, height: 512, steps_per_scene: 200, image_model: 'Limited Palette',
+      seed: 3, cutouts: 40, smoothing_weight: 1, direct_stabilization_weight: '1',
+      init_image: '/up/a.png', direct_init_weight: '4', semantic_init_weight: '',
+    }
+    const violations: string[] = []
+    for (const seedMode of SEED_MODES) {
+      for (const init of INITS) {
+        const payload = composeSubmission({
+          prompt: 'new', aspect: '16:9', quality: 'deep', look: 'vqgan', seedMode,
+          tweak: { of: 's-1', baseValues: { ...base } }, init,
+        })
+        for (const key of Object.keys(payload.values)) {
+          if (!(key in base) && !VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
+            violations.push(`${seedMode.kind}/${init == null ? 'no-init' : 'init'}: ${key}`)
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([])
+  })
 })

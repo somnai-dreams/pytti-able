@@ -8,7 +8,7 @@ function state(over: Partial<CreateState> = {}): CreateState {
   return {
     boot: { phase: 'ready' },
     env: defaultEnv(),
-    draftFields: [],
+    schemaFields: [],
     tiles: [],
     pending: null,
     queue: null,

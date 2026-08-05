@@ -1,7 +1,8 @@
 // net.ts — every network effect: fetch wrappers (all bodies parsed through core/api,
 // which throws on boundary violations) and the EventSource lifecycle. Expected,
-// recoverable outcomes (400 preflight, 400 draft coercion, 400 encode) come back as
-// data; unexpected statuses and malformed bodies throw.
+// recoverable outcomes (400 preflight, 400 coercion, 400 encode) come back as data;
+// unexpected statuses and malformed bodies throw. Create never touches /api/draft:
+// submissions are self-contained POSTs (spec §5.6) and the draft is bench-private.
 import {
   parseEncodeStart,
   parseErrorBody,
@@ -15,7 +16,7 @@ import {
   type StartResult,
 } from '../core/api'
 import type { QueueSlot, SseEvent, Tile } from '../core/model'
-import type { DraftPayload } from '../core/presets'
+import type { SubmissionPayload } from '../core/presets'
 
 async function getJson(url: string): Promise<unknown> {
   const res = await fetch(url)
@@ -39,26 +40,21 @@ export async function getSchemaFields(): Promise<string[]> {
   return parseSchemaFields(await getJson('/api/schema'))
 }
 
-export type PutDraftResult = { ok: true } | { ok: false; message: string }
-
-export async function putDraft(payload: DraftPayload): Promise<PutDraftResult> {
-  const res = await fetch('/api/draft', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  if (res.status === 204) return { ok: true }
-  if (res.status === 400) return { ok: false, message: parseErrorBody(await res.json()) }
-  throw new Error(`PUT /api/draft -> unexpected status ${res.status}`)
-}
-
-// Create always uses queue mode: idle -> starts immediately; busy -> the one-slot queue.
+// The self-contained submission (isolation invariant, spec §5.6): the payload carries
+// everything; the server composes it over the versioned tuned defaults and NEVER touches
+// the shared draft — that file is the advanced bench's private working state. Create
+// always uses queue mode: idle -> starts immediately; busy -> the one-slot queue.
 // Never preempt from Create — killing a live render is a bench verb.
-export async function postStart(): Promise<StartResult> {
+export async function postStart(payload: SubmissionPayload): Promise<StartResult> {
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: 'queue' }),
+    body: JSON.stringify({
+      mode: 'queue',
+      values: payload.values,
+      forkOf: payload.forkOf,
+      seedLocked: payload.seedLocked,
+    }),
   })
   return parseStartResult(res.status, await res.json())
 }

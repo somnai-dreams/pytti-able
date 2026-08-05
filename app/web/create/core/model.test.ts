@@ -49,7 +49,7 @@ function state(over: Partial<CreateState> = {}): CreateState {
   return {
     boot: { phase: 'ready' },
     env: defaultEnv(),
-    draftFields: ['scenes'],
+    schemaFields: ['scenes'],
     tiles: [],
     pending: null,
     queue: null,

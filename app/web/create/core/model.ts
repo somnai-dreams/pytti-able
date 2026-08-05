@@ -169,7 +169,7 @@ export type SseEvent =
 export type CreateState = {
   boot: { phase: 'loading' } | { phase: 'ready' } | { phase: 'failed'; message: string }
   env: Env
-  draftFields: string[] // schema field-name whitelist
+  schemaFields: string[] // schema field-name whitelist
   tiles: Tile[] // newest-first (server order preserved)
   pending: Pending | null
   queue: QueueSlot | null // server-truth mirror, SSE-driven

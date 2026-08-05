@@ -8,7 +8,7 @@ import {
   sameMask,
   semanticOn,
   strengthWeight,
-  toInitDraftInput,
+  toInitSubmitInput,
 } from './init'
 
 describe('strength table', () => {
@@ -127,13 +127,13 @@ describe('semanticOn', () => {
   })
 })
 
-describe('toInitDraftInput', () => {
+describe('toInitSubmitInput', () => {
   test('null passes through', () => {
-    expect(toInitDraftInput(null)).toBeNull()
+    expect(toInitSubmitInput(null)).toBeNull()
   })
   test('ready image maps to the draft view', () => {
     expect(
-      toInitDraftInput({
+      toInitSubmitInput({
         image: { kind: 'ready', name: 'a.png', path: '/up/a.png', localUrl: 'blob:x' },
         strength: 'medium',
         holdMeaning: true,
@@ -143,7 +143,7 @@ describe('toInitDraftInput', () => {
   })
   test('uploading image throws (A1 guard is the caller contract)', () => {
     expect(() =>
-      toInitDraftInput({
+      toInitSubmitInput({
         image: { kind: 'uploading', name: 'a.png', localUrl: 'blob:x' },
         strength: 'medium',
         holdMeaning: false,

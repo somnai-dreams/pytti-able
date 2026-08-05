@@ -1147,8 +1147,10 @@ ENCODER = EncodeManager()
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _fresh_draft_values() -> dict:
-    """Schema defaults + the app's curated creative defaults on top."""
+def tuned_defaults() -> dict:
+    """Schema defaults + the app's curated creative defaults (config/default.yaml)
+    on top. The base of BOTH submission paths: a fresh draft starts here, and a
+    self-contained POST /api/sessions composes its values over it."""
     values = schema_defaults()
     default_yaml = CONFIG_DIR / "default.yaml"
     if default_yaml.exists():
@@ -1159,14 +1161,39 @@ def _fresh_draft_values() -> dict:
     return values
 
 
+def compose_submission(body: dict) -> tuple[dict, str | None, bool]:
+    """
+    A SELF-CONTAINED submission (the Create surface): the versioned tuned
+    defaults with the caller's values coerced on top. The shared draft is
+    NEVER read or written on this path — it is the advanced bench's private
+    working state (docs/studio-create-spec.md §5.6, isolation invariant).
+    Raises ValueError (-> 400 in do_POST) on any unknown or mistyped field,
+    at both the envelope and the config-values level.
+    """
+    unknown = sorted(set(body) - {"mode", "values", "forkOf", "seedLocked"})
+    if unknown:
+        raise ValueError(f"unknown submission fields: {', '.join(unknown)}")
+    if not isinstance(body["values"], dict):
+        raise ValueError("values must be an object of config fields")
+    fork_of = body.get("forkOf")
+    if fork_of is not None and not isinstance(fork_of, str):
+        raise ValueError("forkOf must be a string or null")
+    seed_locked = body.get("seedLocked", False)
+    if not isinstance(seed_locked, bool):
+        raise ValueError("seedLocked must be a boolean")
+    values = tuned_defaults()
+    values.update(coerce_values(body["values"]))
+    return values, fork_of, seed_locked
+
+
 def read_draft() -> dict:
     if DRAFT_PATH.exists():
         data = yaml.safe_load(DRAFT_PATH.read_text(encoding="utf-8")) or {}
         if "values" in data:
-            merged = _fresh_draft_values()
+            merged = tuned_defaults()
             merged.update(data["values"])
             return {"values": merged, "forkOf": data.get("forkOf"), "seedLocked": bool(data.get("seedLocked", False))}
-    return {"values": _fresh_draft_values(), "forkOf": None, "seedLocked": False}
+    return {"values": tuned_defaults(), "forkOf": None, "seedLocked": False}
 
 
 def write_draft(data: dict):
@@ -1508,8 +1535,14 @@ class Handler(BaseHTTPRequestHandler):
     def _post_sessions(self):
         body = self._body_json()
         mode = body.get("mode", "now")
-        draft = read_draft()
-        values, fork_of, seed_locked = draft["values"], draft.get("forkOf"), draft.get("seedLocked", False)
+        if "values" in body:
+            # Self-contained submission (Create): tuned defaults + body values;
+            # the shared draft is untouched. ValueError -> 400 via do_POST.
+            values, fork_of, seed_locked = compose_submission(body)
+        else:
+            # Draft-based submission (the bench): byte-identical legacy behavior.
+            draft = read_draft()
+            values, fork_of, seed_locked = draft["values"], draft.get("forkOf"), draft.get("seedLocked", False)
         check = preflight(values)
         if not check["ok"]:
             self._json(400, {"error": "preflight failed", "issues": check["issues"]})

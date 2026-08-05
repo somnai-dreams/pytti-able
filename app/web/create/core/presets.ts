@@ -1,9 +1,11 @@
 // @cs
 // create/core/presets: THE preset tables (aspect / quality / look / seed) and the two
-// maps across them — composeDraft (composer -> draft PUT payload, overrides-over-defaults)
-// and matchPresets (config snapshot -> preset ids, exact-match only). Also
-// draftableValues, the schema-whitelist filter that keeps a snapshot key the draft PUT
-// would 400 on from ever leaving the client.
+// maps across them — composeSubmission (composer -> the self-contained POST /api/sessions
+// payload; the server composes it over the versioned tuned defaults, spec §5.6) and
+// matchPresets (config snapshot -> preset ids, exact-match only). Also
+// submittableValues, the schema-whitelist filter that keeps a snapshot key the server's
+// coercion would 400 on from ever leaving the client. Create never touches /api/draft —
+// the shared draft is the advanced bench's private working state.
 //
 // String/JSON domain — outside freerange's numeric subset; presets.test.ts is the
 // checked surface.
@@ -11,17 +13,24 @@
 // types:
 //   AspectId = '1:1'|'3:4'|'4:3'|'16:9'    QualityId = 'draft'|'standard'|'deep'
 //   LookId = 'limited'|'unlimited'|'vqgan' SeedMode = {kind:'random'} | {kind:'locked', seed}
-//   ComposerDraftInput = { prompt, aspect|null, quality|null, look|null, seedMode, tweak|null,
-//     init: InitDraftInput|null }   (null preset ids = "inherit tweak base", reachable
+//   ComposerSubmitInput = { prompt, aspect|null, quality|null, look|null, seedMode, tweak|null,
+//     init: InitSubmitInput|null }   (null preset ids = "inherit tweak base", reachable
 //     only while tweak != null; init per §15.6 — main maps the attachment through
-//     core/init toInitDraftInput, which enforces the image-is-ready contract)
-//   DraftPayload = { values, forkOf, seedLocked }   — the PUT /api/draft body
+//     core/init toInitSubmitInput, which enforces the image-is-ready contract)
+//   SubmissionPayload = { values, forkOf, seedLocked }   — POST /api/sessions body fields
+//
+// constants:
+//   VISIBLE_CONTROL_FIELDS / PIN_FIELDS — the isolation invariant's two halves (§5.6):
+//     every key a FRESH composeSubmission emits is a visible control or a documented pin,
+//     so the payload is exactly reconstructible from what the user can see. A tweak
+//     payload adds only the fork base's own snapshot keys (shown via TWEAK provenance).
+//     Enforced by presets.test.ts over the full composer-option product.
 //
 // functions:
 //   resolveDims(aspect, quality) -> {width, height}     pure table lookup
 //   qualitySteps(quality) -> steps_per_scene            draft 150 / standard 200 / deep 300
 //   lookModel(look) -> image_model string
-//   composeDraft(composer) -> DraftPayload              throws on empty prompt or a fresh
+//   composeSubmission(composer) -> SubmissionPayload    throws on empty prompt or a fresh
 //     composer with null ids (caller-contract violations). Tweak dims rule: width/height
 //     override only when aspect != null; its size class comes from quality when non-null,
 //     else from exact-matching the BASE dims against the 256 table (miss -> 512 class).
@@ -31,15 +40,15 @@
 //     verbatim, preserving bench cutoffs); chip removal deletes the three init keys
 //     (perceptor_backend untouched); holdMeaning pins torch unconditionally when on.
 //   composerDims(composer) -> {width, height}          the dims the submission renders at
-//     (optimistic tile sizing); same dims rule as composeDraft, base-dims fallback 512x512
+//     (optimistic tile sizing); same dims rule as composeSubmission, base-dims fallback 512x512
 //   matchPresets(values) -> {aspect|null, quality|null, look|null}   exact-match only,
 //     no nearest-neighbor guessing; quality requires steps in {150,200,300} AND its class
 //     to match the dims-derived class
-//   draftableValues(config, draftFields) -> Record       whitelist filter
+//   submittableValues(config, schemaFields) -> Record       whitelist filter
 // @/cs
 import {
   formatInitWeight,
-  type InitDraftInput,
+  type InitSubmitInput,
   parseInitWeight,
   sameMask,
   semanticOn,
@@ -104,21 +113,53 @@ export function lookModel(look: LookId): string {
   return LOOK[look]
 }
 
-export type ComposerDraftInput = {
+export type ComposerSubmitInput = {
   prompt: string
   aspect: AspectId | null
   quality: QualityId | null
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
-  init: InitDraftInput | null
+  init: InitSubmitInput | null
 }
 
-export type DraftPayload = {
+export type SubmissionPayload = {
   values: Record<string, unknown>
   forkOf: string | null
   seedLocked: boolean
 }
+
+// ── The isolation invariant (spec §5.6, binding) ─────────────────────────────
+// "There can be no hidden sticky state or anything like that for features I
+//  can't see on the UI. It needs to be completely separate from the advanced
+//  mode." — the lead, verbatim.
+// Every key a fresh submission carries is either a control the user can see on
+// the Create surface, or one of the four documented pins below. presets.test.ts
+// asserts this over the full composer-option product; a new composeSubmission key
+// fails that test until it is added here (and thereby documented).
+
+// Field -> the visible control that determines it.
+export const VISIBLE_CONTROL_FIELDS: readonly string[] = [
+  'scenes', // the prompt bar
+  'width', // ASPECT x QUALITY chips (dims table, §5.1)
+  'height', // ASPECT x QUALITY chips
+  'steps_per_scene', // QUALITY chips
+  'image_model', // LOOK chips
+  'seed', // SEED toggle — the locked value is displayed next to it
+  'init_image', // the attachment chip (thumb + name)
+  'direct_init_weight', // INIT strength chips + the chip's MASK state
+  'semantic_init_weight', // the HOLD toggle
+  'perceptor_backend', // the 'torch engine' note shown while HOLD is on
+]
+
+// Fixed pins: constant on every fresh submission (never user-varied, but stated
+// here and in spec §5.6's pin table — visible as documentation, not as a control).
+export const PIN_FIELDS: readonly string[] = [
+  'animation_mode', // 'off' — Create is a stills surface by construction
+  'interpolation_steps', // 0 — no scene-0 prompt ramp
+  'coarse_to_fine', // true — the judged pyramid pin (omitted iff HOLD MEANING)
+  'coarse_stages', // 3 — thumbnail -> half -> full
+]
 
 // Exact-match a (width, height) pair against one class table.
 function matchAspectInClass(
@@ -149,10 +190,10 @@ function tweakDimsClass(quality: QualityId | null, baseValues: Record<string, un
 }
 
 // The dims the submission will actually render at — the optimistic tile's aspect must
-// match the session tile that replaces it. Mirrors composeDraft's dims rule: concrete
+// match the session tile that replaces it. Mirrors composeSubmission's dims rule: concrete
 // aspect resolves against the (quality- or base-derived) class table; a tweak CUSTOM
 // aspect inherits the base dims; a base without numeric dims falls to 512x512.
-export function composerDims(composer: ComposerDraftInput): { width: number; height: number } {
+export function composerDims(composer: ComposerSubmitInput): { width: number; height: number } {
   if (composer.tweak == null) {
     if (composer.aspect == null || composer.quality == null) {
       throw new Error('composerDims: a fresh composer must have concrete preset ids')
@@ -171,14 +212,14 @@ export function composerDims(composer: ComposerDraftInput): { width: number; hei
   return { width: 512, height: 512 }
 }
 
-export function composeDraft(composer: ComposerDraftInput): DraftPayload {
+export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayload {
   const prompt = composer.prompt.trim()
-  if (prompt === '') throw new Error('composeDraft: empty prompt (caller must guard)')
+  if (prompt === '') throw new Error('composeSubmission: empty prompt (caller must guard)')
   const seedLocked = composer.seedMode.kind === 'locked'
 
   if (composer.tweak == null) {
     if (composer.aspect == null || composer.quality == null || composer.look == null) {
-      throw new Error('composeDraft: a fresh composer must have concrete preset ids')
+      throw new Error('composeSubmission: a fresh composer must have concrete preset ids')
     }
     const dims = resolveDims(composer.aspect, composer.quality)
     const values: Record<string, unknown> = {
@@ -187,18 +228,18 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       height: dims.height,
       steps_per_scene: qualitySteps(composer.quality),
       image_model: lookModel(composer.look),
-      // Create is a stills surface by construction: pin animation off so a
-      // leftover animation_mode in the shared draft cannot leak into fresh
-      // submissions (the mlx_full default engine refuses animation configs).
+      // Create is a stills surface by construction: pin animation off —
+      // self-containment must hold regardless of what the tuned defaults
+      // carry, and the mlx_full default engine refuses animation configs.
       animation_mode: 'off',
       // auto_stop deliberately NOT pinned: the plateau detector was
       // calibrated on classic-ensemble loss curves and fires mid-render on
       // the modern pair's flat spells (cut renders at 129/200 in live use,
       // 2026-08-03). Re-enable when the detector judges the semantic
       // component with consecutive-verdict confirmation.
-      // No prompt ramp on a single scene: the shared draft's
-      // interpolation_steps otherwise scales the prompt in over the first
-      // 50 steps, ceding the composition-forming window to TV smoothing.
+      // No prompt ramp on a single scene: the tuned defaults'
+      // interpolation_steps (50) otherwise scales the prompt in over the
+      // first steps, ceding the composition-forming window to TV smoothing.
       interpolation_steps: 0,
     }
     // Pyramid rendering (full-tier battery, 2026-08-05: pyramid3 beat
@@ -216,7 +257,7 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
     const init = composer.init
     if (init != null) {
       if (init.strength == null) {
-        throw new Error('composeDraft: fresh init with null strength (unreachable per §15.4 bar-clear rule)')
+        throw new Error('composeSubmission: fresh init with null strength (unreachable per §15.4 bar-clear rule)')
       }
       values['init_image'] = init.path
       values['direct_init_weight'] = formatInitWeight(strengthWeight(init.strength), init.mask)
@@ -246,7 +287,7 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
       values['seed'] = composer.seedMode.seed
       break
     case 'random':
-      // random = the draft omits seed entirely; the server rolls fresh
+      // random = the submission omits seed entirely; the server rolls fresh
       delete values['seed']
       break
   }
@@ -254,9 +295,9 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
   // Init (§15.6, tweak): base values ride; override only where the composer differs.
   const init = composer.init
   if (init == null) {
-    // User removed the chip: the draft merge restores schema defaults (same mechanism
-    // as random-seed's delete). perceptor_backend stays — a base's deliberate backend
-    // choice is not Create's to revert.
+    // User removed the chip: the server's defaults-compose restores schema defaults
+    // (same mechanism as random-seed's delete). perceptor_backend stays — a base's
+    // deliberate backend choice is not Create's to revert.
     delete values['init_image']
     delete values['direct_init_weight']
     delete values['semantic_init_weight']
@@ -275,7 +316,7 @@ export function composeDraft(composer: ComposerDraftInput): DraftPayload {
         // Recomposing with an inherited weight requires a simple base by construction
         // (mask editing is locked on opaque bases — §15.6 assert).
         if (base.kind !== 'simple') {
-          throw new Error('composeDraft: mask changed over a non-simple base weight (mask editing must be locked)')
+          throw new Error('composeSubmission: mask changed over a non-simple base weight (mask editing must be locked)')
         }
         weight = base.weight
       }
@@ -342,14 +383,14 @@ export function matchPresets(values: Record<string, unknown>): {
   return { aspect, quality, look }
 }
 
-// Keep only keys the draft schema knows — parse-at-the-boundary: a snapshot key the
-// draft PUT would 400 on never leaves the client.
-export function draftableValues(
+// Keep only keys the config schema knows — parse-at-the-boundary: a snapshot key the
+// self-contained POST's coercion would 400 on never leaves the client.
+export function submittableValues(
   config: Record<string, unknown>,
-  draftFields: readonly string[],
+  schemaFields: readonly string[],
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {}
-  for (const key of draftFields) {
+  for (const key of schemaFields) {
     if (key in config) out[key] = config[key]
   }
   return out

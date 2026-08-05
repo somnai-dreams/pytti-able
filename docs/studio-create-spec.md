@@ -106,9 +106,10 @@ tuple values to `384` and delete existing `outputs/*/thumbs/` directories once
 (they regenerate lazily). Thumb URLs are immutable-cached, so stale 192s would
 otherwise persist per-browser; the one-time delete avoids a mixed gallery.
 
-No other server change. Explicitly out of scope: combined create-and-start
-endpoint (inventory §2b — the PUT→POST pair is the design), archive/soft-hide,
-prompt in SSE payloads.
+Explicitly out of scope: archive/soft-hide, prompt in SSE payloads.
+(Changed 2026-08-06: the original "PUT→POST pair is the design" ruling is
+superseded by S4 — the self-contained POST replaced it after the shared-draft
+contamination incident. See §2.4 and §5.6.)
 
 ### 2.3 Kit vendoring
 
@@ -131,6 +132,39 @@ checked surface travels with it). Record the pin in `app/web/kit/KIT_COMMIT`
 never edited; product policy that differs from `mjFeel` lives in
 `create/core/feel.ts` (§3), never patched into kit `feel.ts`.
 
+### 2.4 S4 (REQUIRED, added 2026-08-06) — self-contained `POST /api/sessions`
+
+`POST /api/sessions` dispatches on the presence of a `values` key in its JSON
+body (`server.py` `_post_sessions`):
+
+| body | path |
+|---|---|
+| absent, `{}`, or `{mode}` only | **draft-based** — reads `config/draft.yaml` via `read_draft()`. Byte-identical to the pre-S4 behavior; this is the bench's path and the bench is unchanged. |
+| contains `values` | **self-contained** — the request carries everything; the shared draft is **never read or written**. |
+
+Self-contained body contract:
+
+```
+{ mode?: 'now' | 'queue' | 'preempt',   // default 'now'; Create always sends 'queue'
+  values: { <config schema fields> },   // coerce_values() — unknown/mistyped field -> 400
+  forkOf?: string | null,               // lineage; becomes forkedFrom on the session
+  seedLocked?: boolean }                // default false; false -> server rolls the seed
+```
+
+Server-side composition (`compose_submission()`): `tuned_defaults()` — schema
+defaults + `config/default.yaml` curation, the same base a fresh draft starts
+from — with `coerce_values(body.values)` applied on top. Then the **same**
+`preflight` + mode dispatch as the draft path. 400 on: an unknown envelope key,
+non-object `values`, mistyped `forkOf`/`seedLocked`, any unknown or mistyped
+config field, or preflight errors. Responses are unchanged: `201 {sessionId,
+seed}` / `202 {queued, replaced}` / `400 {error, issues?}` / `409` (mode `now`,
+busy).
+
+Covered by `app/test_server.py` (in-process handler tests, stdlib unittest —
+`.venv/bin/python app/test_server.py`): defaults+values composition, draft
+byte/mtime-untouched on the self-contained path, unknown-field 400s, preflight
+firing on both paths, and the draft-based regression suite.
+
 ---
 
 ## 3. Module layout — `app/web/`
@@ -152,7 +186,8 @@ app/web/
                             #   toast ms, starting-grace ms, strip metrics (adopts kit
                             #   mjFeel values where unchanged)
       presets.ts            # aspect/quality/look/seed tables; resolveDims;
-                            #   composeDraft; matchPresets (reverse map)   [+ .test.ts]
+                            #   composeSubmission; matchPresets (reverse map);
+                            #   the §5.6 invariant whitelists              [+ .test.ts]
       api.ts                # THE parse boundary: parseSessionSummary, parseSessionDetail,
                             #   parseQueue, parseSseEvent (tagged union), parseStartResult,
                             #   parseErrorBody; url builders frameUrl/thumbUrl/artifactUrl
@@ -184,7 +219,7 @@ app/web/
 Rules of the split, applied:
 
 - **Freerange core** (pure, testable without a browser): the preset tables and
-  draft composition, the reverse preset match, tile/state derivations, every
+  submission composition, the reverse preset match, tile/state derivations, every
   SSE-event → state transition, masonry source construction, reel source + scrub
   rules, keyboard intent mapping, surface list + Z-ladder.
 - **Dom**: `fetch`, `EventSource`, `performance.now`, `Math.random` (the one
@@ -278,7 +313,7 @@ type Lightbox = {
 type CreateState = {
   boot: { phase: 'loading' } | { phase: 'ready' } | { phase: 'failed'; message: string }
   env: Env                                        // kit/env snapshot
-  draftFields: string[]                           // schema field-name whitelist (§5.2)
+  schemaFields: string[]                          // schema field-name whitelist (§5.2)
   tiles: Tile[]                                   // newest-first (server order preserved)
   pending: Pending | null
   queue: { id: string; slug: string } | null      // server-truth mirror, SSE-driven
@@ -347,30 +382,29 @@ Popover display labels: `1:1 · 3:4 · 4:3 · 16:9`; `DRAFT · STANDARD · DEEP`
 
 Fresh composer defaults: `1:1`, `standard`, `limited`, random seed.
 
-### 5.2 `composeDraft(composer): { values, forkOf, seedLocked }`
+### 5.2 `composeSubmission(composer): { values, forkOf, seedLocked }`
 
-The server draft PUT is **replace-relative-to-defaults** (verified: `read_draft`
-merges stored values over fresh defaults; inventory §1.3). Create exploits that:
-send only the overrides, everything else falls back to schema defaults +
-`config/default.yaml` curation.
+(Renamed from `composeDraft` 2026-08-06 — same composition rules, new
+destination: the payload goes straight into the self-contained
+`POST /api/sessions` body (S4, §2.4). **Create never touches `/api/draft`.**
+The server composes `values` over the same base a fresh draft starts from
+(schema defaults + `config/default.yaml`), so sending only the overrides keeps
+its exact meaning.)
 
 - Fresh (tweak == null):
   `values = { scenes: prompt, width, height, steps_per_scene, image_model }`
-  plus `seed` iff `seedMode.kind === 'locked'`; `forkOf: null`;
-  `seedLocked: seedMode.kind === 'locked'`.
+  plus the §5.6 pins, plus `seed` iff `seedMode.kind === 'locked'`;
+  `forkOf: null`; `seedLocked: seedMode.kind === 'locked'`.
 - Tweak (tweak != null):
   `values = { ...tweak.baseValues, ...overrides, scenes: prompt }` where
   `overrides` includes width/height/steps only for **non-null** aspect/quality,
   `image_model` only for non-null look, and seed per seedMode. `forkOf: tweak.of`.
-- `tweak.baseValues` is built by `draftableValues(config, draftFields)`: keep only
-  keys present in the schema field whitelist (`Object.keys(schema.fields)` fetched
-  at boot). This is parse-at-the-boundary: a snapshot key the draft PUT would 400
-  on (e.g. anything non-schema) never leaves the client.
-
-Deliberate consequence (do not "fix"): Create's Enter **overwrites the shared
-server draft**. The draft is a single-user resource and this is the inventory §2b
-design. A bench tab open at the time keeps its in-memory draft until its own next
-save; that is existing bench behavior, out of scope.
+  The fork snapshot **is** the values set (already complete); no defaults-merge
+  semantics are needed for it to replay faithfully.
+- `tweak.baseValues` is built by `submittableValues(config, schemaFields)`: keep
+  only keys present in the schema field whitelist (`Object.keys(schema.fields)`
+  fetched at boot). This is parse-at-the-boundary: a snapshot key the server's
+  coercion would 400 on (e.g. anything non-schema) never leaves the client.
 
 ### 5.3 `matchPresets(values): { aspect, quality, look }` (reverse map, for Tweak)
 
@@ -391,9 +425,63 @@ toggle random → locked again. Every POST response's `seed` updates
 
 ### 5.5 Image input
 
-§15.6 amends `composeDraft`/`matchPresets` with the init-image fields
+§15.6 amends `composeSubmission`/`matchPresets` with the init-image fields
 (`init_image`, `direct_init_weight`, `semantic_init_weight`, `perceptor_backend`),
 emitted **only** when an image is attached.
+
+### 5.6 The isolation invariant (added 2026-08-06, binding)
+
+The lead's directive, verbatim:
+
+> "There can be no hidden sticky state or anything like that for features I
+> can't see on the UI. It needs to be completely separate from the advanced
+> mode."
+
+Context: the shared bench draft silently contaminated every Create render for
+weeks (`smoothing_weight: 1` and friends overriding the tuned defaults) because
+Create's submissions routed through `PUT /api/draft`. The fix is structural,
+not procedural:
+
+1. **Create never reads or writes the shared draft.** Every submission (A1
+   fresh, A2 re-run-last, A3 re-run) is a self-contained
+   `POST /api/sessions {mode:'queue', values, forkOf, seedLocked}` (S4, §2.4).
+   The draft file is the **advanced surface's private working state** —
+   invisible to Create in both directions.
+2. **The submission payload is exactly reconstructible from what the user can
+   see.** For a fresh submission, every key in `values` is either a **visible
+   control** or a **documented pin** (tables below). For a tweak/re-run, the
+   payload adds only the fork base's own snapshot keys — provenance the user
+   summoned explicitly via TWEAK/RE-RUN on a visible session.
+3. **Enforced by tests on both sides**: `presets.test.ts` walks the full
+   composer-option product and fails on any `composeSubmission` key outside
+   `VISIBLE_CONTROL_FIELDS ∪ PIN_FIELDS` (fresh) or that union plus the base
+   snapshot (tweak) — a new emitted key cannot land undocumented.
+   `app/test_server.py` asserts the draft file is byte- and mtime-identical
+   across a self-contained POST.
+
+Visible controls (field → the control that determines it):
+
+| field | control |
+|---|---|
+| `scenes` | the prompt bar |
+| `width`, `height` | ASPECT × QUALITY chips (§5.1 dims table) |
+| `steps_per_scene` | QUALITY chips |
+| `image_model` | LOOK chips |
+| `seed` | SEED toggle (the locked value is displayed next to it) |
+| `init_image` | the attachment chip (thumb + name) |
+| `direct_init_weight` | INIT strength chips + the chip's MASK state |
+| `semantic_init_weight` | the HOLD toggle |
+| `perceptor_backend` | the `torch engine` note shown while HOLD is on |
+
+Documented pins (constant on every fresh submission; not user-varied — their
+documentation is this table + the `PIN_FIELDS` comments in `core/presets.ts`):
+
+| field | pinned value | why |
+|---|---|---|
+| `animation_mode` | `'off'` | Create is a stills surface by construction; the tuned defaults carry `2D` |
+| `interpolation_steps` | `0` | no scene-0 prompt ramp (composition-forming window) |
+| `coarse_to_fine` | `true` | the judged pyramid pin — **omitted iff HOLD MEANING** (engine refuses the pair) |
+| `coarse_stages` | `3` | thumbnail → half → full |
 
 ---
 
@@ -409,40 +497,42 @@ failures (400 with `{error}`, 409, network refusal) are data → toast.
 Guards: `boot.phase === 'ready'`, `prompt.trim() !== ''`.
 1. `state.pending = { kind: 'posting', prompt, ...resolveDims(...) }` → the
    optimistic tile renders **this frame**, before any network.
-2. `PUT /api/draft` with `composeDraft(composer)`. Non-204 → parse `{error}`,
-   toast it, `pending = null`, stop.
-3. `POST /api/sessions {"mode": "queue"}` — Create always uses `queue` (idle →
-   starts immediately; busy → the one-slot queue). **Never `preempt` from
-   Create** — killing a live render is a bench verb.
+2. `POST /api/sessions {mode: 'queue', ...composeSubmission(composer)}` — the
+   **one** network call: a self-contained submission (S4, §2.4); the shared
+   draft is untouched (§5.6). Create always uses `queue` (idle → starts
+   immediately; busy → the one-slot queue). **Never `preempt` from Create** —
+   killing a live render is a bench verb.
    - `201 {sessionId, seed}` → `pending = { kind: 'starting', id: sessionId, …,
      deadline: now + feel.startingGraceMs }`; `lastSeed = seed`; set `lastRun`.
    - `202 {queued, replaced}` → `pending = { kind: 'queued', id: queued, … }`;
      set `lastRun`; if `replaced` → toast `replaced queued render`.
    - `400 {error: "preflight failed", issues}` → toast the first
      `severity === 'error'` issue's `message` (prefixed by its `field`);
-     `pending = null`.
-4. Composer keeps its prompt (Midjourney grammar: the bar retains text). Tweak
+     `pending = null`. A coercion 400 (plain `{error}`) toasts the same way.
+3. Composer keeps its prompt (Midjourney grammar: the bar retains text). Tweak
    mode persists until the user clears the bar (which resets `tweak = null` and
    restores concrete preset ids) or submits — after a tweak submit, `tweak` stays
    (iterating on the same base), matching MJ remix.
 
 **A2 — Cmd+Enter (re-run last), global.**
 Guard: `lastRun != null` (else toast `nothing to re-run`). Replays `lastRun`
-verbatim: optimistic tile → `PUT /api/draft` (lastRun payload) → `POST
-{"mode":"queue"}` with the same result handling as A1. (A random-seed lastRun
-rolls a new seed server-side — "re-run" means same settings, not same pixels.)
+verbatim: optimistic tile → `POST /api/sessions {mode:'queue', ...lastRun}` with
+the same result handling as A1 — the identical self-contained path. (A
+random-seed lastRun rolls a new seed server-side — "re-run" means same settings,
+not same pixels.)
 
 **A3 — Re-run (lightbox action on session S): same settings, fresh seed.**
 1. Ensure `tile.detail` (fetch `GET /api/sessions/{S}` if null; cache).
-2. `values = draftableValues(detail.config, draftFields)`.
-3. `PUT /api/draft {values, forkOf: S, seedLocked: false}` →
-   `POST {"mode":"queue"}` (A1 result handling). Lightbox stays open; the new
-   tile appears in the gallery behind it.
+2. `values = submittableValues(detail.config, schemaFields)` — the fork
+   snapshot is already a complete values set.
+3. `POST /api/sessions {mode:'queue', values, forkOf: S, seedLocked: false}`
+   (A1 result handling; draft-free). Lightbox stays open; the new tile appears
+   in the gallery behind it.
 
 **A4 — Tweak (lightbox action on session S): prefill bar + popover.**
 1. Ensure `tile.detail` as in A3.
 2. `composer.prompt = String(config.scenes)`; `composer.tweak = { of: S,
-   baseValues: draftableValues(config) }`; `{aspect, quality, look} =
+   baseValues: submittableValues(config) }`; `{aspect, quality, look} =
    matchPresets(config)` (nulls → CUSTOM chips); `seedMode = { kind: 'locked',
    seed: config.seed }` (deterministic iteration; lineage matches the bench's
    fork-locks-seed convention).
@@ -488,9 +578,9 @@ to `tile.frames` while the session renders → `'follow'` (pin releases at the
 newest frame). Any backward step pins.
 
 **A11 — Popover.** Gear button toggles; outside-click and Esc close. Popover
-edits mutate `composer` only — **no network on popover interaction** (no draft
-PUT until submit; live estimates via `/api/preflight` are deliberately not on the
-Create surface).
+edits mutate `composer` only — **no network on popover interaction** (nothing
+leaves the client until submit; live estimates via `/api/preflight` are
+deliberately not on the Create surface).
 
 **A12 — `/`** focuses the bar (unless focus is already in an input). Esc with no
 surface open blurs the bar.
@@ -514,7 +604,7 @@ delegates to `core/model.ts` appliers. `X` = `payload.sessionId`.
 ### 6.3 Boot, reconnect, resync
 
 - **Boot** (`dom/main.ts`): `Promise.all` of `GET /api/schema` (only
-  `Object.keys(fields)` is kept → `draftFields`), `GET /api/sessions`,
+  `Object.keys(fields)` is kept → `schemaFields`), `GET /api/sessions`,
   `GET /api/queue`. All parsed; any failure → `boot = { phase: 'failed', message }`
   (full-surface error, §10.7). Then `readEnv()`, open SSE, `boot = ready`.
 - **Reconnect**: `EventSource.onerror` → `sse.phase = 'retrying'` (subtle
@@ -1193,12 +1283,12 @@ without an attachment, five with — item 5 is amended accordingly):
   base (tweak).
 - Popover edits still touch `composer` only — no network (A11 unchanged).
 
-### 15.6 `composeDraft` changes (`core/presets.ts` + `core/init.ts`)
+### 15.6 `composeSubmission` changes (`core/presets.ts` + `core/init.ts`)
 
-`ComposerDraftInput` gains `init: InitDraftInput | null`:
+`ComposerSubmitInput` gains `init: InitSubmitInput | null`:
 
 ```ts
-type InitDraftInput = {
+type InitSubmitInput = {
   path: string                     // image.kind must be 'ready' (A1 guard, §15.4)
   strength: InitStrengthId | null
   holdMeaning: boolean
@@ -1206,7 +1296,7 @@ type InitDraftInput = {
 }
 ```
 
-`DraftPayload` is unchanged in shape — the init fields ride inside `values`.
+`SubmissionPayload` is unchanged in shape — the init fields ride inside `values`.
 
 The codec (`core/init.ts`), Create's subset of the engine grammar:
 
@@ -1244,8 +1334,9 @@ baseValues['direct_init_weight'] ?? ''))`, `baseOn = semantic_init_weight` not
 in `{'', '0'}`):
 
 - `init == null` (user removed the chip): `delete` `init_image`,
-  `direct_init_weight`, `semantic_init_weight` from `values` (the draft merge
-  restores schema defaults — same mechanism as random-seed's `delete`).
+  `direct_init_weight`, `semantic_init_weight` from `values` (the server's
+  defaults-compose restores schema defaults — same mechanism as random-seed's
+  `delete`).
   `perceptor_backend` is left untouched (a base's deliberate backend choice is
   not Create's to revert).
 - `init != null`:
@@ -1375,7 +1466,7 @@ Esc layering:
 
 Fork snapshots already carry `init_image` / `direct_init_weight` /
 `semantic_init_weight`, and all three are schema fields — so they pass
-`draftableValues` and ride A3/A2 **verbatim with zero new code**: Re-run and
+`submittableValues` and ride A3/A2 **verbatim with zero new code**: Re-run and
 Cmd+Enter replay the init exactly (only the seed differs on A3, per its design).
 
 **A4 (Tweak) gains one step** — after `matchPresets`, derive the attachment
@@ -1454,19 +1545,20 @@ Mask editor (toplayer, lightbox-class):
     nothing (no chip, no request, no console error).
 35. With the 7911 server killed, attaching toasts the failure and clears the
     chip (no INIT row remains); after restart, re-attaching works.
-36. ⚑ Submit with an attached image at MEDIUM: `GET /api/draft` (7911) shows
-    `init_image` = the absolute upload path and `direct_init_weight` `"4"`,
-    and **no** `semantic_init_weight` / `perceptor_backend` keys among the
-    stored overrides; the render completes on the default backend and frame 1
-    visibly starts from the attached image.
+36. ⚑ Submit with an attached image at MEDIUM: the created session's config
+    (bench inspector, or `GET /api/sessions/{id}` on 7911) shows `init_image`
+    = the absolute upload path and `direct_init_weight` `"4"`, with
+    `semantic_init_weight` at its schema default; `GET /api/draft` is
+    **unchanged** by the submit (§5.6); the render completes on the default
+    backend and frame 1 visibly starts from the attached image.
 37. SUBTLE and STRONG submissions carry `direct_init_weight` `"1.5"` /
     `"10"` respectively (bench inspector on the created sessions).
 38. ⚑ HOLD MEANING on: the INIT row shows the `torch engine` note; the
     submitted config has `semantic_init_weight` `"0.3"` **and**
     `perceptor_backend` `"torch"`; the render completes.
-39. Submit with no image attached: the stored draft values contain none of
+39. Submit with no image attached: the POST body's `values` contain none of
     `init_image` / `direct_init_weight` / `semantic_init_weight` (keys absent,
-    not empty strings).
+    not empty strings — network panel on the `/api/sessions` request).
 40. MASK opens the paint surface: image at fit size; PAINT tints the stroked
     region accent; ERASE removes it; the brush-size slider changes stamp
     diameter; CLEAR wipes; the header copy states painted = where the image
