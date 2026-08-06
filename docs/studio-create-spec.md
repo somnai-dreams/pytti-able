@@ -376,7 +376,7 @@ type Composer = {
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
-  // The EXPERIMENTS panel (§5.7): six rows, each id-or-null; null = inherit tweak
+  // The EXPERIMENTS panel (§5.7): seven rows, each id-or-null; null = inherit tweak
   // base (CUSTOM chip), reachable only while tweak != null — the aspect convention.
   experiments: Experiments
   popoverOpen: boolean
@@ -627,16 +627,26 @@ reverse map, same exact-match doctrine, per row:
 - INIT NOISE: `init_spectrum` absent/`'white'` → WHITE; `'gray'` → GRAY (chroma is
   **ignored for white/gray** — the engine is documented chroma-inert there, so the
   match is exact, not a guess); `'pink'` + `init_spectrum_chroma: 'natural'` → PINK;
-  `'pink'` + any other chroma, `'fractal'`, or junk → CUSTOM.
-  `init_spectrum_falloff` is a bench knob, not part of the row's mapping — it rides
-  a tweak base verbatim.
+  `'pink'` + `'mono'` → PINK MONO; `'pink'` + any other chroma, `'fractal'`, or
+  junk → CUSTOM. `init_spectrum_falloff` is a bench knob, not part of the row's
+  mapping — it rides a tweak base verbatim.
 - PYRAMID: `coarse_to_fine` false/absent → OFF (any stages value alongside false is
   schema-rejected upstream); `true` + `coarse_stages` 2/3/4 → that chip; `true` +
   any other ladder (5, absent, junk) → CUSTOM.
+- ANNEAL: `structure_annealing` false/absent → OFF (any non-default anneal knob
+  alongside false is schema-rejected upstream, the coarse_stages rule); `true` with
+  the OTHER knobs (`anneal_cycles` 3, `anneal_strength` 0.5, `anneal_band` 0.15) at
+  their engine defaults (explicit or absent) → BLUR/NOISE by `anneal_source`
+  (absent source composes `'noise'` → NOISE); any bench-tuned knob or junk source →
+  CUSTOM.
 - COHERENCE / PHASE SCHEDULE / AUTO-STOP: false/absent → OFF, `true` → ON, junk →
   CUSTOM.
 - FULL VISION: `cutout_sampler` absent/`'smart'` → OFF (smart **is** what OFF
-  means — the tuned default), `'full'` → ON, `'classic'`/`'batched'`/junk → CUSTOM.
+  means — the tuned default; `cutouts` is consulted ONLY when the sampler is full —
+  elsewhere it is a bench knob riding the base), `'full'` + `cutouts: 16` → ON (the
+  pair travels together, §5.7), `'full'` + any other cutouts (absent composes the
+  tuned 40 — the pre-fix mispairing) → CUSTOM, `'classic'`/`'batched'`/junk →
+  CUSTOM.
 
 CUSTOM (null) rows inherit the base verbatim on resubmit — byte-identical replay,
 like aspect/size/look. Null is reachable only under tweak (§5.7).
@@ -702,10 +712,11 @@ Visible controls (field → the control that determines it):
 | `direct_init_weight` | INIT strength chips + the chip's MASK state |
 | `semantic_init_weight` | the HOLD toggle |
 | `perceptor_backend` | the `torch engine` note shown while HOLD is on |
-| `init_spectrum`, `init_spectrum_chroma` | EXPERIMENTS · INIT NOISE chips (§5.7; PINK pairs chroma `natural`) |
+| `init_spectrum`, `init_spectrum_chroma` | EXPERIMENTS · INIT NOISE chips (§5.7; PINK pairs chroma `natural`, PINK MONO pairs `mono`) |
 | `coarse_to_fine`, `coarse_stages` | EXPERIMENTS · PYRAMID row (§5.7 — the retired invisible pin, made visible 2026-08-06) |
+| `structure_annealing`, `anneal_source` | EXPERIMENTS · ANNEAL row (§5.7; BLUR pairs source `blur`, NOISE emits the flag only) |
 | `coherence_weighting` | EXPERIMENTS · COHERENCE toggle |
-| `cutout_sampler` | EXPERIMENTS · FULL VISION toggle |
+| `cutout_sampler`, `cutouts` | EXPERIMENTS · FULL VISION toggle (§5.7 — ON emits the `full` + `16` pair) |
 | `phase_scheduling` | EXPERIMENTS · PHASE SCHEDULE toggle |
 | `auto_stop` | EXPERIMENTS · AUTO-STOP toggle |
 
@@ -736,54 +747,87 @@ state lives in `composer.experimentsOpen`: projection state like `popoverOpen` �
 session-local, collapsed on load, persists across popover open/close for the
 page's lifetime, and **never part of the submission payload**.
 
-The rows, curated by the eval batteries (each option maps to schema fields; every
-default = the engine/tuned default):
+The rows, curated by the eval batteries and the user's own verdicts (each option
+maps to schema fields; every default = the engine/tuned default):
 
 | row | options (default first) | fields |
 |---|---|---|
-| INIT NOISE | WHITE · PINK · GRAY | `init_spectrum`; PINK also sets `init_spectrum_chroma: 'natural'` — the 2026-08-06 init-noise battery's both-judges winner. WHITE/GRAY emit the spectrum only (chroma is engine-inert for both; engine default `full`). PINK chip hint names the battery |
+| INIT NOISE | WHITE · PINK · PINK MONO · GRAY | `init_spectrum`; PINK also sets `init_spectrum_chroma: 'natural'` — the 2026-08-06 init-noise battery's both-judges winner; PINK MONO sets chroma `'mono'` — promoted 2026-08 on the user's verdict that white/gray/pink-mono are "all good in their own ways" (**looks**, not a ladder — the battery ranked adherence, not character). WHITE/GRAY emit the spectrum only (chroma is engine-inert for both; engine default `full`). PINK chip hint names the battery |
 | PYRAMID | 3 · 2 · 4 · OFF | `coarse_to_fine` + `coarse_stages` — the retired invisible pin as a visible control. OFF = the engine default (emits nothing); 2/3/4 emit both keys |
+| ANNEAL | OFF · BLUR · NOISE | `structure_annealing` (+ `anneal_source: 'blur'` for BLUR; NOISE emits the flag only — source `noise` is the engine default). Promoted 2026-08 on the user's verdict: "anneal-blur s3 is also quite good" — a **character**, not an adherence upgrade (the stacked battery scored adherence; annealing trades nothing on it). Row hint: `changes character, not adherence — battery-neutral; keeps re-deciding composition mid-render`. The other knobs (`anneal_cycles`/`anneal_strength`/`anneal_band`) stay bench-only at their engine defaults |
 | COHERENCE | OFF · ON | `coherence_weighting` |
-| FULL VISION | OFF · ON | `cutout_sampler: 'full'` when ON; OFF emits **nothing** (never an explicit `'smart'`) |
+| FULL VISION | OFF · ON | `cutout_sampler: 'full'` **+ `cutouts: 16`** when ON — the pair travels together (fixed 2026-08: ON used to emit `full` alone over the tuned `cutouts: 40`, an engine-documented mispairing — full's designed band is LOW cutn; on a 1:1 canvas all 40 views are the same crop. 16 is the band the engine docs name). OFF emits **nothing** (never an explicit `'smart'`; a base's own `cutouts` rides — it is a bench knob unless full pairs it) |
 | PHASE SCHEDULE | OFF · ON | `phase_scheduling` |
 | AUTO-STOP | OFF · ON | `auto_stop` (ON chip hint: `may stop early — detector is miscalibrated for the modern ensemble`, per the 2026-08-03 cut-at-129/200 incident) |
 
 **The payload rule (binding, enforced by `presets.test.ts`):** a row adds keys iff
 its selection differs from what the server's defaults-compose already produces.
-Five rows default to the composed default, so an untouched panel adds **zero**
+Six rows default to the composed default, so an untouched panel adds **zero**
 keys. PYRAMID is the deliberate exception: its default (3) is Create's judged pin
 over the engine default (off) made visible — it emits its two keys at every
 non-OFF selection and OFF emits nothing. Net: the untouched panel's payload is
-**byte-identical** to the pre-panel pin era.
+**byte-identical** to the pre-panel pin era. The defaults-side of the equivalence
+is pinned by `test_server.py` (`test_bare_submission_composes_engine_default_
+experiments`): a bare submission composes `init_spectrum 'white'`,
+`init_spectrum_chroma 'full'`, `coarse_to_fine False`, `coherence_weighting
+False`, `cutout_sampler 'smart'`, `phase_scheduling False`, `auto_stop False`,
+`structure_annealing False` — if a future `default.yaml` flip breaks it, that
+test names the field before the panel silently stops meaning what it shows.
 
-**Pyramid × HOLD MEANING (the one row interaction):** the engine refuses
-`coarse_to_fine` + semantic init. While HOLD is on, the PYRAMID row shows OFF and
-is disabled (the AUTO-chip locked treatment: disabled + title). Flipping HOLD on
-while the row is non-OFF **visibly forces it to OFF** in the same transition
-(core `model.applyHoldMeaning` — loud, the AUTO-aspect revert precedent, §5.1a);
-flipping HOLD off re-enables the row where it stands (OFF) — no silent restore.
-Tweak rematerialization re-asserts the same rule after `deriveInitFromBase`.
-`composeSubmission` **throws** on the pair (any non-OFF row, null included, with
-HOLD on) rather than silently omitting — what the row shows is what submits.
+**Row interactions — the engine's refusals, mirrored as panel guards.** All three
+follow the same treatment (the pyramid × HOLD precedent): the dominant control
+forces the yielding row **loudly in the same transition** through a core write
+path, the yielding row's chips disable with an explanatory title while the
+condition holds, releasing the condition re-enables the row where it stands (no
+silent restore), tweak rematerialization re-asserts the rule, and
+`composeSubmission` **throws** on the pair (null/CUSTOM rows included — they
+would let base keys ride) rather than silently omitting. What a row shows is
+what submits.
+
+1. **Pyramid × HOLD MEANING:** the engine refuses `coarse_to_fine` + semantic
+   init. Flipping HOLD on forces PYRAMID to OFF (`model.applyHoldMeaning`); the
+   PYRAMID chips are disabled while HOLD is on; tweak re-asserts after
+   `deriveInitFromBase`.
+2. **Anneal × AUTO-STOP:** the engine refuses `structure_annealing` +
+   `auto_stop`. The decided asymmetry mirrors HOLD: **AUTO-STOP dominates** —
+   flipping AUTO-STOP ON forces ANNEAL to OFF (`model.applyAutoStop`); while
+   AUTO-STOP is ON the ANNEAL chips are disabled (title: `AUTO-STOP is on — the
+   engine refuses annealing + auto-stop`), so turning ANNEAL non-OFF from that
+   state is prevented rather than force-resolved (a disabled chip, not a chip
+   that fights back). Flipping AUTO-STOP OFF re-enables ANNEAL at OFF.
+3. **LOOK VQGAN × noise/anneal:** shaped init noise (PINK / PINK MONO / GRAY)
+   and annealing both fail loud at render start under VQGAN (a codebook draw has
+   no spectrum to shape; annealing rejects latent models). Picking VQGAN forces
+   NOISE to WHITE **and** ANNEAL to OFF (`model.applyLook` — THE look write
+   path; the LOOK chips route through it); while the look is VQGAN both rows'
+   chips are disabled (titles name the reason); switching the look away
+   re-enables both rows where they stand. Tweak rematerialization re-asserts the
+   forcing (a VQGAN base rematerializes look `vqgan` concretely — `matchPresets`
+   exact-matches the model string — so the guard keys off `composer.look ===
+   'vqgan'`). Accepted residual: a tweak whose look is CUSTOM (an off-menu base
+   model such as LlamaGen) is not guarded — picking PINK there fails loud at
+   render start as a `failed` tile, the pre-guard behavior.
 
 **Tweak semantics:** concrete rows apply — delete the row's fields, then set the
 selection's keys (the random-seed delete mechanism: an OFF/WHITE re-pick restores
 the composed default); null (CUSTOM) rows leave the base verbatim, so off-menu
 bench values (fractal, `coarse_stages: 5`, `cutout_sampler: 'classic'`,
-`init_spectrum_falloff`, `auto_stop_window`…) survive an untouched tweak
-byte-for-byte. Rematerialization is `matchExperiments` (§5.3).
+`init_spectrum_falloff`, `anneal_cycles: 5`, `auto_stop_window`…) survive an
+untouched tweak byte-for-byte. Rematerialization is `matchExperiments` (§5.3).
+Row field ownership, where it is not obvious: ANNEAL owns **all five** anneal
+fields (a re-pick clears a base's bench knobs — a knob without the flag is a
+schema-rejected config lie, so an OFF re-pick that left `anneal_cycles: 5`
+riding would 400); FULL VISION ON owns the `cutout_sampler` + `cutouts` pair,
+OFF owns the sampler only (a base's `cutouts` rides — deleting it on OFF would
+silently drop a bench-authored count).
 
 **Deliberately NOT offered** (documented so nobody re-litigates from the UI side):
 
 | knob | why not |
 |---|---|
 | BORDER (`border_mode`) | clamp won its battery 9W/0L — a settled default, not an experiment |
-| ANNEAL (`structure_annealing` + knobs) | falsified: 0W/7L stacked — bench-only |
-| fractal / mono / full pink-chroma variants | all lost the init-noise battery; PINK+natural is the one winner offered |
-
-Accepted caveat: NOISE PINK/GRAY with LOOK VQGAN fails loud at render start (a
-codebook draw has no spectrum to shape — engine-documented); the failure surfaces
-as a `failed` tile with the engine's message. No cross-row guard is added for it.
+| ANNEAL bench knobs (`anneal_cycles`/`anneal_strength`/`anneal_band`) | the row offers the two judged characters (BLUR/NOISE at the engine schedule); the schedule knobs stay bench-only. (The ANNEAL row itself was promoted 2026-08 — the earlier "falsified 0W/7L" entry scored stacked-adherence, which the row does not claim: "anneal-blur s3 is also quite good" — the user) |
+| fractal / full pink-chroma variants | lost the init-noise battery; PINK+natural won it and PINK MONO is the user-promoted look (mono's "loss" was an adherence ranking, not a character verdict) |
 
 ---
 
@@ -1276,16 +1320,21 @@ Exactly the chassis-notes composition:
                           ┌─────────────────────────────────────────────────┐
                           │ …the five rows above…                           │
                           │ ▾ EXPERIMENTS                                   │
-                          │ INIT NOISE      [WHITE] [PINK] [GRAY]           │
+                          │ INIT NOISE      [WHITE] [PINK] [PINK MONO]      │
+                          │                 [GRAY]                          │
                           │ PYRAMID         [3] [2] [4] [OFF]               │
+                          │ ANNEAL          [OFF] [BLUR] [NOISE]            │
                           │ COHERENCE       [OFF] [ON]                      │
                           │ FULL VISION     [OFF] [ON]                      │
                           │ PHASE SCHEDULE  [OFF] [ON]                      │
                           │ AUTO-STOP       [OFF] [ON]                      │
                           └─────────────────────────────────────────────────┘
-   same chip idiom, defaults first; every default = the engine/tuned default
-   (untouched panel = byte-identical payload, §5.7). PYRAMID shows OFF and is
-   disabled while HOLD MEANING is on. Tweak mode may show [CUSTOM] per row.
+   same chip idiom, defaults first (rows wrap when their chips exceed the
+   popover width); every default = the engine/tuned default (untouched panel =
+   byte-identical payload, §5.7). Guarded rows disable per §5.7: PYRAMID shows
+   OFF while HOLD MEANING is on; NOISE shows WHITE and ANNEAL shows OFF while
+   LOOK is VQGAN; ANNEAL shows OFF while AUTO-STOP is on. Tweak mode may show
+   [CUSTOM] per row.
 ```
 
 ### 10.3 Tile states (gallery)

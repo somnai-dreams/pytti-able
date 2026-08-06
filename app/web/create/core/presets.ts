@@ -18,15 +18,16 @@
 // user sees is the number that submits (§5.6).
 //
 // The EXPERIMENTS panel (2026-08-06, spec §5.7 — "i need access to the higher level
-// experiment toggles in create"): six rows in the gear's collapsed EXPERIMENTS
+// experiment toggles in create"): seven rows in the gear's collapsed EXPERIMENTS
 // disclosure, each a mapping onto schema fields (Experiments / matchExperiments /
 // the applyExperiments emission inside composeSubmission). The panel's PAYLOAD RULE:
 // a row adds keys iff its selection differs from what the server's defaults-compose
-// produces anyway — five rows default to the composed default and emit NOTHING
+// produces anyway — six rows default to the composed default and emit NOTHING
 // untouched; PYRAMID is the deliberate exception (its default 3 is Create's judged
 // pin over the engine default OFF, made visible — it emits its two keys at every
 // non-OFF selection), so the untouched panel's payload is byte-identical to the
-// pre-panel pin era.
+// pre-panel pin era. The rule leans on the same-side pin test_server.py carries
+// (a bare submission composes the engine defaults these emissions assume).
 //
 // String/JSON domain — outside freerange's numeric subset; presets.test.ts is the
 // checked surface.
@@ -38,11 +39,11 @@
 //     known — the AspectId tables stay closed (they key the dims Records)
 //   LookId = 'limited'|'unlimited'|'vqgan'
 //   SeedMode = {kind:'random'} | {kind:'locked', seed}
-//   NoiseId = 'white'|'pink'|'gray'        PyramidId = '3'|'2'|'4'|'off'
-//   ToggleId = 'off'|'on'
-//   Experiments = { noise, pyramid, coherence, fullVision, phase, autoStop } — each
-//     id-or-null; null = "inherit tweak base" (CUSTOM chip), reachable only while
-//     tweak != null, mirroring aspect/size/look
+//   NoiseId = 'white'|'pink'|'pinkmono'|'gray'   PyramidId = '3'|'2'|'4'|'off'
+//   ToggleId = 'off'|'on'                        AnnealId = 'off'|'blur'|'noise'
+//   Experiments = { noise, pyramid, anneal, coherence, fullVision, phase, autoStop }
+//     — each id-or-null; null = "inherit tweak base" (CUSTOM chip), reachable only
+//     while tweak != null, mirroring aspect/size/look
 //   ComposerSubmitInput = { prompt, aspect: ComposerAspect|null, size|null, steps: number,
 //     look|null, seedMode, tweak|null, init: InitSubmitInput|null, experiments }
 //     (null preset ids = "inherit tweak base", reachable only while tweak != null;
@@ -55,7 +56,7 @@
 //     every key a FRESH composeSubmission emits is a visible control or a documented pin,
 //     so the payload is exactly reconstructible from what the user can see. A tweak
 //     payload adds only the fork base's own snapshot keys (shown via TWEAK provenance).
-//     Enforced by presets.test.ts over the full composer-option product. The eight
+//     Enforced by presets.test.ts over the full composer-option product. The eleven
 //     experiment fields are VISIBLE controls (the panel); the old coarse_to_fine /
 //     coarse_stages pin converted to the PYRAMID row (§5.7).
 //
@@ -75,18 +76,26 @@
 //     always concrete, no null-inherit; what the gear shows is what submits
 //   lookModel(look) -> image_model string
 //   defaultExperiments() -> Experiments                 the fresh panel: white / 3 /
-//     off / off / off / off — every row at the engine-or-tuned default (§5.7)
+//     off / off / off / off / off — every row at the engine-or-tuned default (§5.7)
 //   matchExperiments(values) -> Experiments             the panel's reverse map (§5.3
-//     doctrine, exact-match only): pink + chroma natural -> PINK, pink + any other
-//     chroma -> null (CUSTOM); chroma is consulted ONLY for pink (it is engine-inert
-//     for white/gray); c2f true + stages 2/3/4 -> that id, any other ladder -> null;
-//     absent/false booleans -> OFF, true -> ON, junk -> null; cutout_sampler
-//     absent/'smart' -> OFF, 'full' -> ON, classic/batched/junk -> null
+//     doctrine, exact-match only): pink + chroma natural -> PINK, pink + chroma mono
+//     -> PINK MONO, pink + any other chroma -> null (CUSTOM); chroma is consulted
+//     ONLY for pink (it is engine-inert for white/gray); c2f true + stages 2/3/4 ->
+//     that id, any other ladder -> null; structure_annealing true + the OTHER anneal
+//     knobs (cycles/strength/band) at engine defaults -> BLUR/NOISE by source, any
+//     non-default knob -> null; false/absent -> OFF; absent/false booleans -> OFF,
+//     true -> ON, junk -> null; cutout_sampler absent/'smart' -> OFF, 'full' +
+//     cutouts 16 -> ON, 'full' + any other cutouts -> null (the pair travels
+//     together), classic/batched/junk -> null — cutouts is consulted ONLY when the
+//     sampler is full (elsewhere it is a bench knob riding the base)
 //   composeSubmission(composer) -> SubmissionPayload    throws on empty prompt, a fresh
 //     composer with null ids (experiment rows included), a non-positive-integer steps,
-//     or HOLD MEANING alongside a non-OFF pyramid row (caller-contract violations —
-//     the three steps boundaries above and model.applyHoldMeaning guarantee validity;
-//     the engine refuses coarse_to_fine + semantic init, §5.7). AUTO aspect
+//     HOLD MEANING alongside a non-OFF pyramid row, AUTO-STOP ON alongside a non-OFF
+//     anneal row, or LOOK VQGAN alongside a non-WHITE noise row / non-OFF anneal row
+//     (caller-contract violations — the three steps boundaries above and
+//     model.applyHoldMeaning / applyAutoStop / applyLook guarantee validity; the
+//     engine refuses c2f + semantic init, annealing + auto_stop, and any of
+//     spectrum-shaping / annealing under a latent model, §5.7). AUTO aspect
 //     resolves through autoDims — throws without attachment natural dims (the popover
 //     only enables the chip once they are known; main's submit guard covers the gap).
 //     The rounding multiple comes from the LOOK (verified against pytti-core, §5.1a):
@@ -110,7 +119,10 @@
 //     removal: an OFF/WHITE re-pick restores the composed default); null (CUSTOM)
 //     rows leave the base verbatim, so bench-authored off-menu values (fractal,
 //     coarse_stages 5, cutout_sampler classic, init_spectrum_falloff …) survive an
-//     untouched tweak byte-for-byte.
+//     untouched tweak byte-for-byte. Row field ownership: ANNEAL owns all five
+//     anneal fields (a re-pick must clear bench knobs — knobs without the flag are
+//     a schema-rejected config lie); FULL VISION ON owns the sampler + cutouts pair,
+//     OFF owns the sampler only (cutouts is a bench knob unless full pairs it).
 //   composerDims(composer) -> {width, height}          the dims the submission renders at
 //     (optimistic tile sizing); same dims rule as composeSubmission, base-dims fallback 512x512
 //   matchPresets(values) -> {aspect|null, size|null, look|null}   exact-match only, no
@@ -187,26 +199,31 @@ export const LOOK_LABELS: Record<LookId, string> = { limited: 'LIMITED', unlimit
 // ── The EXPERIMENTS panel (spec §5.7) ────────────────────────────────────────
 // "I should be able to opt into the experimental modes we're making… i basically
 //  want to never ever open the confusing and shitty advanced view" — the user.
-// Six rows, each mapping onto schema fields; curated by the eval batteries (what
-// lost — fractal, mono/full pink chroma, ANNEAL — is deliberately NOT offered;
-// what WON outright — border clamp — is a settled default, not an experiment).
+// Seven rows, each mapping onto schema fields; curated by the eval batteries and
+// the user's own verdicts (white/gray/pink-mono are "all good in their own ways";
+// "anneal-blur s3 is also quite good" — looks and characters, offered as such;
+// what WON outright — border clamp — is a settled default, not an experiment;
+// fractal and full pink chroma lost their battery and stay bench-only).
 
-export type NoiseId = 'white' | 'pink' | 'gray'
+export type NoiseId = 'white' | 'pink' | 'pinkmono' | 'gray'
 export type PyramidId = '3' | '2' | '4' | 'off'
 export type ToggleId = 'off' | 'on'
+export type AnnealId = 'off' | 'blur' | 'noise'
 
 // Chip order = display order (defaults first, per row).
-export const NOISE_IDS: readonly NoiseId[] = ['white', 'pink', 'gray']
+export const NOISE_IDS: readonly NoiseId[] = ['white', 'pink', 'pinkmono', 'gray']
 export const PYRAMID_IDS: readonly PyramidId[] = ['3', '2', '4', 'off']
 export const TOGGLE_IDS: readonly ToggleId[] = ['off', 'on']
+export const ANNEAL_IDS: readonly AnnealId[] = ['off', 'blur', 'noise']
 
 // null = "inherit tweak base" (CUSTOM chip) — reachable ONLY while tweak != null,
 // mirroring aspect/size/look. A fresh composer always has concrete ids.
 export type Experiments = {
-  noise: NoiseId | null // init_spectrum (+ init_spectrum_chroma 'natural' for pink)
+  noise: NoiseId | null // init_spectrum (+ init_spectrum_chroma: 'natural' for pink, 'mono' for pinkmono)
   pyramid: PyramidId | null // coarse_to_fine + coarse_stages — the retired pin, visible
+  anneal: AnnealId | null // structure_annealing (+ anneal_source 'blur' for BLUR; NOISE = the engine default source)
   coherence: ToggleId | null // coherence_weighting
-  fullVision: ToggleId | null // cutout_sampler 'full' (OFF emits nothing — 'smart' is the tuned default)
+  fullVision: ToggleId | null // cutout_sampler 'full' + cutouts 16 when ON (the engine-documented pair); OFF emits nothing
   phase: ToggleId | null // phase_scheduling
   autoStop: ToggleId | null // auto_stop
 }
@@ -215,7 +232,7 @@ export type Experiments = {
 // submits the byte-identical payload Create submitted before the panel existed
 // (pyramid 3 = the judged pin, §5.7; everything else = the composed default).
 export function defaultExperiments(): Experiments {
-  return { noise: 'white', pyramid: '3', coherence: 'off', fullVision: 'off', phase: 'off', autoStop: 'off' }
+  return { noise: 'white', pyramid: '3', anneal: 'off', coherence: 'off', fullVision: 'off', phase: 'off', autoStop: 'off' }
 }
 
 // One row's application: clear the fields the row owns, then set the selection's
@@ -233,10 +250,15 @@ function noiseEmit(noise: NoiseId): Record<string, unknown> {
       return {} // the engine default — the payload rule says defaults add ZERO keys
     case 'pink':
       // PINK pairs chroma 'natural' — the 2026-08-06 init-noise battery's both-judges
-      // winner. full/mono pink chroma and fractal all LOST and are not offered here
-      // (the bench keeps the raw knobs). init_spectrum_falloff is a bench knob too —
-      // never emitted; on a tweak it rides the base verbatim.
+      // winner. fractal and full pink chroma LOST and are not offered here (the bench
+      // keeps the raw knobs). init_spectrum_falloff is a bench knob too — never
+      // emitted; on a tweak it rides the base verbatim.
       return { init_spectrum: 'pink', init_spectrum_chroma: 'natural' }
+    case 'pinkmono':
+      // PINK MONO: pink spectrum, luminance-only chroma — full composition prior,
+      // zero palette push. Offered as a LOOK alongside PINK: white/gray/pink-mono
+      // are "all good in their own ways" (the user, 2026-08).
+      return { init_spectrum: 'pink', init_spectrum_chroma: 'mono' }
     case 'gray':
       return { init_spectrum: 'gray' } // chroma is engine-inert for gray — spectrum only
   }
@@ -250,9 +272,33 @@ function pyramidEmit(pyramid: PyramidId): Record<string, unknown> {
   return { coarse_to_fine: true, coarse_stages: Number(pyramid) }
 }
 
+function annealEmit(anneal: AnnealId): Record<string, unknown> {
+  // "anneal-blur s3 is also quite good" — the user. A CHARACTER, not an adherence
+  // upgrade: battery-neutral, keeps re-deciding composition mid-render. OFF = the
+  // engine default (structure_annealing false) — emits nothing. NOISE emits the flag
+  // only: source 'noise' IS the engine default (the payload rule). BLUR adds the
+  // non-default source. The other knobs (cycles/strength/band) are bench knobs at
+  // their engine defaults — never emitted.
+  switch (anneal) {
+    case 'off':
+      return {}
+    case 'blur':
+      return { structure_annealing: true, anneal_source: 'blur' }
+    case 'noise':
+      return { structure_annealing: true }
+  }
+}
+
 function toggleEmit(field: string, onValue: unknown, toggle: ToggleId): Record<string, unknown> {
   return toggle === 'on' ? { [field]: onValue } : {}
 }
+
+// The ANNEAL row owns the WHOLE anneal field group: a concrete re-pick must clear a
+// base's bench knobs (cycles/strength/band/source), both so the selection means what
+// the chip says AND because a non-default knob alongside structure_annealing false is
+// a schema-rejected config lie — an OFF re-pick that left `anneal_cycles: 5` riding
+// would 400 at the boundary.
+const ANNEAL_FIELDS: readonly string[] = ['structure_annealing', 'anneal_source', 'anneal_cycles', 'anneal_strength', 'anneal_band']
 
 // Apply every CONCRETE row (null rows — tweak CUSTOM — leave the base verbatim).
 // Fresh callers validate all-concrete first; the untouched-panel result is exactly
@@ -260,8 +306,17 @@ function toggleEmit(field: string, onValue: unknown, toggle: ToggleId): Record<s
 function applyExperiments(values: Record<string, unknown>, ex: Experiments): void {
   if (ex.noise != null) applyRow(values, ['init_spectrum', 'init_spectrum_chroma'], noiseEmit(ex.noise))
   if (ex.pyramid != null) applyRow(values, ['coarse_to_fine', 'coarse_stages'], pyramidEmit(ex.pyramid))
+  if (ex.anneal != null) applyRow(values, ANNEAL_FIELDS, annealEmit(ex.anneal))
   if (ex.coherence != null) applyRow(values, ['coherence_weighting'], toggleEmit('coherence_weighting', true, ex.coherence))
-  if (ex.fullVision != null) applyRow(values, ['cutout_sampler'], toggleEmit('cutout_sampler', 'full', ex.fullVision))
+  if (ex.fullVision != null) {
+    // FULL VISION ON owns the sampler + cutouts PAIR (full's designed band is low
+    // cutn — on 1:1 all 40 tuned-default views are the same crop; 16 is the band the
+    // engine docs name, spec §5.7). OFF owns the sampler only: cutouts is a bench
+    // knob riding the base unless full pairs it — deleting it on OFF would silently
+    // drop a bench-authored count.
+    const fields = ex.fullVision === 'on' ? ['cutout_sampler', 'cutouts'] : ['cutout_sampler']
+    applyRow(values, fields, ex.fullVision === 'on' ? { cutout_sampler: 'full', cutouts: 16 } : {})
+  }
   if (ex.phase != null) applyRow(values, ['phase_scheduling'], toggleEmit('phase_scheduling', true, ex.phase))
   if (ex.autoStop != null) applyRow(values, ['auto_stop'], toggleEmit('auto_stop', true, ex.autoStop))
 }
@@ -401,12 +456,15 @@ export const VISIBLE_CONTROL_FIELDS: readonly string[] = [
   'semantic_init_weight', // the HOLD toggle
   'perceptor_backend', // the 'torch engine' note shown while HOLD is on
   // The EXPERIMENTS panel (§5.7) — each field is determined by its visible row:
-  'init_spectrum', // INIT NOISE chips (WHITE/PINK/GRAY)
-  'init_spectrum_chroma', // rides the INIT NOISE row — PINK pairs 'natural' (the battery winner)
+  'init_spectrum', // INIT NOISE chips (WHITE/PINK/PINK MONO/GRAY)
+  'init_spectrum_chroma', // rides the INIT NOISE row — PINK pairs 'natural' (the battery winner), PINK MONO pairs 'mono'
   'coarse_to_fine', // PYRAMID row (the retired invisible pin, made visible 2026-08-06)
   'coarse_stages', // PYRAMID row (3/2/4)
+  'structure_annealing', // ANNEAL row (BLUR/NOISE emit true; OFF emits nothing)
+  'anneal_source', // rides the ANNEAL row — BLUR pairs 'blur' (NOISE = the engine-default source, emits nothing)
   'coherence_weighting', // COHERENCE toggle
   'cutout_sampler', // FULL VISION toggle ('full' when ON; OFF emits nothing — smart default)
+  'cutouts', // rides the FULL VISION row — ON pairs 16, the engine-documented band for the full sampler
   'phase_scheduling', // PHASE SCHEDULE toggle
   'auto_stop', // AUTO-STOP toggle
 ]
@@ -492,13 +550,29 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
   if (composer.init != null && composer.init.holdMeaning && composer.experiments.pyramid !== 'off') {
     throw new Error('composeSubmission: HOLD MEANING with a non-OFF pyramid row (applyHoldMeaning must force it off)')
   }
+  // §5.7 anneal × AUTO-STOP: the engine refuses structure_annealing + auto_stop
+  // (a plateau stop mid-cycle would freeze a half-liquid image). applyAutoStop forces
+  // the ANNEAL row to OFF when AUTO-STOP turns on, and the ANNEAL chips are disabled
+  // while it is on — the pair here (null/CUSTOM anneal included, which would let base
+  // anneal keys ride) is a caller-contract violation.
+  if (composer.experiments.autoStop === 'on' && composer.experiments.anneal !== 'off') {
+    throw new Error('composeSubmission: AUTO-STOP ON with a non-OFF anneal row (applyAutoStop must force it off)')
+  }
+  // §5.7 LOOK VQGAN × noise/anneal: a codebook draw has no spectrum to shape and
+  // annealing rejects latent models — both fail loud at render start. applyLook
+  // forces NOISE to WHITE and ANNEAL to OFF when the look becomes VQGAN, and both
+  // rows' chips are disabled while it is; null/CUSTOM rows are equally rejected
+  // (they would let base spectrum/anneal keys ride under VQGAN).
+  if (composer.look === 'vqgan' && (composer.experiments.noise !== 'white' || composer.experiments.anneal !== 'off')) {
+    throw new Error('composeSubmission: LOOK VQGAN with a shaped-noise or anneal row (applyLook must force white/off)')
+  }
 
   if (composer.tweak == null) {
     if (composer.aspect == null || composer.size == null || composer.look == null) {
       throw new Error('composeSubmission: a fresh composer must have concrete preset ids')
     }
     const ex = composer.experiments
-    if (ex.noise == null || ex.pyramid == null || ex.coherence == null || ex.fullVision == null || ex.phase == null || ex.autoStop == null) {
+    if (ex.noise == null || ex.pyramid == null || ex.anneal == null || ex.coherence == null || ex.fullVision == null || ex.phase == null || ex.autoStop == null) {
       throw new Error('composeSubmission: a fresh composer must have concrete experiment rows (null = tweak-only CUSTOM)')
     }
     const dims =
@@ -688,7 +762,12 @@ function matchNoise(values: Record<string, unknown>): NoiseId | null {
   // key composes to the schema default ('white').
   if (spectrum == null || spectrum === 'white') return 'white'
   if (spectrum === 'gray') return 'gray'
-  if (spectrum === 'pink') return values['init_spectrum_chroma'] === 'natural' ? 'pink' : null
+  if (spectrum === 'pink') {
+    const chroma = values['init_spectrum_chroma']
+    if (chroma === 'natural') return 'pink'
+    if (chroma === 'mono') return 'pinkmono'
+    return null // pink + full/absent/junk chroma — off-menu (full lost its battery)
+  }
   return null // fractal / junk — off-menu (the battery losers stay bench-only)
 }
 
@@ -705,15 +784,39 @@ function matchPyramid(values: Record<string, unknown>): PyramidId | null {
   return null // stages 5, absent, junk -> CUSTOM (inherits the base ladder verbatim)
 }
 
+function matchAnneal(values: Record<string, unknown>): AnnealId | null {
+  const annealing = values['structure_annealing']
+  // Absent composes to the engine default (off). Any non-default anneal knob
+  // alongside structure_annealing false is schema-rejected (the coarse_stages rule),
+  // so false/absent is OFF regardless of knob values.
+  if (annealing == null || annealing === false) return 'off'
+  if (annealing !== true) return null
+  // The OTHER knobs must sit at their engine defaults for the chip to be exact
+  // (absent composes to the default): a bench-tuned cycles/strength/band is CUSTOM.
+  const cycles = values['anneal_cycles']
+  const strength = values['anneal_strength']
+  const band = values['anneal_band']
+  if ((cycles != null && cycles !== 3) || (strength != null && strength !== 0.5) || (band != null && band !== 0.15)) {
+    return null
+  }
+  const source = values['anneal_source']
+  if (source == null || source === 'noise') return 'noise' // 'noise' IS the engine-default source
+  if (source === 'blur') return 'blur'
+  return null // junk source -> CUSTOM (rides verbatim)
+}
+
 function matchToggle(raw: unknown): ToggleId | null {
   if (raw == null || raw === false) return 'off'
   if (raw === true) return 'on'
   return null // legacy/imported junk -> CUSTOM
 }
 
-function matchSampler(raw: unknown): ToggleId | null {
-  if (raw == null || raw === 'smart') return 'off' // 'smart' IS what the row's OFF means (tuned default)
-  if (raw === 'full') return 'on'
+function matchFullVision(values: Record<string, unknown>): ToggleId | null {
+  const sampler = values['cutout_sampler']
+  // cutouts is consulted ONLY when the sampler is full — under smart/absent it is a
+  // bench knob riding the base, not this row's business.
+  if (sampler == null || sampler === 'smart') return 'off' // 'smart' IS what the row's OFF means (tuned default)
+  if (sampler === 'full') return values['cutouts'] === 16 ? 'on' : null // the pair travels together (§5.7); full + the tuned 40 (or absent -> composes 40) is the documented mispairing -> CUSTOM
   return null // classic / batched / junk -> CUSTOM (rides verbatim)
 }
 
@@ -721,8 +824,9 @@ export function matchExperiments(values: Record<string, unknown>): Experiments {
   return {
     noise: matchNoise(values),
     pyramid: matchPyramid(values),
+    anneal: matchAnneal(values),
     coherence: matchToggle(values['coherence_weighting']),
-    fullVision: matchSampler(values['cutout_sampler']),
+    fullVision: matchFullVision(values),
     phase: matchToggle(values['phase_scheduling']),
     autoStop: matchToggle(values['auto_stop']),
   }

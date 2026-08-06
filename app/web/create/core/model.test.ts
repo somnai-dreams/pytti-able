@@ -4,9 +4,11 @@ import { feel } from './feel'
 import type { InitAttachment } from './init'
 import { defaultExperiments } from './presets'
 import {
+  applyAutoStop,
   applyEncodeEvent,
   applyFrameEvent,
   applyHoldMeaning,
+  applyLook,
   applyProgressEvent,
   applyQueueEvent,
   applyStateEvent,
@@ -433,6 +435,81 @@ describe('applyHoldMeaning (§5.7 — the engine refuses c2f + semantic init)', 
   test('throws without an attachment (the HOLD chip exists iff attached)', () => {
     const s = state()
     expect(() => applyHoldMeaning(s, true)).toThrow()
+  })
+})
+
+describe('applyLook (§5.7 — VQGAN refuses shaped init noise and structure annealing)', () => {
+  // Read at the declared union widths (the aspectOf precedent): assignments above
+  // each call would otherwise literal-narrow the properties and defeat the asserts.
+  const noiseOf = (s: CreateState): CreateState['composer']['experiments']['noise'] => s.composer.experiments.noise
+  const annealOf = (s: CreateState): CreateState['composer']['experiments']['anneal'] => s.composer.experiments.anneal
+
+  test('picking VQGAN forces NOISE to WHITE and ANNEAL to OFF in the same transition', () => {
+    const s = state()
+    s.composer.experiments.noise = 'pink'
+    s.composer.experiments.anneal = 'blur'
+    applyLook(s, 'vqgan')
+    expect(s.composer.look).toBe('vqgan')
+    expect(noiseOf(s)).toBe('white')
+    expect(annealOf(s)).toBe('off')
+  })
+
+  test('forces from tweak CUSTOM (null) rows too — base spectrum/anneal keys must not ride under VQGAN', () => {
+    const s = state()
+    s.composer.tweak = { of: 's-1', baseValues: {} }
+    s.composer.experiments.noise = null
+    s.composer.experiments.anneal = null
+    applyLook(s, 'vqgan')
+    expect(noiseOf(s)).toBe('white')
+    expect(annealOf(s)).toBe('off')
+  })
+
+  test('switching the look away re-enables the rows where they stand — no silent restore', () => {
+    const s = state()
+    s.composer.experiments.noise = 'pinkmono'
+    applyLook(s, 'vqgan')
+    applyLook(s, 'limited')
+    expect(s.composer.look).toBe('limited')
+    expect(noiseOf(s)).toBe('white')
+    expect(annealOf(s)).toBe('off')
+  })
+
+  test('a non-VQGAN look never touches the rows', () => {
+    const s = state()
+    s.composer.experiments.noise = 'pink'
+    s.composer.experiments.anneal = 'noise'
+    applyLook(s, 'unlimited')
+    expect(noiseOf(s)).toBe('pink')
+    expect(annealOf(s)).toBe('noise')
+  })
+})
+
+describe('applyAutoStop (§5.7 — the engine refuses annealing + auto_stop)', () => {
+  const annealOf = (s: CreateState): CreateState['composer']['experiments']['anneal'] => s.composer.experiments.anneal
+
+  test('turning AUTO-STOP ON forces the ANNEAL row to OFF in the same transition', () => {
+    const s = state()
+    s.composer.experiments.anneal = 'blur'
+    applyAutoStop(s, 'on')
+    expect(s.composer.experiments.autoStop).toBe('on')
+    expect(annealOf(s)).toBe('off')
+  })
+
+  test('forces from a tweak CUSTOM (null) row too — base anneal keys must not ride under AUTO-STOP', () => {
+    const s = state()
+    s.composer.tweak = { of: 's-1', baseValues: {} }
+    s.composer.experiments.anneal = null
+    applyAutoStop(s, 'on')
+    expect(annealOf(s)).toBe('off')
+  })
+
+  test('turning AUTO-STOP OFF re-enables the row where it stands — no silent restore', () => {
+    const s = state()
+    s.composer.experiments.anneal = 'noise'
+    applyAutoStop(s, 'on')
+    applyAutoStop(s, 'off')
+    expect(s.composer.experiments.autoStop).toBe('off')
+    expect(annealOf(s)).toBe('off')
   })
 })
 

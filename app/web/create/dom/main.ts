@@ -21,9 +21,11 @@ import {
 import { keyIntent } from '../core/keys'
 import { applyWheel, jumpToFrame, jumpToJob, stepFrame, stepJob } from '../core/lightbox'
 import {
+  applyAutoStop,
   applyEncodeEvent,
   applyFrameEvent,
   applyHoldMeaning,
+  applyLook,
   applyProgressEvent,
   applyQueueEvent,
   applyStateEvent,
@@ -47,6 +49,7 @@ import {
   DEFAULT_STEPS,
   defaultExperiments,
   type Experiments,
+  type LookId,
   matchExperiments,
   matchPresets,
   parseCustomSteps,
@@ -54,6 +57,7 @@ import {
   rematerializeSteps,
   type SubmissionPayload,
   submittableValues,
+  type ToggleId,
 } from '../core/presets'
 import { topmostDismissable } from '../core/surfaces'
 import * as net from './net'
@@ -528,15 +532,24 @@ async function tweakSession(id: string): Promise<void> {
   composer.steps = rematerializeSteps(config)
   composer.look = match.look
   // Experiments rematerialize exact-match (§5.3/§5.7): off-menu base values (fractal,
-  // coarse_stages 5, cutout_sampler classic …) come back null = CUSTOM chips.
+  // coarse_stages 5, cutout_sampler classic, anneal_cycles 5 …) come back null =
+  // CUSTOM chips.
   composer.experiments = matchExperiments(config)
   const seed = config['seed']
   composer.seedMode = typeof seed === 'number' ? { kind: 'locked', seed } : { kind: 'random' }
   setInit(deriveInitFromBase(composer.tweak.baseValues))
-  // Re-assert the §5.7 pyramid × HOLD rule after rematerialization (a base carrying
-  // both cannot render, but the invariant is composer-level: HOLD on => PYRAMID off —
-  // composeSubmission throws on the pair rather than silently omitting).
+  // Re-assert the §5.7 forcing rules after rematerialization (a base carrying a
+  // refused pair cannot have rendered, but the invariants are composer-level;
+  // composeSubmission throws on each pair rather than silently omitting):
+  //   HOLD on            => PYRAMID off
+  //   AUTO-STOP on       => ANNEAL off
+  //   look VQGAN         => NOISE white + ANNEAL off (applyLook's rule)
   if (composer.init != null && composer.init.holdMeaning) composer.experiments.pyramid = 'off'
+  if (composer.experiments.autoStop === 'on') composer.experiments.anneal = 'off'
+  if (composer.look === 'vqgan') {
+    composer.experiments.noise = 'white'
+    composer.experiments.anneal = 'off'
+  }
   // A4 dims capture (§15.8): a rematerialized attachment carries no pixel dims (the
   // snapshot has none) — load them async via the uploads route. AUTO stays disabled
   // until they land; a 404 (bench-external base image) just leaves them null.
@@ -954,6 +967,7 @@ popoverEl.addEventListener('click', (e) => {
   const initStrength = chip.dataset['initStrength']
   const noise = chip.dataset['noise']
   const pyramid = chip.dataset['pyramid']
+  const anneal = chip.dataset['anneal']
   const coherence = chip.dataset['coherence']
   const fullVision = chip.dataset['fullvision']
   const phase = chip.dataset['phase']
@@ -963,19 +977,21 @@ popoverEl.addEventListener('click', (e) => {
   if (aspect != null && aspect !== 'custom') state.composer.aspect = aspect as CreateState['composer']['aspect']
   else if (size != null && size !== 'custom') state.composer.size = size as CreateState['composer']['size']
   else if (steps != null) state.composer.steps = parseStepsId(steps) // chips = shortcuts; no custom chip (the input is the custom path)
-  else if (look != null && look !== 'custom') state.composer.look = look as CreateState['composer']['look']
+  else if (look != null && look !== 'custom') applyLook(state, look as LookId) // §5.7: VQGAN forces NOISE to WHITE + ANNEAL to OFF
   else if (seed === 'random') state.composer.seedMode = { kind: 'random' }
   else if (seed === 'locked') state.composer.seedMode = { kind: 'locked', seed: pinnedSeed() }
   else if (initStrength != null && initStrength !== 'custom' && init != null) init.strength = initStrength as InitStrengthId
   else if (chip.dataset['hold'] != null && init != null) applyHoldMeaning(state, !init.holdMeaning) // §5.7: ON forces PYRAMID to OFF
-  // The EXPERIMENTS rows (§5.7). The pyramid chips are disabled while HOLD is on
-  // (renderBar), so no click reaches here in that state.
+  // The EXPERIMENTS rows (§5.7). The pyramid chips are disabled while HOLD is on,
+  // and the noise/anneal chips while LOOK is VQGAN (anneal also while AUTO-STOP is
+  // on) — renderBar — so no click reaches here in those states.
   else if (noise != null && noise !== 'custom') experiments.noise = noise as Experiments['noise']
   else if (pyramid != null && pyramid !== 'custom') experiments.pyramid = pyramid as Experiments['pyramid']
+  else if (anneal != null && anneal !== 'custom') experiments.anneal = anneal as Experiments['anneal']
   else if (coherence != null && coherence !== 'custom') experiments.coherence = coherence as Experiments['coherence']
   else if (fullVision != null && fullVision !== 'custom') experiments.fullVision = fullVision as Experiments['fullVision']
   else if (phase != null && phase !== 'custom') experiments.phase = phase as Experiments['phase']
-  else if (autoStop != null && autoStop !== 'custom') experiments.autoStop = autoStop as Experiments['autoStop']
+  else if (autoStop != null && autoStop !== 'custom') applyAutoStop(state, autoStop as ToggleId) // §5.7: ON forces ANNEAL to OFF
   loop.scheduleRender()
 })
 

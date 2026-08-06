@@ -36,13 +36,13 @@
         <button class="chip" data-aspect="4:3">4:3</button>
         <button class="chip" data-aspect="16:9">16:9</button>
         <button class="chip" data-aspect="auto" disabled>AUTO</button>
-        <button class="chip custom" data-aspect="custom">CUSTOM</button>
+        <button class="chip custom" data-aspect="custom" style="display:none">CUSTOM</button>
       </div>
       <div class="pop-row">
         <span class="pop-label">SIZE</span>
         <button class="chip" data-size="draft">DRAFT</button>
         <button class="chip" data-size="full">FULL</button>
-        <button class="chip custom" data-size="custom">CUSTOM</button>
+        <button class="chip custom" data-size="custom" style="display:none">CUSTOM</button>
       </div>
       <div class="pop-row">
         <span class="pop-label">STEPS</span>
@@ -59,7 +59,7 @@
         <button class="chip" data-look="limited">LIMITED</button>
         <button class="chip" data-look="unlimited">UNLIMITED</button>
         <button class="chip" data-look="vqgan">VQGAN</button>
-        <button class="chip custom" data-look="custom">CUSTOM</button>
+        <button class="chip custom" data-look="custom" style="display:none">CUSTOM</button>
       </div>
       <div class="pop-row">
         <span class="pop-label">SEED</span>
@@ -71,7 +71,7 @@
         <button class="chip" data-init-strength="subtle">SUBTLE</button>
         <button class="chip" data-init-strength="medium">MEDIUM</button>
         <button class="chip" data-init-strength="strong">STRONG</button>
-        <button class="chip custom" data-init-strength="custom">CUSTOM</button>
+        <button class="chip custom" data-init-strength="custom" style="display:none">CUSTOM</button>
         <button class="chip" data-hold title="hold meaning: image-embedding prompt (torch engine)">◈ HOLD</button>
       </div>
       <div class="pop-row" id="init-note" style="display:none">
@@ -84,8 +84,9 @@
           <span class="pop-label">INIT NOISE</span>
           <button class="chip" data-noise="white">WHITE</button>
           <button class="chip" data-noise="pink" title="pink noise + natural chroma — won the 2026-08-06 init-noise battery on both judges">PINK</button>
+          <button class="chip" data-noise="pinkmono" title="pink noise, luminance only — full composition prior, zero palette push">PINK MONO</button>
           <button class="chip" data-noise="gray">GRAY</button>
-          <button class="chip custom" data-noise="custom">CUSTOM</button>
+          <button class="chip custom" data-noise="custom" style="display:none">CUSTOM</button>
         </div>
         <div class="pop-row">
           <span class="pop-label" title="coarse-to-fine stages: compose as a thumbnail, refine up">PYRAMID</span>
@@ -93,31 +94,38 @@
           <button class="chip" data-pyramid="2">2</button>
           <button class="chip" data-pyramid="4">4</button>
           <button class="chip" data-pyramid="off">OFF</button>
-          <button class="chip custom" data-pyramid="custom">CUSTOM</button>
+          <button class="chip custom" data-pyramid="custom" style="display:none">CUSTOM</button>
+        </div>
+        <div class="pop-row">
+          <span class="pop-label" title="changes character, not adherence — battery-neutral; keeps re-deciding composition mid-render">ANNEAL</span>
+          <button class="chip" data-anneal="off">OFF</button>
+          <button class="chip" data-anneal="blur" title="re-liquify toward the image's own blurred lows — nothing foreign">BLUR</button>
+          <button class="chip" data-anneal="noise" title="re-liquify toward shaped noise — fresh composition votes">NOISE</button>
+          <button class="chip custom" data-anneal="custom" style="display:none">CUSTOM</button>
         </div>
         <div class="pop-row">
           <span class="pop-label" title="weigh full-frame views over detail crops for the semantic loss">COHERENCE</span>
           <button class="chip" data-coherence="off">OFF</button>
           <button class="chip" data-coherence="on">ON</button>
-          <button class="chip custom" data-coherence="custom">CUSTOM</button>
+          <button class="chip custom" data-coherence="custom" style="display:none">CUSTOM</button>
         </div>
         <div class="pop-row">
           <span class="pop-label" title="every cutout sees the whole frame">FULL VISION</span>
           <button class="chip" data-fullvision="off">OFF</button>
-          <button class="chip" data-fullvision="on">ON</button>
-          <button class="chip custom" data-fullvision="custom">CUSTOM</button>
+          <button class="chip" data-fullvision="on" title="pairs cutouts 16 — the full sampler's designed band (all views are the whole frame)">ON</button>
+          <button class="chip custom" data-fullvision="custom" style="display:none">CUSTOM</button>
         </div>
         <div class="pop-row">
           <span class="pop-label" title="structure early, detail late — fixed quality-phase schedules">PHASE SCHEDULE</span>
           <button class="chip" data-phase="off">OFF</button>
           <button class="chip" data-phase="on">ON</button>
-          <button class="chip custom" data-phase="custom">CUSTOM</button>
+          <button class="chip custom" data-phase="custom" style="display:none">CUSTOM</button>
         </div>
         <div class="pop-row">
           <span class="pop-label" title="end a scene early once the loss plateaus">AUTO-STOP</span>
           <button class="chip" data-autostop="off">OFF</button>
           <button class="chip" data-autostop="on" title="may stop early — detector is miscalibrated for the modern ensemble">ON</button>
-          <button class="chip custom" data-autostop="custom">CUSTOM</button>
+          <button class="chip custom" data-autostop="custom" style="display:none">CUSTOM</button>
         </div>
       </div>
     </div>

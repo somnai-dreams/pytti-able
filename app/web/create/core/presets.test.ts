@@ -211,7 +211,7 @@ describe('composeSubmission (fresh)', () => {
   })
 
   test('fresh composer with a null experiment row throws (null = tweak-only CUSTOM, §5.7)', () => {
-    for (const row of ['noise', 'pyramid', 'coherence', 'fullVision', 'phase', 'autoStop'] as const) {
+    for (const row of ['noise', 'pyramid', 'anneal', 'coherence', 'fullVision', 'phase', 'autoStop'] as const) {
       expect(() =>
         composeSubmission({
           prompt: 'x',
@@ -759,6 +759,68 @@ describe('pyramid × HOLD MEANING (§5.7 — the engine refuses c2f + semantic i
   })
 })
 
+describe('anneal × AUTO-STOP (§5.7 — the engine refuses annealing + auto_stop)', () => {
+  const freshWith = (experiments: Experiments) =>
+    composeSubmission({
+      prompt: 'x', aspect: '1:1', size: 'draft', steps: 150, look: 'limited',
+      seedMode: { kind: 'random' }, tweak: null, init: null, experiments,
+    })
+
+  test('AUTO-STOP ON with ANNEAL OFF (what applyAutoStop forces) composes fine', () => {
+    const values = freshWith({ ...defaultExperiments(), autoStop: 'on' }).values
+    expect(values['auto_stop']).toBe(true)
+    expect('structure_annealing' in values).toBe(false)
+  })
+
+  test('AUTO-STOP ON with a non-OFF anneal row THROWS — never a silent omission (fresh and tweak-CUSTOM)', () => {
+    expect(() => freshWith({ ...defaultExperiments(), anneal: 'blur', autoStop: 'on' })).toThrow()
+    expect(() => freshWith({ ...defaultExperiments(), anneal: 'noise', autoStop: 'on' })).toThrow()
+    expect(() =>
+      composeSubmission({
+        prompt: 'x', aspect: null, size: null, steps: 150, look: null,
+        seedMode: { kind: 'random' },
+        tweak: { of: 's-1', baseValues: { structure_annealing: true } },
+        init: null,
+        // null (CUSTOM) would let base anneal keys ride under AUTO-STOP — equally rejected.
+        experiments: { ...matchExperiments({}), anneal: null, autoStop: 'on' },
+      }),
+    ).toThrow()
+  })
+})
+
+describe('LOOK VQGAN × noise/anneal (§5.7 — codebook init has no spectrum; annealing rejects latent models)', () => {
+  const vqganWith = (experiments: Experiments) =>
+    composeSubmission({
+      prompt: 'x', aspect: '1:1', size: 'draft', steps: 150, look: 'vqgan',
+      seedMode: { kind: 'random' }, tweak: null, init: null, experiments,
+    })
+
+  test('VQGAN with WHITE + ANNEAL OFF (what applyLook forces) composes fine', () => {
+    const values = vqganWith(defaultExperiments()).values
+    expect(values['image_model']).toBe('VQGAN')
+    expect('init_spectrum' in values).toBe(false)
+    expect('structure_annealing' in values).toBe(false)
+  })
+
+  test('VQGAN with a shaped-noise or anneal row THROWS — every non-WHITE noise id, both anneal modes, and tweak-CUSTOM', () => {
+    expect(() => vqganWith({ ...defaultExperiments(), noise: 'pink' })).toThrow()
+    expect(() => vqganWith({ ...defaultExperiments(), noise: 'pinkmono' })).toThrow()
+    expect(() => vqganWith({ ...defaultExperiments(), noise: 'gray' })).toThrow()
+    expect(() => vqganWith({ ...defaultExperiments(), anneal: 'blur' })).toThrow()
+    expect(() => vqganWith({ ...defaultExperiments(), anneal: 'noise' })).toThrow()
+    // Tweak with a concrete VQGAN look: null rows would let base spectrum/anneal keys ride.
+    const tweakVqgan = (experiments: Experiments) =>
+      composeSubmission({
+        prompt: 'x', aspect: null, size: null, steps: 150, look: 'vqgan',
+        seedMode: { kind: 'random' },
+        tweak: { of: 's-1', baseValues: { init_spectrum: 'pink' } },
+        init: null, experiments,
+      })
+    expect(() => tweakVqgan({ ...matchExperiments({}), noise: null })).toThrow()
+    expect(() => tweakVqgan({ ...matchExperiments({}), anneal: null })).toThrow()
+  })
+})
+
 // ── The EXPERIMENTS panel (spec §5.7) ─────────────────────────────────────────
 describe('experiments — fresh emission and the payload rule (§5.7)', () => {
   const freshWith = (experiments: Experiments) =>
@@ -798,9 +860,15 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
     // Defaults add ZERO keys beyond the baseline; each flip adds only its row's fields.
     expect(added(defaultExperiments())).toEqual([])
     expect(added({ ...defaultExperiments(), noise: 'pink' })).toEqual(['init_spectrum', 'init_spectrum_chroma'])
+    expect(added({ ...defaultExperiments(), noise: 'pinkmono' })).toEqual(['init_spectrum', 'init_spectrum_chroma'])
     expect(added({ ...defaultExperiments(), noise: 'gray' })).toEqual(['init_spectrum'])
+    // ANNEAL: NOISE adds the flag ONLY — source 'noise' is the engine default (the
+    // payload rule); BLUR adds the non-default source alongside it.
+    expect(added({ ...defaultExperiments(), anneal: 'noise' })).toEqual(['structure_annealing'])
+    expect(added({ ...defaultExperiments(), anneal: 'blur' })).toEqual(['anneal_source', 'structure_annealing'])
     expect(added({ ...defaultExperiments(), coherence: 'on' })).toEqual(['coherence_weighting'])
-    expect(added({ ...defaultExperiments(), fullVision: 'on' })).toEqual(['cutout_sampler'])
+    // FULL VISION ON adds the sampler + cutouts PAIR (§5.7 — full's designed band is 16).
+    expect(added({ ...defaultExperiments(), fullVision: 'on' })).toEqual(['cutout_sampler', 'cutouts'])
     expect(added({ ...defaultExperiments(), phase: 'on' })).toEqual(['phase_scheduling'])
     expect(added({ ...defaultExperiments(), autoStop: 'on' })).toEqual(['auto_stop'])
     // PYRAMID inverts: OFF (the engine default) REMOVES the pin pair from the baseline.
@@ -808,16 +876,37 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
     expect(offKeys).toEqual(baseline.filter((k) => k !== 'coarse_to_fine' && k !== 'coarse_stages'))
   })
 
-  test('INIT NOISE: PINK pairs chroma natural (the battery winner); GRAY emits spectrum only; WHITE nothing', () => {
+  test('INIT NOISE: PINK pairs chroma natural (the battery winner); PINK MONO pairs mono; GRAY emits spectrum only; WHITE nothing', () => {
     const pink = freshWith({ ...defaultExperiments(), noise: 'pink' }).values
     expect(pink['init_spectrum']).toBe('pink')
     expect(pink['init_spectrum_chroma']).toBe('natural')
+    const pinkMono = freshWith({ ...defaultExperiments(), noise: 'pinkmono' }).values
+    expect(pinkMono['init_spectrum']).toBe('pink')
+    expect(pinkMono['init_spectrum_chroma']).toBe('mono')
     const gray = freshWith({ ...defaultExperiments(), noise: 'gray' }).values
     expect(gray['init_spectrum']).toBe('gray')
     expect('init_spectrum_chroma' in gray).toBe(false)
     const white = freshWith(defaultExperiments()).values
     expect('init_spectrum' in white).toBe(false)
     expect('init_spectrum_chroma' in white).toBe(false)
+  })
+
+  test('ANNEAL: BLUR emits the flag + source; NOISE the flag only (engine-default source); OFF nothing; knobs never emitted', () => {
+    const blur = freshWith({ ...defaultExperiments(), anneal: 'blur' }).values
+    expect(blur['structure_annealing']).toBe(true)
+    expect(blur['anneal_source']).toBe('blur')
+    const noise = freshWith({ ...defaultExperiments(), anneal: 'noise' }).values
+    expect(noise['structure_annealing']).toBe(true)
+    expect('anneal_source' in noise).toBe(false)
+    const off = freshWith(defaultExperiments()).values
+    expect('structure_annealing' in off).toBe(false)
+    expect('anneal_source' in off).toBe(false)
+    // The other knobs stay bench-only at every selection.
+    for (const values of [blur, noise, off]) {
+      expect('anneal_cycles' in values).toBe(false)
+      expect('anneal_strength' in values).toBe(false)
+      expect('anneal_band' in values).toBe(false)
+    }
   })
 
   test('PYRAMID 2/3/4 emit the pair; OFF emits neither key', () => {
@@ -835,10 +924,11 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
     const on = freshWith({ ...defaultExperiments(), coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'on' }).values
     expect(on['coherence_weighting']).toBe(true)
     expect(on['cutout_sampler']).toBe('full')
+    expect(on['cutouts']).toBe(16) // the pair travels together (§5.7)
     expect(on['phase_scheduling']).toBe(true)
     expect(on['auto_stop']).toBe(true)
     const off = freshWith(defaultExperiments()).values
-    for (const key of ['coherence_weighting', 'cutout_sampler', 'phase_scheduling', 'auto_stop']) {
+    for (const key of ['coherence_weighting', 'cutout_sampler', 'cutouts', 'phase_scheduling', 'auto_stop']) {
       expect(key in off).toBe(false)
     }
   })
@@ -849,6 +939,7 @@ describe('matchExperiments (§5.3 doctrine — exact-match only, misses are CUST
     expect(matchExperiments({})).toEqual({
       noise: 'white',
       pyramid: 'off',
+      anneal: 'off',
       coherence: 'off',
       fullVision: 'off',
       phase: 'off',
@@ -857,22 +948,45 @@ describe('matchExperiments (§5.3 doctrine — exact-match only, misses are CUST
   })
 
   test('a Create-authored panel round-trips through its own submission values', () => {
-    const picks: Experiments = { noise: 'pink', pyramid: '4', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'on' }
+    const picks: Experiments = { noise: 'pink', pyramid: '4', anneal: 'blur', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'off' }
     const payload = composeSubmission({
       prompt: 'p', aspect: '1:1', size: 'full', steps: 200, look: 'limited',
       seedMode: { kind: 'random' }, tweak: null, init: null, experiments: picks,
     })
     expect(matchExperiments(payload.values)).toEqual(picks)
+    // The flag-only ANNEAL NOISE emission and the PINK MONO pairing round-trip too.
+    const picks2: Experiments = { ...defaultExperiments(), noise: 'pinkmono', anneal: 'noise' }
+    const payload2 = composeSubmission({
+      prompt: 'p', aspect: '1:1', size: 'full', steps: 200, look: 'limited',
+      seedMode: { kind: 'random' }, tweak: null, init: null, experiments: picks2,
+    })
+    expect(matchExperiments(payload2.values)).toEqual(picks2)
   })
 
-  test('noise: pink needs chroma natural; any other pink chroma is CUSTOM; chroma is ignored for white/gray (engine-inert)', () => {
+  test('noise: pink + natural is PINK, pink + mono is PINK MONO; any other pink chroma is CUSTOM; chroma is ignored for white/gray (engine-inert)', () => {
     expect(matchExperiments({ init_spectrum: 'pink', init_spectrum_chroma: 'natural' }).noise).toBe('pink')
+    expect(matchExperiments({ init_spectrum: 'pink', init_spectrum_chroma: 'mono' }).noise).toBe('pinkmono')
     expect(matchExperiments({ init_spectrum: 'pink', init_spectrum_chroma: 'full' }).noise).toBeNull()
     expect(matchExperiments({ init_spectrum: 'pink' }).noise).toBeNull() // absent chroma composes 'full'
     expect(matchExperiments({ init_spectrum: 'fractal' }).noise).toBeNull() // battery loser — bench-only
     expect(matchExperiments({ init_spectrum: 'white', init_spectrum_chroma: 'mono' }).noise).toBe('white')
     expect(matchExperiments({ init_spectrum: 'gray', init_spectrum_chroma: 'natural' }).noise).toBe('gray')
     expect(matchExperiments({ init_spectrum: 7 }).noise).toBeNull()
+  })
+
+  test('anneal: BLUR/NOISE by source with the other knobs at engine defaults; any bench-tuned knob is CUSTOM; false/absent is OFF', () => {
+    expect(matchExperiments({ structure_annealing: true }).anneal).toBe('noise') // absent source composes 'noise'
+    expect(matchExperiments({ structure_annealing: true, anneal_source: 'noise' }).anneal).toBe('noise')
+    expect(matchExperiments({ structure_annealing: true, anneal_source: 'blur' }).anneal).toBe('blur')
+    // Explicit engine-default knobs still match exactly (absent composes to the same).
+    expect(matchExperiments({ structure_annealing: true, anneal_source: 'blur', anneal_cycles: 3, anneal_strength: 0.5, anneal_band: 0.15 }).anneal).toBe('blur')
+    // Any non-default knob -> CUSTOM (a bench-tuned schedule rides the base verbatim).
+    expect(matchExperiments({ structure_annealing: true, anneal_cycles: 5 }).anneal).toBeNull()
+    expect(matchExperiments({ structure_annealing: true, anneal_strength: 0.8 }).anneal).toBeNull()
+    expect(matchExperiments({ structure_annealing: true, anneal_band: 0.3 }).anneal).toBeNull()
+    expect(matchExperiments({ structure_annealing: true, anneal_source: 'melt' }).anneal).toBeNull() // junk source
+    expect(matchExperiments({ structure_annealing: false }).anneal).toBe('off')
+    expect(matchExperiments({ structure_annealing: 'yes' }).anneal).toBeNull() // junk flag
   })
 
   test('pyramid: stages 2/3/4 with c2f true; coarse_stages 5 is CUSTOM; c2f false/absent is OFF', () => {
@@ -889,11 +1003,18 @@ describe('matchExperiments (§5.3 doctrine — exact-match only, misses are CUST
     expect(matchExperiments({ coherence_weighting: true }).coherence).toBe('on')
     expect(matchExperiments({ coherence_weighting: false }).coherence).toBe('off')
     expect(matchExperiments({ coherence_weighting: 'yes' }).coherence).toBeNull()
-    expect(matchExperiments({ cutout_sampler: 'smart' }).fullVision).toBe('off')
-    expect(matchExperiments({ cutout_sampler: 'full' }).fullVision).toBe('on')
-    expect(matchExperiments({ cutout_sampler: 'classic' }).fullVision).toBeNull() // rides verbatim
     expect(matchExperiments({ phase_scheduling: true }).phase).toBe('on')
     expect(matchExperiments({ auto_stop: true }).autoStop).toBe('on')
+  })
+
+  test('full vision: ON means the full+16 pair; full with any other cutouts is CUSTOM; cutouts is consulted only when the sampler is full', () => {
+    expect(matchExperiments({ cutout_sampler: 'full', cutouts: 16 }).fullVision).toBe('on')
+    expect(matchExperiments({ cutout_sampler: 'full', cutouts: 40 }).fullVision).toBeNull() // the pre-fix mispairing rematerializes CUSTOM, rides verbatim
+    expect(matchExperiments({ cutout_sampler: 'full' }).fullVision).toBeNull() // absent cutouts composes the tuned 40
+    expect(matchExperiments({ cutout_sampler: 'smart' }).fullVision).toBe('off')
+    expect(matchExperiments({ cutout_sampler: 'smart', cutouts: 16 }).fullVision).toBe('off') // cutouts is a bench knob here
+    expect(matchExperiments({ cutouts: 24 }).fullVision).toBe('off') // absent sampler composes 'smart'
+    expect(matchExperiments({ cutout_sampler: 'classic' }).fullVision).toBeNull() // rides verbatim
   })
 })
 
@@ -916,16 +1037,23 @@ describe('experiments — tweak semantics (§5.7: concrete applies, CUSTOM inher
       width: 512, height: 512,
       init_spectrum: 'fractal', init_spectrum_chroma: 'mono', init_spectrum_falloff: 2.5,
       coarse_to_fine: true, coarse_stages: 5,
-      cutout_sampler: 'classic', coherence_weighting: 'junk',
+      structure_annealing: true, anneal_source: 'blur', anneal_cycles: 6, anneal_strength: 0.8, anneal_band: 0.3,
+      cutout_sampler: 'classic', cutouts: 24, coherence_weighting: 'junk',
     }
-    const allCustom: Experiments = { noise: null, pyramid: null, coherence: null, fullVision: null, phase: null, autoStop: null }
+    const allCustom: Experiments = { noise: null, pyramid: null, anneal: null, coherence: null, fullVision: null, phase: null, autoStop: null }
     const values = tweakWith(base, allCustom).values
     expect(values['init_spectrum']).toBe('fractal')
     expect(values['init_spectrum_chroma']).toBe('mono')
     expect(values['init_spectrum_falloff']).toBe(2.5)
     expect(values['coarse_to_fine']).toBe(true)
     expect(values['coarse_stages']).toBe(5)
+    expect(values['structure_annealing']).toBe(true)
+    expect(values['anneal_source']).toBe('blur')
+    expect(values['anneal_cycles']).toBe(6)
+    expect(values['anneal_strength']).toBe(0.8)
+    expect(values['anneal_band']).toBe(0.3)
     expect(values['cutout_sampler']).toBe('classic')
+    expect(values['cutouts']).toBe(24)
     expect(values['coherence_weighting']).toBe('junk')
   })
 
@@ -934,7 +1062,9 @@ describe('experiments — tweak semantics (§5.7: concrete applies, CUSTOM inher
       width: 512, height: 512, steps_per_scene: 200,
       init_spectrum: 'pink', init_spectrum_chroma: 'natural',
       coarse_to_fine: true, coarse_stages: 3,
-      coherence_weighting: true, cutout_sampler: 'full', phase_scheduling: false, auto_stop: false,
+      structure_annealing: true, anneal_source: 'blur',
+      coherence_weighting: true, cutout_sampler: 'full', cutouts: 16,
+      phase_scheduling: false, auto_stop: false,
     }
     const values = tweakWith(base, matchExperiments(base)).values
     // Non-default rows re-apply the base's own values verbatim…
@@ -942,8 +1072,11 @@ describe('experiments — tweak semantics (§5.7: concrete applies, CUSTOM inher
     expect(values['init_spectrum_chroma']).toBe('natural')
     expect(values['coarse_to_fine']).toBe(true)
     expect(values['coarse_stages']).toBe(3)
+    expect(values['structure_annealing']).toBe(true)
+    expect(values['anneal_source']).toBe('blur')
     expect(values['coherence_weighting']).toBe(true)
     expect(values['cutout_sampler']).toBe('full')
+    expect(values['cutouts']).toBe(16)
     // …and rows rematerialized OFF delete the base's explicit-default keys — the
     // server's defaults-compose restores the same false values, so the COMPOSED
     // config is identical (the §5.3 replay claim; wire keys may differ).
@@ -955,28 +1088,45 @@ describe('experiments — tweak semantics (§5.7: concrete applies, CUSTOM inher
     const base = {
       init_spectrum: 'pink', init_spectrum_chroma: 'natural', init_spectrum_falloff: 2.5,
       coarse_to_fine: true, coarse_stages: 5,
-      cutout_sampler: 'classic', coherence_weighting: true, phase_scheduling: true, auto_stop: true,
+      structure_annealing: true, anneal_source: 'blur', anneal_cycles: 6, anneal_strength: 0.8, anneal_band: 0.3,
+      cutout_sampler: 'classic', cutouts: 24, coherence_weighting: true, phase_scheduling: true, auto_stop: true,
     }
-    const values = tweakWith(base, defaultExperiments()).values // WHITE / 3 / off / off / off / off
+    const values = tweakWith(base, defaultExperiments()).values // WHITE / 3 / off / off / off / off / off
     expect('init_spectrum' in values).toBe(false) // WHITE = the composed default
     expect('init_spectrum_chroma' in values).toBe(false)
     expect(values['init_spectrum_falloff']).toBe(2.5) // the bench knob is NOT the row's field — rides
     expect(values['coarse_to_fine']).toBe(true)
     expect(values['coarse_stages']).toBe(3) // the off-menu 5 re-picked as 3
-    expect('cutout_sampler' in values).toBe(false) // OFF deletes — composes 'smart'
+    // ANNEAL OFF deletes the WHOLE group — the bench knobs included (knobs without
+    // the flag are a schema-rejected config lie, so they cannot ride an OFF re-pick).
+    for (const key of ['structure_annealing', 'anneal_source', 'anneal_cycles', 'anneal_strength', 'anneal_band']) {
+      expect(key in values).toBe(false)
+    }
+    expect('cutout_sampler' in values).toBe(false) // OFF deletes the sampler — composes 'smart'
+    expect(values['cutouts']).toBe(24) // …but a base's cutouts is a bench knob under smart — rides
     expect('coherence_weighting' in values).toBe(false)
     expect('phase_scheduling' in values).toBe(false)
     expect('auto_stop' in values).toBe(false)
   })
 
+  test('a FULL VISION re-pick over the pre-fix mispairing (full + tuned 40) heals it to the full+16 pair', () => {
+    const base = { width: 512, cutout_sampler: 'full', cutouts: 40 } // rematerializes CUSTOM; an explicit ON re-pick:
+    const values = tweakWith(base, { ...defaultExperiments(), fullVision: 'on' }).values
+    expect(values['cutout_sampler']).toBe('full')
+    expect(values['cutouts']).toBe(16)
+  })
+
   test('flipping rows ON over a bare base emits exactly the row values', () => {
-    const values = tweakWith({ width: 512 }, { noise: 'gray', pyramid: 'off', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'on' }).values
+    const values = tweakWith({ width: 512 }, { noise: 'gray', pyramid: 'off', anneal: 'noise', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'off' }).values
     expect(values['init_spectrum']).toBe('gray')
     expect('coarse_to_fine' in values).toBe(false)
+    expect(values['structure_annealing']).toBe(true)
+    expect('anneal_source' in values).toBe(false) // NOISE = the engine-default source
     expect(values['coherence_weighting']).toBe(true)
     expect(values['cutout_sampler']).toBe('full')
+    expect(values['cutouts']).toBe(16)
     expect(values['phase_scheduling']).toBe(true)
-    expect(values['auto_stop']).toBe(true)
+    expect('auto_stop' in values).toBe(false)
   })
 })
 
@@ -1000,12 +1150,15 @@ describe('isolation invariant: submissions are reconstructible from what the use
   ]
   // The experiments axis (§5.7): every row at default, every row flipped, plus the
   // remaining single-row alternates — each offered option appears in the walk at
-  // least once on both the fresh and tweak sides.
+  // least once on both the fresh and tweak sides. No entry pairs a non-OFF anneal
+  // with AUTO-STOP ON: applyAutoStop forces that pair apart, so it is unreachable
+  // by construction (composeSubmission throws on it — guard-tested separately).
   const EXPERIMENTS_AXIS: readonly Experiments[] = [
     defaultExperiments(),
-    { noise: 'pink', pyramid: 'off', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'on' },
-    { ...defaultExperiments(), noise: 'gray', pyramid: '2' },
-    { ...defaultExperiments(), pyramid: '4' },
+    { noise: 'pink', pyramid: 'off', anneal: 'blur', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'off' },
+    { ...defaultExperiments(), noise: 'gray', pyramid: '2', anneal: 'noise' },
+    { ...defaultExperiments(), pyramid: '4', autoStop: 'on' },
+    { ...defaultExperiments(), noise: 'pinkmono' },
   ]
 
   test('fresh: payload keys ⊆ visible controls ∪ documented pins', () => {
@@ -1026,6 +1179,8 @@ describe('isolation invariant: submissions are reconstructible from what the use
                   // HOLD forces PYRAMID off in the same transition (applyHoldMeaning) —
                   // other pairings are unreachable by construction and throw.
                   if (init != null && init.holdMeaning && experiments.pyramid !== 'off') continue
+                  // VQGAN forces NOISE white + ANNEAL off (applyLook) — same rule.
+                  if (look === 'vqgan' && (experiments.noise !== 'white' || experiments.anneal !== 'off')) continue
                   const payload = composeSubmission({ prompt: 'p', aspect, size, steps, look, seedMode, tweak: null, init, experiments })
                   for (const key of Object.keys(payload.values)) {
                     if (!VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
@@ -1077,20 +1232,25 @@ describe('isolation invariant: submissions are reconstructible from what the use
     // to the §5.7 axis; null rows must contribute NO keys of their own.
     const TWEAK_EXPERIMENTS: readonly Experiments[] = [
       ...EXPERIMENTS_AXIS,
-      { noise: null, pyramid: null, coherence: null, fullVision: null, phase: null, autoStop: null },
+      { noise: null, pyramid: null, anneal: null, coherence: null, fullVision: null, phase: null, autoStop: null },
     ]
-    for (const steps of STEPS_AXIS) {
-      for (const seedMode of SEED_MODES) {
-        for (const init of INITS) {
-          for (const experiments of TWEAK_EXPERIMENTS) {
-            if (init != null && init.holdMeaning && experiments.pyramid !== 'off') continue // §5.7, as fresh
-            const payload = composeSubmission({
-              prompt: 'new', aspect: '16:9', size: 'full', steps, look: 'vqgan', seedMode,
-              tweak: { of: 's-1', baseValues: { ...base } }, init, experiments,
-            })
-            for (const key of Object.keys(payload.values)) {
-              if (!(key in base) && !VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
-                violations.push(`${steps}/${seedMode.kind}/${init == null ? 'no-init' : 'init'}: ${key}`)
+    // Both looks: VQGAN exercises its §5.7 forcing skip; LIMITED walks the noise/anneal
+    // variants VQGAN's guard would exclude.
+    for (const look of ['vqgan', 'limited'] as const) {
+      for (const steps of STEPS_AXIS) {
+        for (const seedMode of SEED_MODES) {
+          for (const init of INITS) {
+            for (const experiments of TWEAK_EXPERIMENTS) {
+              if (init != null && init.holdMeaning && experiments.pyramid !== 'off') continue // §5.7, as fresh
+              if (look === 'vqgan' && (experiments.noise !== 'white' || experiments.anneal !== 'off')) continue // §5.7, as fresh
+              const payload = composeSubmission({
+                prompt: 'new', aspect: '16:9', size: 'full', steps, look, seedMode,
+                tweak: { of: 's-1', baseValues: { ...base } }, init, experiments,
+              })
+              for (const key of Object.keys(payload.values)) {
+                if (!(key in base) && !VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
+                  violations.push(`${look}/${steps}/${seedMode.kind}/${init == null ? 'no-init' : 'init'}: ${key}`)
+                }
               }
             }
           }

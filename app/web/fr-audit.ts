@@ -51,7 +51,10 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // domain like the rest, model.test.ts is the checked surface).
   // 3/16 -> 3/17 with the EXPERIMENTS panel (§5.7): +applyHoldMeaning (union-store
   // transition, unsupported as expected; model.test.ts is the checked surface).
-  { file: 'create/core/model.ts', coverage: '3/17', partial: 0 },
+  // 3/17 -> 3/19 with the ANNEAL row + VQGAN/AUTO-STOP guards (§5.7): +applyLook,
+  // +applyAutoStop — union-store transitions like applyHoldMeaning, unsupported as
+  // expected; model.test.ts is the checked surface.
+  { file: 'create/core/model.ts', coverage: '3/19', partial: 0 },
   // 1/10 -> 2/10 with the SIZE/STEPS split: qualitySteps (unsupported Record read)
   // retired; parseStepsId (numeric exact-match loop, ensures return in 150..600) is
   // fully analyzed alongside dimsTable.
@@ -66,7 +69,10 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // +applyExperiments (Record writes) and +matchNoise/+matchPyramid/+matchToggle/
   // +matchSampler/+matchExperiments (Record/unknown reads) unsupported as expected —
   // string/JSON domain, presets.test.ts is the checked surface.
-  { file: 'create/core/presets.ts', coverage: '5/26', partial: 0 },
+  // 5/26 -> 5/28 with the ANNEAL row (§5.7): +annealEmit (Record producer) and
+  // +matchAnneal (unknown reads) unsupported as expected — same domain, same
+  // checked surface (matchSampler became matchFullVision, count-neutral).
+  { file: 'create/core/presets.ts', coverage: '5/28', partial: 0 },
   { file: 'create/core/surfaces.ts', coverage: '1/2', partial: 0 },
 ]
 

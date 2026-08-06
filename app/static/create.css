@@ -171,7 +171,9 @@ button {
   position: absolute;
   top: 54px; /* barHeight 46 + popoverGapY 8 */
   right: 0;
-  width: 384px; /* fits the STEPS row's five numeric chips + the tweak CUSTOM chip */
+  width: 432px; /* fits the widest rows on one line: STEPS' six numeric chips + the
+                   custom input (~398px of content), and INIT NOISE's four chips +
+                   the tweak CUSTOM chip (§5.7) */
   background: var(--tile);
   border: 1px solid #26262c;
   border-radius: 8px;
@@ -186,6 +188,7 @@ button {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap; /* the INIT NOISE row (4 chips + a tweak CUSTOM chip) can exceed the popover width */
 }
 
 .pop-label {
@@ -208,7 +211,11 @@ button {
 .chip:hover:not(:disabled) { color: var(--text); border-color: #3a3a44; }
 .chip.sel { color: var(--accent); border-color: var(--accent); }
 .chip:disabled { opacity: 0.35; cursor: default; } /* the MASK-chip disabled treatment */
-.chip.custom { display: none; pointer-events: none; }
+/* CUSTOM chips are hidden inline in the markup (the #chip / #init-row idiom) and
+   shown/hidden by renderBar via style.display — a stylesheet display:none here would
+   win over renderBar's `style.display = ''` show-path and keep them invisible in
+   tweak mode. Non-interactive: they display an inherit-the-base state, not a pick. */
+.chip.custom { pointer-events: none; }
 
 /* the STEPS row's custom numeric input — chip-shaped; sel when a non-preset value is live */
 #steps-custom {

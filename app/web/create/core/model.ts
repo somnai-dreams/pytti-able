@@ -34,6 +34,18 @@
 //                                               c2f + semantic init); OFF restores
 //                                               nothing — the row re-enables where it
 //                                               stands. Throws without an attachment
+//   applyLook(state, look)                      THE composer.look write path (§5.7):
+//                                               VQGAN forces experiments.noise to
+//                                               'white' and experiments.anneal to 'off'
+//                                               in the same transition (a codebook init
+//                                               has no spectrum; annealing rejects
+//                                               latent models); switching away restores
+//                                               nothing
+//   applyAutoStop(state, autoStop)              THE experiments.autoStop write path
+//                                               (§5.7): ON forces experiments.anneal to
+//                                               'off' in the same transition (the
+//                                               engine refuses annealing + auto_stop);
+//                                               OFF restores nothing
 //   dropUnreadableMask(state)                   §15.7: unreadable existing mask -> init.mask
 //                                               = null in the same transition as the
 //                                               'starting blank' toast, so the dead path
@@ -61,7 +73,7 @@ import type { SwipeDirection } from '@kit/reel-strip/core'
 import type { Env } from '@kit/env/core'
 import { feel } from './feel'
 import type { InitAttachment } from './init'
-import type { ComposerAspect, Experiments, LookId, SeedMode, SizeId } from './presets'
+import type { ComposerAspect, Experiments, LookId, SeedMode, SizeId, ToggleId } from './presets'
 
 export type SessionState = 'rendering' | 'stopped' | 'done' | 'failed' | 'imported'
 export type TerminalState = 'done' | 'stopped' | 'failed'
@@ -291,6 +303,34 @@ export function applyHoldMeaning(state: CreateState, on: boolean): void {
   if (init == null) throw new Error('applyHoldMeaning without an attachment (the HOLD chip exists iff attached)')
   init.holdMeaning = on
   if (on) state.composer.experiments.pyramid = 'off'
+}
+
+// THE composer.look write path (§5.7 — dom's LOOK chips; tweak rematerialization
+// re-asserts the same rule after matchPresets). The engine refuses shaped init noise
+// AND structure annealing under VQGAN (a codebook draw has no spectrum to shape;
+// annealing rejects latent models), so picking VQGAN forces the NOISE row to WHITE
+// and the ANNEAL row to OFF in the same transition — both selections visibly move
+// (the applyHoldMeaning precedent: loud, never a silent dangling pair; a null/CUSTOM
+// row is forced too, since it would let base spectrum/anneal keys ride). Switching
+// the look away re-enables both rows where they stand — no silent restore.
+export function applyLook(state: CreateState, look: LookId): void {
+  state.composer.look = look
+  if (look === 'vqgan') {
+    state.composer.experiments.noise = 'white'
+    state.composer.experiments.anneal = 'off'
+  }
+}
+
+// THE experiments.autoStop write path (§5.7 — dom's AUTO-STOP chips; tweak
+// rematerialization re-asserts the same rule after matchExperiments). The engine
+// refuses structure_annealing + auto_stop (a plateau stop mid-cycle would freeze a
+// half-liquid image), so turning AUTO-STOP ON forces the ANNEAL row to OFF in the
+// same transition (null/CUSTOM included). The other direction is prevented, not
+// forced: the ANNEAL chips are disabled while AUTO-STOP is ON (the pyramid × HOLD
+// treatment). OFF restores nothing — the row re-enables where it stands.
+export function applyAutoStop(state: CreateState, autoStop: ToggleId): void {
+  state.composer.experiments.autoStop = autoStop
+  if (autoStop === 'on') state.composer.experiments.anneal = 'off'
 }
 
 // §15.7's fail-soft ('existing mask not readable — starting blank') completed at the state

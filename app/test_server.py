@@ -142,6 +142,26 @@ class TestSelfContainedPath(SessionsPostBase):
         # composition base is defaults, not the draft: every schema field is present
         self.assertEqual(set(values), set(defaults))
 
+    def test_bare_submission_composes_engine_default_experiments(self):
+        # The cross-layer pin behind the EXPERIMENTS panel's payload rule (spec
+        # §5.7): Create's untouched panel emits ZERO keys for six of its seven rows
+        # because the server's defaults-compose already produces exactly these
+        # values. If a future default.yaml flip breaks the equivalence (say
+        # cutout_sampler goes 'full' or auto_stop goes true), the untouched panel
+        # would silently stop meaning what its chips show — this test names the
+        # flipped field before that can ship.
+        status, _ = http("POST", "/api/sessions", {"mode": "now", "values": dict(VALID_VALUES)})
+        self.assertEqual(status, 201)
+        values = self.started_values()
+        self.assertEqual(values["init_spectrum"], "white")
+        self.assertEqual(values["init_spectrum_chroma"], "full")
+        self.assertIs(values["coarse_to_fine"], False)
+        self.assertIs(values["coherence_weighting"], False)
+        self.assertEqual(values["cutout_sampler"], "smart")
+        self.assertIs(values["phase_scheduling"], False)
+        self.assertIs(values["auto_stop"], False)
+        self.assertIs(values["structure_annealing"], False)
+
     def test_draft_is_never_read_or_written(self):
         # a poisoned draft (the smoothing_weight contamination class) must not leak in,
         # and the file must be byte- and mtime-identical afterwards

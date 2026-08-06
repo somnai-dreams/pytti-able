@@ -5,8 +5,10 @@
 // input and the gear, and the INIT row (strength presets + HOLD + torch note) that
 // exists iff an image is attached. §5.1a: the ASPECT row's AUTO chip is disabled
 // (MASK-chip surface treatment) until the attachment's natural dims are known.
-// §5.7: the collapsed EXPERIMENTS disclosure at the bottom (chevron button + six chip
-// rows); the PYRAMID row is disabled (AUTO-chip treatment) while HOLD MEANING is on.
+// §5.7: the collapsed EXPERIMENTS disclosure at the bottom (chevron button + seven
+// chip rows); rows the engine's guards refuse are disabled (AUTO-chip treatment):
+// PYRAMID while HOLD MEANING is on, NOISE and ANNEAL while LOOK is VQGAN, ANNEAL
+// while AUTO-STOP is on.
 import { spring, springGoToEnd, springMostlyDone, springStep } from '@kit/midui/motion'
 import { uploadUrl } from '../core/api'
 import { initNaturalDims, maskEditingLocked } from '../core/init'
@@ -21,6 +23,7 @@ type ChipRow =
   | 'init'
   | 'noise'
   | 'pyramid'
+  | 'anneal'
   | 'coherence'
   | 'fullvision'
   | 'phase'
@@ -35,7 +38,13 @@ let chips: { el: HTMLElement; row: ChipRow; value: string | null }[] = []
 let aspectAutoEl: HTMLButtonElement
 let expToggleEl: HTMLButtonElement
 let expBodyEl: HTMLElement
-let pyramidChipEls: HTMLButtonElement[] = []
+// Guarded rows (§5.7): chips that disable while an engine-refused pairing would
+// otherwise be reachable. defaultTitle is the markup's own hint (e.g. PINK's battery
+// note), restored whenever the chip re-enables — the guard reason must not eat it.
+type GuardedChip = { el: HTMLButtonElement; defaultTitle: string }
+let pyramidChipEls: GuardedChip[] = []
+let noiseChipEls: GuardedChip[] = []
+let annealChipEls: GuardedChip[] = []
 let seedRandomEl: HTMLElement
 let seedLockedEl: HTMLElement
 let stepsCustomEl: HTMLInputElement
@@ -106,6 +115,7 @@ export function initBar(deps: {
   const expRows: [ChipRow, string][] = [
     ['noise', 'noise'],
     ['pyramid', 'pyramid'],
+    ['anneal', 'anneal'],
     ['coherence', 'coherence'],
     ['fullvision', 'fullvision'],
     ['phase', 'phase'],
@@ -116,7 +126,11 @@ export function initBar(deps: {
       chips.push({ el, row, value: el.dataset[key] === 'custom' ? null : el.dataset[key]! })
     }
   }
-  pyramidChipEls = [...popEl.querySelectorAll<HTMLButtonElement>('button[data-pyramid]')]
+  const guarded = (selector: string): GuardedChip[] =>
+    [...popEl.querySelectorAll<HTMLButtonElement>(selector)].map((el) => ({ el, defaultTitle: el.title }))
+  pyramidChipEls = guarded('button[data-pyramid]')
+  noiseChipEls = guarded('button[data-noise]')
+  annealChipEls = guarded('button[data-anneal]')
   aspectAutoEl = mustQuery('[data-aspect="auto"]') as HTMLButtonElement
   expToggleEl = mustQuery('#exp-toggle') as HTMLButtonElement
   expBodyEl = mustQuery('#exp-body')
@@ -154,6 +168,8 @@ function rowValue(state: CreateState, row: ChipRow): string | null {
       return state.composer.experiments.noise
     case 'pyramid':
       return state.composer.experiments.pyramid
+    case 'anneal':
+      return state.composer.experiments.anneal
     case 'coherence':
       return state.composer.experiments.coherence
     case 'fullvision':
@@ -235,9 +251,28 @@ export function renderBar(state: CreateState, springSteps: number): boolean {
     // HOLD is on the row shows OFF (applyHoldMeaning forced it) and disables — the
     // AUTO-chip locked-surface treatment (disabled + title).
     const holdOn = init != null && init.holdMeaning
-    for (const el of pyramidChipEls) {
-      el.disabled = holdOn
-      el.title = holdOn ? 'HOLD MEANING is on — the engine refuses pyramid + semantic init' : ''
+    for (const chip of pyramidChipEls) {
+      chip.el.disabled = holdOn
+      chip.el.title = holdOn ? 'HOLD MEANING is on — the engine refuses pyramid + semantic init' : chip.defaultTitle
+    }
+    // §5.7 LOOK VQGAN × noise/anneal: a codebook init has no spectrum to shape and
+    // annealing rejects latent models, so while the look is VQGAN the NOISE row shows
+    // WHITE and the ANNEAL row OFF (applyLook forced them) and both disable. The
+    // ANNEAL row also disables while AUTO-STOP is on (applyAutoStop forced it OFF —
+    // the engine refuses annealing + auto_stop). Same treatment as pyramid × HOLD.
+    const vqganLook = state.composer.look === 'vqgan'
+    const autoStopOn = state.composer.experiments.autoStop === 'on'
+    for (const chip of noiseChipEls) {
+      chip.el.disabled = vqganLook
+      chip.el.title = vqganLook ? 'LOOK is VQGAN — a codebook init has no spectrum to shape' : chip.defaultTitle
+    }
+    for (const chip of annealChipEls) {
+      chip.el.disabled = vqganLook || autoStopOn
+      chip.el.title = vqganLook
+        ? 'LOOK is VQGAN — annealing rejects latent models'
+        : autoStopOn
+          ? 'AUTO-STOP is on — the engine refuses annealing + auto-stop'
+          : chip.defaultTitle
     }
     for (const chip of chips) {
       const current = rowValue(state, chip.row)
