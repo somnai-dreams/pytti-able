@@ -232,7 +232,15 @@ export type Experiments = {
 // submits the byte-identical payload Create submitted before the panel existed
 // (pyramid 3 = the judged pin, §5.7; everything else = the composed default).
 export function defaultExperiments(): Experiments {
-  return { noise: 'white', pyramid: '3', anneal: 'off', coherence: 'off', fullVision: 'off', phase: 'off', autoStop: 'off' }
+  // noise 'pinkmono' is Create's SECOND judged-pin-made-visible (the pyramid
+  // precedent): Max picked it as the default after the full-10 confirmation
+  // battery (every shaped init beats white 12-14W/4-5L on SO400M; the three
+  // characters tie among themselves — "i thnk pink-mono is the better
+  // default"). It lives HERE, not in default.yaml: the engine default stays
+  // white because shaped init fails loud on VQGAN/LlamaGen, and a global
+  // default would landmine every bench render of those models. The VQGAN
+  // look-guard already forces this row to WHITE (which emits nothing).
+  return { noise: 'pinkmono', pyramid: '3', anneal: 'off', coherence: 'off', fullVision: 'off', phase: 'off', autoStop: 'off' }
 }
 
 // One row's application: clear the fields the row owns, then set the selection's

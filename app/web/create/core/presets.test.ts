@@ -130,6 +130,8 @@ describe('composeSubmission (fresh)', () => {
       width: 640,
       height: 360,
       steps_per_scene: 200,
+      init_spectrum: 'pink', // PINK MONO — Max's default (2026-08-06 confirmation battery)
+      init_spectrum_chroma: 'mono',
       image_model: 'Limited Palette',
       animation_mode: 'off',
       interpolation_steps: 0,
@@ -189,7 +191,8 @@ describe('composeSubmission (fresh)', () => {
       seedMode: { kind: 'locked', seed: 42 },
       tweak: null,
       init: null,
-      experiments: defaultExperiments(),
+      // applyLook forces noise white under VQGAN — composers mirror the app
+      experiments: { ...defaultExperiments(), noise: 'white' },
     })
     expect(payload.values['seed']).toBe(42)
     expect(payload.seedLocked).toBe(true)
@@ -382,7 +385,8 @@ describe('AUTO aspect through composeSubmission (§5.1a)', () => {
     seedMode: { kind: 'random' as const },
     tweak: null,
     init: { path: '/up/a.png', natural, strength: 'medium' as const, holdMeaning: false, mask: null },
-    experiments: defaultExperiments(),
+    // applyLook forces noise white under VQGAN — composers mirror the app
+    experiments: look === 'vqgan' ? { ...defaultExperiments(), noise: 'white' as const } : defaultExperiments(),
   })
 
   test('fresh: rounding multiple follows the LOOK — 8 for the pixel models, 16 for VQGAN', () => {
@@ -796,7 +800,7 @@ describe('LOOK VQGAN × noise/anneal (§5.7 — codebook init has no spectrum; a
     })
 
   test('VQGAN with WHITE + ANNEAL OFF (what applyLook forces) composes fine', () => {
-    const values = vqganWith(defaultExperiments()).values
+    const values = vqganWith({ ...defaultExperiments(), noise: 'white' }).values
     expect(values['image_model']).toBe('VQGAN')
     expect('init_spectrum' in values).toBe(false)
     expect('structure_annealing' in values).toBe(false)
@@ -836,7 +840,7 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
       experiments,
     })
 
-  test('the untouched panel is byte-identical to the pre-panel payload (the retired pin, verbatim)', () => {
+  test('the untouched panel = the pre-panel payload + the two visible defaults (PYRAMID 3, PINK MONO)', () => {
     const payload = freshWith(defaultExperiments())
     expect(payload.values).toEqual({
       scenes: 'p',
@@ -848,6 +852,8 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
       interpolation_steps: 0,
       coarse_to_fine: true, // PYRAMID 3 — the judged pin, now the visible default
       coarse_stages: 3,
+      init_spectrum: 'pink', // PINK MONO — Max's default call after the full-10 battery
+      init_spectrum_chroma: 'mono',
     })
   })
 
@@ -858,10 +864,15 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
         .filter((k) => !baseline.includes(k))
         .sort()
     // Defaults add ZERO keys beyond the baseline; each flip adds only its row's fields.
+    // The baseline CARRIES the pink-mono pair (Max's visible default) — so PINK is a
+    // value change on the same keys, GRAY drops chroma, WHITE removes the pair
+    // entirely (the engine default, like PYRAMID OFF below).
     expect(added(defaultExperiments())).toEqual([])
-    expect(added({ ...defaultExperiments(), noise: 'pink' })).toEqual(['init_spectrum', 'init_spectrum_chroma'])
-    expect(added({ ...defaultExperiments(), noise: 'pinkmono' })).toEqual(['init_spectrum', 'init_spectrum_chroma'])
-    expect(added({ ...defaultExperiments(), noise: 'gray' })).toEqual(['init_spectrum'])
+    expect(added({ ...defaultExperiments(), noise: 'pink' })).toEqual([])
+    const whiteKeys = Object.keys(freshWith({ ...defaultExperiments(), noise: 'white' }).values).sort()
+    expect(whiteKeys).toEqual(baseline.filter((k) => k !== 'init_spectrum' && k !== 'init_spectrum_chroma'))
+    const grayKeys = Object.keys(freshWith({ ...defaultExperiments(), noise: 'gray' }).values).sort()
+    expect(grayKeys).toEqual(baseline.filter((k) => k !== 'init_spectrum_chroma'))
     // ANNEAL: NOISE adds the flag ONLY — source 'noise' is the engine default (the
     // payload rule); BLUR adds the non-default source alongside it.
     expect(added({ ...defaultExperiments(), anneal: 'noise' })).toEqual(['structure_annealing'])
@@ -886,9 +897,12 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
     const gray = freshWith({ ...defaultExperiments(), noise: 'gray' }).values
     expect(gray['init_spectrum']).toBe('gray')
     expect('init_spectrum_chroma' in gray).toBe(false)
-    const white = freshWith(defaultExperiments()).values
+    const white = freshWith({ ...defaultExperiments(), noise: 'white' }).values
     expect('init_spectrum' in white).toBe(false)
     expect('init_spectrum_chroma' in white).toBe(false)
+    const dflt = freshWith(defaultExperiments()).values
+    expect(dflt['init_spectrum']).toBe('pink') // PINK MONO is the visible default
+    expect(dflt['init_spectrum_chroma']).toBe('mono')
   })
 
   test('ANNEAL: BLUR emits the flag + source; NOISE the flag only (engine-default source); OFF nothing; knobs never emitted', () => {
@@ -1091,7 +1105,7 @@ describe('experiments — tweak semantics (§5.7: concrete applies, CUSTOM inher
       structure_annealing: true, anneal_source: 'blur', anneal_cycles: 6, anneal_strength: 0.8, anneal_band: 0.3,
       cutout_sampler: 'classic', cutouts: 24, coherence_weighting: true, phase_scheduling: true, auto_stop: true,
     }
-    const values = tweakWith(base, defaultExperiments()).values // WHITE / 3 / off / off / off / off / off
+    const values = tweakWith(base, { ...defaultExperiments(), noise: 'white' }).values // WHITE / 3 / off x5
     expect('init_spectrum' in values).toBe(false) // WHITE = the composed default
     expect('init_spectrum_chroma' in values).toBe(false)
     expect(values['init_spectrum_falloff']).toBe(2.5) // the bench knob is NOT the row's field — rides
