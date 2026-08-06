@@ -10,17 +10,24 @@
 //
 // types:
 //   InitStrengthId = 'subtle' | 'medium' | 'strong'   (1.5 / 4 / 10)
+//   NaturalDims = { width, height }                    the image file's own pixel dims
 //   InitImage   — uploading (object URL only) | ready (abs upload path; localUrl null
-//                 when rematerialized from a tweak base — display via api.uploadUrl)
+//                 when rematerialized from a tweak base — display via api.uploadUrl;
+//                 natural null until the dom reads the pixels — fresh attaches read it
+//                 from the object URL before 'ready', rematerialized ones load it async
+//                 via uploadUrl and it stays null on a 404/undecodable file)
 //   InitMask    = { path, inverted }                   abs path of the mask PNG upload
 //   InitAttachment = { image, strength|null, holdMeaning, mask|null }
 //     strength null = CUSTOM (inherit the base's weight expression) — reachable ONLY
 //     while composer.tweak != null, mirroring aspect/size/steps/look
-//   InitSubmitInput = { path, strength|null, holdMeaning, mask|null }  composeSubmission's view
+//   InitSubmitInput = { path, natural|null, strength|null, holdMeaning, mask|null }
+//     composeSubmission's view (natural feeds the AUTO aspect's dims, §5.1a)
 //   ParsedInitWeight = none | simple{weight, mask|null} | opaque{raw}
 //
 // functions:
 //   strengthWeight(id) -> '1.5' | '4' | '10'
+//   initNaturalDims(init) -> NaturalDims | null      the AUTO aspect's enabling fact:
+//     non-null iff an attachment exists, is ready, and its pixel dims are known
 //   formatInitWeight(weight, mask) -> string          the compose half of the codec
 //   parseInitWeight(raw) -> ParsedInitWeight          '' / plain-number zero -> none;
 //     plain weight expr + at most one BRACKETED image-path mask (either '-' position)
@@ -49,9 +56,11 @@ export function strengthWeight(id: InitStrengthId): string {
   return STRENGTH[id]
 }
 
+export type NaturalDims = { width: number; height: number }
+
 export type InitImage =
   | { kind: 'uploading'; name: string; localUrl: string }
-  | { kind: 'ready'; name: string; path: string; localUrl: string | null }
+  | { kind: 'ready'; name: string; path: string; localUrl: string | null; natural: NaturalDims | null }
 
 export type InitMask = { path: string; inverted: boolean }
 
@@ -64,6 +73,7 @@ export type InitAttachment = {
 
 export type InitSubmitInput = {
   path: string
+  natural: NaturalDims | null
   strength: InitStrengthId | null
   holdMeaning: boolean
   mask: InitMask | null
@@ -165,12 +175,27 @@ export function semanticOn(values: Record<string, unknown>): boolean {
   return raw !== '' && raw !== '0'
 }
 
+// The AUTO aspect's enabling fact (§5.1a): the attachment's own pixel dims, known only
+// once the dom layer has decoded them — null while uploading, while a rematerialized
+// attachment's async load is in flight, or forever for an unreadable/404 image (AUTO
+// just stays disabled — no spinner machinery).
+export function initNaturalDims(init: InitAttachment | null): NaturalDims | null {
+  if (init == null || init.image.kind !== 'ready') return null
+  return init.image.natural
+}
+
 export function toInitSubmitInput(init: InitAttachment | null): InitSubmitInput | null {
   if (init == null) return null
   if (init.image.kind !== 'ready') {
     throw new Error('toInitSubmitInput: image still uploading (caller must guard, §15.4)')
   }
-  return { path: init.image.path, strength: init.strength, holdMeaning: init.holdMeaning, mask: init.mask }
+  return {
+    path: init.image.path,
+    natural: init.image.natural,
+    strength: init.strength,
+    holdMeaning: init.holdMeaning,
+    mask: init.mask,
+  }
 }
 
 // MASK is locked (not just visually disabled — the §15.6 recompose asserts base is
@@ -193,7 +218,9 @@ export function deriveInitFromBase(baseValues: Record<string, unknown>): InitAtt
   const slash = rawPath.lastIndexOf('/')
   const name = slash >= 0 ? rawPath.slice(slash + 1) : rawPath
   return {
-    image: { kind: 'ready', name, path: rawPath, localUrl: null },
+    // natural starts null — the snapshot carries no pixel dims; the dom layer loads
+    // them async via uploadUrl (§15.8). AUTO stays disabled until they land.
+    image: { kind: 'ready', name, path: rawPath, localUrl: null, natural: null },
     strength: base.kind === 'simple' ? matchStrength(base.weight) : null,
     holdMeaning: semanticOn(baseValues),
     mask: base.kind === 'simple' ? base.mask : null,

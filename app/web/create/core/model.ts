@@ -23,6 +23,11 @@
 //                                               false (no-op) without a ready attachment OR
 //                                               while already open — re-entry must never
 //                                               replace an editor holding unsaved strokes
+//   replaceInit(state, init)                    THE composer.init write path (dom's setInit
+//                                               wraps it): clearing the attachment while
+//                                               aspect === 'auto' reverts aspect to '1:1'
+//                                               in the same transition (§5.1a — AUTO has
+//                                               no referent without an attachment)
 //   dropUnreadableMask(state)                   §15.7: unreadable existing mask -> init.mask
 //                                               = null in the same transition as the
 //                                               'starting blank' toast, so the dead path
@@ -50,7 +55,7 @@ import type { SwipeDirection } from '@kit/reel-strip/core'
 import type { Env } from '@kit/env/core'
 import { feel } from './feel'
 import type { InitAttachment } from './init'
-import type { AspectId, LookId, SeedMode, SizeId, StepsId } from './presets'
+import type { ComposerAspect, LookId, SeedMode, SizeId, StepsId } from './presets'
 
 export type SessionState = 'rendering' | 'stopped' | 'done' | 'failed' | 'imported'
 export type TerminalState = 'done' | 'stopped' | 'failed'
@@ -116,8 +121,10 @@ export type QueueItem = { id: string; position: number; prompt: string; sizeX: n
 
 export type Composer = {
   prompt: string
-  // null = "inherit tweak base" — reachable ONLY while tweak != null.
-  aspect: AspectId | null
+  // null = "inherit tweak base" — reachable ONLY while tweak != null. 'auto' (size to
+  // the attachment's own AR, §5.1a) is reachable ONLY while init != null — replaceInit
+  // models the revert half of that invariant.
+  aspect: ComposerAspect | null
   size: SizeId | null
   steps: StepsId | null // steps_per_scene verbatim (§5.1 — the biggest lever)
   look: LookId | null
@@ -234,6 +241,18 @@ export function openMaskEditor(state: CreateState): boolean {
     saving: false,
   }
   return true
+}
+
+// The one write path for composer.init (every dom route — attach, chip ✕, bar clear,
+// upload failure, tweak rematerialization — goes through main's setInit, which wraps
+// this), so the 'auto' aspect invariant lives here: AUTO means "the attachment's AR",
+// and without an attachment it has no referent — removing the chip visibly reverts the
+// aspect to '1:1' (the fresh default) in the same transition, never leaving a silent
+// dangling AUTO (§5.1a). A REPLACED attachment keeps AUTO: it re-derives from the new
+// image's dims once they are known.
+export function replaceInit(state: CreateState, init: InitAttachment | null): void {
+  state.composer.init = init
+  if (init == null && state.composer.aspect === 'auto') state.composer.aspect = '1:1'
 }
 
 // §15.7's fail-soft ('existing mask not readable — starting blank') completed at the state

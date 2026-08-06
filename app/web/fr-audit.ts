@@ -26,9 +26,10 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   { file: 'create/core/api.ts', coverage: '5/25', partial: 2 },
   { file: 'create/core/feel.ts', coverage: '0/0', partial: 0 },
   { file: 'create/core/gallery.ts', coverage: '3/5', partial: 0 },
-  // §15 weight_mask codec — string domain by declaration; the 4 analyzed are the
-  // incidental numeric-ish helpers.
-  { file: 'create/core/init.ts', coverage: '4/12', partial: 0 },
+  // §15 weight_mask codec — string domain by declaration; the analyzed are the
+  // incidental numeric-ish helpers. 4/12 -> 5/13 with §5.1a: +initNaturalDims (a
+  // field projection, analyzable).
+  { file: 'create/core/init.ts', coverage: '5/13', partial: 0 },
   { file: 'create/core/keys.ts', coverage: '1/1', partial: 0 },
   { file: 'create/core/lightbox.ts', coverage: '1/7', partial: 0 },
   // §15 editor geometry: viewToImage + clampBrushSize analyzed; strokeStamps is an
@@ -42,11 +43,16 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // 3/15 held through the FIFO queue rework (§2.5): -pendingFromQueueSlot,
   // -failSubmission (one-slot contract dead), +findQueueItem, +removeQueueItem —
   // same domain, same checked surface.
-  { file: 'create/core/model.ts', coverage: '3/15', partial: 0 },
+  // 3/15 -> 3/16 with §5.1a: +replaceInit (tagged-union store transition — string/JSON
+  // domain like the rest, model.test.ts is the checked surface).
+  { file: 'create/core/model.ts', coverage: '3/16', partial: 0 },
   // 1/10 -> 2/10 with the SIZE/STEPS split: qualitySteps (unsupported Record read)
   // retired; parseStepsId (numeric exact-match loop, ensures return in 150..600) is
   // fully analyzed alongside dimsTable.
-  { file: 'create/core/presets.ts', coverage: '2/10', partial: 0 },
+  // 2/10 -> 4/13 with the AUTO aspect (§5.1a): +autoDims and +autoDimsMultiple both
+  // fully analyzed (pure numeric — the dims fit and the per-model multiple);
+  // +autoAspectDims unsupported as expected (Record read into the tweak base).
+  { file: 'create/core/presets.ts', coverage: '4/13', partial: 0 },
   { file: 'create/core/surfaces.ts', coverage: '1/2', partial: 0 },
 ]
 

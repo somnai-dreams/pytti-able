@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   deriveInitFromBase,
   formatInitWeight,
+  initNaturalDims,
   maskEditingLocked,
   matchStrength,
   parseInitWeight,
@@ -127,19 +128,57 @@ describe('semanticOn', () => {
   })
 })
 
+describe('initNaturalDims (§5.1a — the AUTO aspect enabling fact)', () => {
+  test('null without an attachment, while uploading, and while dims are unknown', () => {
+    expect(initNaturalDims(null)).toBeNull()
+    expect(
+      initNaturalDims({
+        image: { kind: 'uploading', name: 'a.png', localUrl: 'blob:x' },
+        strength: 'medium',
+        holdMeaning: false,
+        mask: null,
+      }),
+    ).toBeNull()
+    expect(
+      initNaturalDims({
+        image: { kind: 'ready', name: 'a.png', path: '/up/a.png', localUrl: null, natural: null },
+        strength: 'medium',
+        holdMeaning: false,
+        mask: null,
+      }),
+    ).toBeNull()
+  })
+  test('the dims once a ready image knows them', () => {
+    expect(
+      initNaturalDims({
+        image: { kind: 'ready', name: 'a.png', path: '/up/a.png', localUrl: 'blob:x', natural: { width: 1200, height: 800 } },
+        strength: 'medium',
+        holdMeaning: false,
+        mask: null,
+      }),
+    ).toEqual({ width: 1200, height: 800 })
+  })
+})
+
 describe('toInitSubmitInput', () => {
   test('null passes through', () => {
     expect(toInitSubmitInput(null)).toBeNull()
   })
-  test('ready image maps to the draft view', () => {
+  test('ready image maps to the draft view, natural dims riding along (§5.1a)', () => {
     expect(
       toInitSubmitInput({
-        image: { kind: 'ready', name: 'a.png', path: '/up/a.png', localUrl: 'blob:x' },
+        image: { kind: 'ready', name: 'a.png', path: '/up/a.png', localUrl: 'blob:x', natural: { width: 1200, height: 800 } },
         strength: 'medium',
         holdMeaning: true,
         mask: { path: '/up/m.png', inverted: true },
       }),
-    ).toEqual({ path: '/up/a.png', strength: 'medium', holdMeaning: true, mask: { path: '/up/m.png', inverted: true } })
+    ).toEqual({
+      path: '/up/a.png',
+      natural: { width: 1200, height: 800 },
+      strength: 'medium',
+      holdMeaning: true,
+      mask: { path: '/up/m.png', inverted: true },
+    })
   })
   test('uploading image throws (A1 guard is the caller contract)', () => {
     expect(() =>
@@ -174,7 +213,7 @@ describe('deriveInitFromBase (§15.8)', () => {
     expect(deriveInitFromBase({ init_image: '' })).toBeNull()
     expect(deriveInitFromBase({ init_image: 42 })).toBeNull()
   })
-  test('preset weight rematerializes strength + mask + hold', () => {
+  test('preset weight rematerializes strength + mask + hold; natural starts null (async load, §15.8)', () => {
     expect(
       deriveInitFromBase({
         init_image: '/up/tree.png',
@@ -182,7 +221,7 @@ describe('deriveInitFromBase (§15.8)', () => {
         semantic_init_weight: '4',
       }),
     ).toEqual({
-      image: { kind: 'ready', name: 'tree.png', path: '/up/tree.png', localUrl: null },
+      image: { kind: 'ready', name: 'tree.png', path: '/up/tree.png', localUrl: null, natural: null },
       strength: 'medium',
       holdMeaning: true,
       mask: { path: '/up/mask-tree.png', inverted: true },

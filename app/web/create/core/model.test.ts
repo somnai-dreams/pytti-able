@@ -18,6 +18,7 @@ import {
   reconcileSessions,
   removeQueueItem,
   removeTile,
+  replaceInit,
   showToast,
   type Tile,
 } from './model'
@@ -355,13 +356,46 @@ describe('showToast', () => {
 
 function readyInit(over: Partial<InitAttachment> = {}): InitAttachment {
   return {
-    image: { kind: 'ready', name: 'img.png', path: '/uploads/img.png', localUrl: null },
+    image: { kind: 'ready', name: 'img.png', path: '/uploads/img.png', localUrl: null, natural: null },
     strength: 'medium',
     holdMeaning: false,
     mask: null,
     ...over,
   }
 }
+
+describe('replaceInit (§5.1a — AUTO has no referent without an attachment)', () => {
+  // Reads the aspect at the declared union width: the literal-narrowing from the
+  // assignment above each call would otherwise defeat the post-transition assert.
+  const aspectOf = (s: CreateState): CreateState['composer']['aspect'] => s.composer.aspect
+
+  test('clearing the attachment while AUTO is selected reverts aspect to 1:1', () => {
+    const s = state()
+    s.composer.init = readyInit()
+    s.composer.aspect = 'auto'
+    replaceInit(s, null)
+    expect(s.composer.init).toBeNull()
+    expect(aspectOf(s)).toBe('1:1')
+  })
+
+  test('clearing with a table aspect leaves the aspect untouched', () => {
+    const s = state()
+    s.composer.init = readyInit()
+    s.composer.aspect = '16:9'
+    replaceInit(s, null)
+    expect(aspectOf(s)).toBe('16:9')
+  })
+
+  test('REPLACING the attachment keeps AUTO (it re-derives from the new image)', () => {
+    const s = state()
+    s.composer.init = readyInit()
+    s.composer.aspect = 'auto'
+    const next = readyInit({ image: { kind: 'uploading', name: 'b.png', localUrl: 'blob:y' } })
+    replaceInit(s, next)
+    expect(s.composer.init).toBe(next)
+    expect(aspectOf(s)).toBe('auto')
+  })
+})
 
 describe('openMaskEditor (§15.7)', () => {
   test('opens with defaults, closes the popover, seeds inverted from the existing mask', () => {
