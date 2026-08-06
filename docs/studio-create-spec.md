@@ -259,7 +259,8 @@ app/web/
                             #   (state slice, event) -> new slice           [+ .test.ts]
       gallery.ts            # deriveGallery(state) -> GalleryEntry[]; makeMasonrySource;
                             #   entry key/size accessors                    [+ .test.ts]
-      lightbox.ts           # makeReelSource(tile); scrub transitions (pin/follow rule);
+      lightbox.ts           # makeFramesSource(tile) + makeJobsSource(tiles); two-axis
+                            #   scrub transitions (pin/follow + dominant-axis rules);
                             #   openAnchor geometry inputs                  [+ .test.ts]
       keys.ts               # KeyFacts -> Intent union (exhaustive)         [+ .test.ts]
       surfaces.ts           # Z-ladder consts; surfaces(state) -> Surface<CreateView>[];
@@ -273,7 +274,7 @@ app/web/
       renderBar.ts          # prompt bar + settings popover projection
       renderGallery.ts      # masonry walk -> absolutely-positioned tile nodes
                             #   (JIT node map, mark-and-sweep eviction)
-      renderLightbox.ts     # stage double-buffer, reel strip, actions row
+      renderLightbox.ts     # stage double-buffer, jobs + frames reels, actions row
       renderTop.ts          # toplayer root: orderSurfaces -> confirm / toast render
 ```
 
@@ -370,10 +371,15 @@ type Composer = {
   popoverOpen: boolean
 }
 
+type LightboxSwipe = { direction: SwipeDirection; accumulated: number }
+
 type Lightbox = {
-  sessionId: string
+  sessionId: string              // the OPEN JOB — the vertical axis's position
   frame: number | 'follow'       // 1-based; 'follow' tracks tile.frames live
-  swipe: { direction: SwipeDirection; accumulated: number }   // reel-strip machine
+  swipeX: LightboxSwipe          // frames axis (horizontal wheel) — reel-strip machine
+  swipeY: LightboxSwipe          // jobs axis (vertical wheel) — reel-strip machine
+                                 // dominant-axis rule (§8): at most ONE accumulator is
+                                 // non-zero at a time
   anchor: { x: number; y: number; sizeX: number; sizeY: number }  // tile rect at open,
                                  // copied from the masonry cursor (never re-measured)
 }
@@ -666,15 +672,19 @@ auto-started or was cancelled elsewhere: re-fetch `GET /api/queue`, toast
 
 **A9 — Open lightbox.** Click a session tile with `frames >= 1` (0-frame tiles
 ignore clicks — nothing to show). `lightbox = { sessionId, frame:
-state === 'rendering' ? 'follow' : tile.frames, swipe: still, anchor: <copied
-cursor rect> }`. The anchor rect is **copied from the masonry cursor during the
-emit walk** (stored per-tile in the DOM node map at placement time) — never
-measured from the DOM.
+state === 'rendering' ? 'follow' : tile.frames, swipeX: still, swipeY: still,
+anchor: <copied cursor rect> }`. The anchor rect is **copied from the masonry
+cursor during the emit walk** (stored per-tile in the DOM node map at placement
+time) — never measured from the DOM.
 
-**A10 — Scrub.** Wheel over the lightbox drives the reel-strip swipe machine
-(§8). `←`/`→` step one frame. Clicking a strip thumb jumps to it. Setting frame
-to `tile.frames` while the session renders → `'follow'` (pin releases at the
-newest frame). Any backward step pins.
+**A10 — Two-axis scrub.** Wheel over the lightbox drives one reel-strip swipe
+machine per axis (§8), dominant axis only. HORIZONTAL wheel (and `←`/`→`) scrubs
+frames within the open job; VERTICAL wheel (and `↑`/`↓`) pages between jobs —
+sessions with `frames >= 1`, gallery order. Clicking a reel thumb jumps to that
+frame / that job. Frame pin/follow rule: setting frame to `tile.frames` while
+the session renders → `'follow'` (pin releases at the newest frame); any
+backward step pins. Landing on a job (wheel, arrow, or jobs-reel click) always
+lands on its LATEST frame — so a rendering job lands following.
 
 **A11 — Popover.** Gear button toggles; outside-click and Esc close. Popover
 edits mutate `composer` only — **no network on popover interaction** (nothing
@@ -799,13 +809,34 @@ placeholder, no request.
 
 ---
 
-## 8. Lightbox — kit/reel-strip
+## 8. Lightbox — two-axis navigation, kit/reel-strip
 
-### 8.1 Source and navigation
+Directive (2026-08-05, verbatim): *"lets change the lightbox. vertical scroll
+and reel changes between the different jobs. horizontal scroll and a smaller
+bottom reel changes between the frames of the job."*
+
+Two axes, TikTok-style paging:
+
+- **VERTICAL = JOBS.** Vertical wheel (and `↑`/`↓`) pages to the previous/next
+  session in the gallery's display order (`tiles` newest-first), among sessions
+  with `frames >= 1` — frameless sessions are skipped; rendering sessions with
+  frames are live jobs and stay in. The JOBS REEL (vertical strip, right edge,
+  the larger reel) shows one thumb per job — its LATEST frame, re-derived every
+  walk so a rendering job's thumb advances as frames land. Click jumps to that
+  job. Switching jobs lands on the target job's latest frame (`'follow'` when
+  it renders).
+- **HORIZONTAL = FRAMES.** Horizontal wheel (and `←`/`→`) scrubs frames within
+  the open job. The FRAMES REEL (horizontal strip, bottom band above the
+  chrome, the smaller reel — the image stays the hero) shows the job's frames;
+  click jumps. A rendering job's new frames appear here as they land (positions
+  walk `tile.frames`); when following, the focus rides the newest frame; a
+  back-scrubbed pin is never yanked.
+
+### 8.1 Sources and navigation
 
 ```ts
-// core/lightbox.ts — one group: the session; items: its frames 1..N
-function makeReelSource(tile: Tile): ReelSource<Tile> {
+// core/lightbox.ts — frames axis: one group = the open session; items: frames 1..N
+function makeFramesSource(tile: Tile): ReelSource<Tile> {
   return {
     groups: [tile],
     isGroupHidden: () => false,
@@ -814,22 +845,53 @@ function makeReelSource(tile: Tile): ReelSource<Tile> {
     isItemHardHidden: () => false,
   }
 }
+
+// jobs axis: one group per session in gallery order, one item each; frameless hidden
+function makeJobsSource(tiles: readonly Tile[]): ReelSource<Tile> {
+  return {
+    groups: tiles,
+    isGroupHidden: (tile) => tile.frames < 1,
+    itemCount: () => 1,
+    isItemHidden: () => false,
+    isItemHardHidden: () => false,
+  }
+}
 ```
 
 `ItemRef.item` is 0-based; frame indices are 1-based (`frame = item + 1`) — the
-conversion lives in `core/lightbox.ts` only, asserted at the boundary.
+conversion lives in `core/lightbox.ts` only, asserted at the boundary. On the
+jobs axis, `ItemRef.group` is the tile's index in `tiles`; `jobRef(tiles,
+sessionId)` derives it (the id is the stored fact, the index is derived).
 
-- Wheel: `swipeStep(direction, accumulated, deltaY, next, prev,
-  mjFeel.swipeThreshold)` with `next = reelNext(source, ref)`, `prev =
-  reelPrev(source, ref)`. Navigate result → set `frame` (pin/follow rule from
-  A10). Swipe state persists in `lightbox.swipe`.
-- Strip: vertical, right edge. `reelAnchorScan(source, stripCenterY,
-  mjFeel.itemSize = 56, mjFeel.groupGapY = 8, anchorRef)` yields positions;
-  `anchorMorph(accumulated, threshold, mjFeel.anchorSize = 68, itemSize)` sizes
-  the focused vs incoming thumbs mid-swipe; `anchorTravelY` moves the focused
-  thumb. Strip thumbs use `thumbUrl(id, frame)`.
-- Long sessions: the strip renders only thumbs whose scan y falls in the strip
-  viewport (the scan's positions are already y-ordered; slice by band).
+- **Dominant axis** (`dominantAxis`): one swipe machine per axis (`swipeX`,
+  `swipeY`), and a live gesture owns its axis until its accumulator decays to
+  rest — at most one accumulator is non-zero at a time, and the other axis's
+  wheel input is discarded meanwhile (trackpads leak small cross-axis deltas
+  mid-gesture; those must not hop jobs during a frame scrub). From rest the
+  larger `|delta|` picks the axis; ties go to the jobs axis (mouse wheels emit
+  `deltaY` only, so a plain wheel pages jobs).
+- **Wheel** (`applyWheel(lightbox, tiles, deltaX, deltaY)`, one step per frame):
+  `swipeStep(direction, accumulated, delta, next, prev, threshold)` with
+  `next/prev = reelNext/reelPrev(source, ref)` on the dominant axis. Thresholds
+  page, not free-scroll: frames axis `feel.swipeThreshold = 60`; jobs axis
+  `feel.jobSwipeThreshold = 120` — a job hop is a deliberate page turn, a frame
+  step is a scrub. A frames-axis navigate sets `frame` (pin/follow rule, A10);
+  a jobs-axis navigate lands on the target job's latest frame and resets both
+  machines to rest.
+- **Jobs reel**: vertical, right edge. `reelAnchorScan(jobsSource, ∞,
+  mjFeel.itemSize = 56, mjFeel.groupGapY = 8, jobRef)` yields positions (each
+  job is its own group, so the gap separates every pair and a swipe always
+  crosses a group edge); `anchorMorph(swipeY.accumulated, jobThreshold,
+  mjFeel.anchorSize = 68, itemSize)` sizes the focused vs incoming thumbs
+  mid-swipe; `anchorTravelY` moves the focused thumb. Thumbs use
+  `thumbUrl(id, tile.frames)` — the latest frame, derived.
+- **Frames reel**: horizontal, bottom band. Same scan/morph math on the x axis
+  with the smaller metrics `feel.frameItemSize = 40`, `feel.frameAnchorSize =
+  48`, gap 0 (one group), driven by `swipeX`. Thumbs use `thumbUrl(id, frame)`.
+  The thumb pool is keyed by frame index and valid for one session — a job
+  switch drops it wholesale.
+- Long sessions / many jobs: each strip renders only thumbs whose scan position
+  falls in its band (the scan's positions are already ordered; slice by band).
 
 ### 8.2 Stage, open/close, chrome
 
@@ -838,17 +900,20 @@ conversion lives in `core/lightbox.ts` only, asserted at the boundary.
   precedent). Preload `frame ± 1`.
 - **Open morph**: spring-driven FLIP from `lightbox.anchor` (the copied masonry
   rect, A9) to the fitted stage rect (`fit(aspect, stageX, stageY)` from
-  kit/midui). One `Spring` per axis-pair (x, y, sizeX, sizeY) stepped on the
-  fixed 6 ms timestep (`springStepCount` guard); scrim opacity tracks the size
-  spring's progress. Close reverses to the tile's **current** placement rect (re-
-  copied at close time from the node cache — the tile may have moved). If the
-  tile was evicted (scrolled far), fall back to a centered fade. Reduced motion
-  (`env.reducedMotion`) → `springGoToEnd` immediately.
+  kit/midui; the stage area is the viewport minus the jobs band on the right and
+  the frames band + chrome band at the bottom). One `Spring` per axis-pair (x,
+  y, sizeX, sizeY) stepped on the fixed 6 ms timestep (`springStepCount` guard);
+  scrim opacity tracks the size spring's progress. Close reverses to the tile's
+  **current** placement rect (re-copied at close time from the node cache — the
+  tile may have moved; after job switches this is the CURRENT job's tile). If
+  the tile was evicted (scrolled far), fall back to a centered fade. Reduced
+  motion (`env.reducedMotion`) → `springGoToEnd` immediately.
 - Chrome (bottom band): full `scenes` text (1 line, ellipsis, click-to-expand to
   3 lines), params line, actions row. Params line from summary data immediately —
   `512×512 · 200/200 steps · seed 1234 · frame 12/30` — and gains the model name
-  (`· Limited Palette`) once `tile.detail` resolves (fetched on open, §4
-  `detail`). Skeleton dashes while loading.
+  (`· Limited Palette`) once `tile.detail` resolves (fetched on open AND on
+  every job switch, §4 `detail` — cached forever per session). Skeleton dashes
+  while loading. Chrome and actions always describe the OPEN job.
 - Actions row, exactly: `⟳ RE-RUN` (A3) · `✎ TWEAK` (A4) · `⚙ ADVANCED` (A5) ·
   `↓ DOWNLOAD` (A6, shows a progress ring while `download` is active for this
   session) · `✕ DELETE` (A7, disabled per its guards).
@@ -904,6 +969,7 @@ covers Cmd, `ctrl` for non-Mac parity) → `Intent`:
 | `Esc` | `dismiss` | global (topmost surface; else blur bar) |
 | `/` | `focus-prompt` | global, unless `inInput` |
 | `←` / `→` | `frame-prev` / `frame-next` | lightbox open only |
+| `↑` / `↓` | `job-prev` / `job-next` | lightbox open only |
 
 Exhaustive switch on the intent union in `dom/main.ts`. No other bindings.
 
@@ -986,27 +1052,30 @@ Exactly the chassis-notes composition:
 └──────────────┘
 ```
 
-### 10.4 Lightbox (kit/reel-strip)
+### 10.4 Lightbox (kit/reel-strip, two axes)
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ ████████████████████████████ scrim ████████████████████████████████████████│
 │                                                                      ┌───┐ │
-│                ┌───────────────────────────────┐                     │ ▪ │ │
-│                │                               │                     │ ▪ │ │
-│                │                               │                     ├───┤ │
-│                │         frame 12 / 30         │                     │▐█▌│ │ ← focused 68px
-│                │        (PNG, dbl-buffer)      │                     ├───┤ │    (anchorMorph)
-│                │                               │                     │ ▪ │ │
-│                │                               │                     │ ▪ │ │ ← strip 56px thumbs
+│                ┌───────────────────────────────┐                     │ ▪ │ │ ← jobs reel:
+│                │                               │                     │ ▪ │ │   one thumb per
+│                │                               │                     ├───┤ │   session (its
+│                │         frame 12 / 30         │                     │▐█▌│ │ ← latest frame);
+│                │        (PNG, dbl-buffer)      │                     ├───┤ │   focused 68px
+│                │                               │                     │ ▪ │ │   (anchorMorph),
+│                │                               │                     │ ▪ │ │   resting 56px
 │                └───────────────────────────────┘                     └───┘ │
-│                                                                            │
+│                    ▫ ▫ ▫ ▫ ▫ ▪ ▫ ▫ ▫ ▫                                     │ ← frames reel:
+│                                                                            │   40px, focus 48px
 │  infinite fractal mushroom forest | bioluminescent mycelium network | …    │
 │  512×512 · 200/200 steps · Limited Palette · seed 3982117 · frame 12/30    │
 │  ⟳ RE-RUN   ✎ TWEAK   ⚙ ADVANCED   ↓ DOWNLOAD   ✕ DELETE                   │
 └────────────────────────────────────────────────────────────────────────────┘
-  wheel = scrub (swipe machine) · ←/→ = step · Esc = close (morph back to tile)
-  live session: follows newest frame; any back-scrub pins; scrub-to-end refollows
+  vertical wheel / ↑↓ = page JOBS (frameless sessions skipped; lands on latest)
+  horizontal wheel / ←→ = scrub FRAMES · click either reel = jump · Esc = close
+  live job: follows newest frame; any back-scrub pins; scrub-to-end refollows;
+  its jobs-reel thumb and frames reel grow as frames land
 ```
 
 ### 10.5 Delete confirm (toplayer, above lightbox)
@@ -1134,12 +1203,17 @@ DRAFT size / 1:1 / 150 steps so each finishes in ~1 minute on this machine.
     images arrive.
 17. Clicking a finished tile opens the lightbox with a morph from the tile's
     rect; Esc morphs it back to the same tile.
-18. Lightbox: mouse wheel scrubs frames (strip's focused thumb grows/shrinks
-    through the swipe); `←`/`→` step exactly one frame; clicking a strip thumb
-    jumps to it; the counter reads `frame i/N` correctly (1-based, N = frames).
+18. Lightbox frames axis: horizontal wheel scrubs frames (the bottom reel's
+    focused thumb grows/shrinks through the swipe); `←`/`→` step exactly one
+    frame; clicking a bottom-reel thumb jumps to it; the counter reads
+    `frame i/N` correctly (1-based, N = frames).
+18b. Lightbox jobs axis: vertical wheel pages to the previous/next session with
+    frames (gallery order, frameless sessions skipped); `↑`/`↓` step exactly
+    one job; clicking a jobs-reel thumb jumps to that job; every job landing
+    shows that job's LATEST frame, and prompt/params/actions switch with it.
 19. ⚑ Opening the lightbox on a rendering session follows the newest frame as
-    it lands; scrubbing backward pins; scrubbing forward to the newest frame
-    resumes following.
+    it lands (the bottom reel grows with it); scrubbing backward pins;
+    scrubbing forward to the newest frame resumes following.
 20. The lightbox shows the full prompt (`scenes`) text and a params line
     including dims, steps, model name, seed.
 21. RE-RUN creates a new session whose config matches the source except the

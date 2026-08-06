@@ -12,7 +12,7 @@ import { artifactUrl } from '../core/api'
 import { feel } from '../core/feel'
 import { deriveInitFromBase, type InitAttachment, type InitStrengthId, toInitSubmitInput } from '../core/init'
 import { keyIntent } from '../core/keys'
-import { applyWheel, jumpToFrame, stepFrame } from '../core/lightbox'
+import { applyWheel, jumpToFrame, jumpToJob, stepFrame, stepJob } from '../core/lightbox'
 import {
   applyEncodeEvent,
   applyFrameEvent,
@@ -116,7 +116,8 @@ const state: CreateState = {
 }
 
 // --- per-frame scratch beside the store (never in it)
-let wheelDelta = 0
+let wheelDeltaX = 0
+let wheelDeltaY = 0
 let springAcc = 0
 let lastFrameTime = performance.now()
 let wasAnimating = false // did the previous frame schedule this one to continue motion?
@@ -144,15 +145,16 @@ const loop = rafRenderLoop((now) => {
   const steps = springStepCount(springAcc, feel.maxSpringStepsPerFrame)
   springAcc -= steps * msPerAnimationStep
 
-  // The wheel-swipe machine steps once per frame: this frame's accumulated wheel input,
-  // or a zero-delta decay step while the accumulator eases back to rest.
+  // The wheel-swipe machine steps once per frame on the dominant axis: this frame's
+  // accumulated wheel input, or a zero-delta decay step while an accumulator eases back
+  // to rest. A vertical navigation switches jobs — fetch the new job's detail.
   const lb = state.lightbox
-  if (lb != null && (wheelDelta !== 0 || lb.swipe.accumulated !== 0)) {
-    const tile = findTile(state.tiles, lb.sessionId)
-    if (tile == null) throw new Error(`lightbox on unknown session ${lb.sessionId}`)
-    state.lightbox = applyWheel(lb, tile, wheelDelta)
+  if (lb != null && (wheelDeltaX !== 0 || wheelDeltaY !== 0 || lb.swipeX.accumulated !== 0 || lb.swipeY.accumulated !== 0)) {
+    state.lightbox = applyWheel(lb, state.tiles, wheelDeltaX, wheelDeltaY)
+    if (state.lightbox.sessionId !== lb.sessionId) fetchLightboxDetail()
   }
-  wheelDelta = 0
+  wheelDeltaX = 0
+  wheelDeltaY = 0
 
   bootSkelEl.style.display = state.boot.phase === 'loading' ? '' : 'none'
   bootFailEl.style.display = state.boot.phase === 'failed' ? '' : 'none'
@@ -172,7 +174,9 @@ const loop = rafRenderLoop((now) => {
   if (renderLightbox(state, steps)) animating = true
   if (renderMask(state, steps)) animating = true
   if (renderTop(state, steps)) animating = true
-  if (state.lightbox != null && state.lightbox.swipe.accumulated !== 0) animating = true
+  if (state.lightbox != null && (state.lightbox.swipeX.accumulated !== 0 || state.lightbox.swipeY.accumulated !== 0)) {
+    animating = true
+  }
   wasAnimating = animating
   if (animating) loop.scheduleRender()
 })
@@ -241,6 +245,16 @@ async function ensureDetail(tile: Tile): Promise<Record<string, unknown>> {
   tile.detail = config
   loop.scheduleRender()
   return config
+}
+
+// After any job-axis navigation: the params line wants the NEW session's model name.
+// ensureDetail is a no-op fetch-wise once the detail is cached.
+function fetchLightboxDetail(): void {
+  const lb = state.lightbox
+  if (lb == null) return
+  const tile = findTile(state.tiles, lb.sessionId)
+  if (tile == null) throw new Error(`lightbox on unknown session ${lb.sessionId}`)
+  void ensureDetail(tile).catch(toastError)
 }
 
 function runFollowUp(follow: FollowUp): void {
@@ -655,7 +669,8 @@ function openLightbox(id: string): void {
   state.lightbox = {
     sessionId: id,
     frame: tile.state === 'rendering' ? 'follow' : tile.frames,
-    swipe: { direction: 'still', accumulated: 0 },
+    swipeX: { direction: 'still', accumulated: 0 },
+    swipeY: { direction: 'still', accumulated: 0 },
     anchor: rect,
   }
   lightboxOpenMorph(rect)
@@ -750,7 +765,8 @@ initLightbox({
   stage: mustGet('lb-stage'),
   imgA: mustGet('lb-img-a') as HTMLImageElement,
   imgB: mustGet('lb-img-b') as HTMLImageElement,
-  strip: mustGet('lb-strip'),
+  jobs: mustGet('lb-jobs'),
+  frames: mustGet('lb-frames'),
   prompt: mustGet('lb-prompt'),
   params: mustGet('lb-params'),
   download: mustGet('lb-download') as HTMLButtonElement,
@@ -875,13 +891,14 @@ scrollerEl.addEventListener('click', (e) => {
 lightboxEl.addEventListener('wheel', (e) => {
   e.preventDefault()
   if (state.lightbox == null) return
-  wheelDelta += e.deltaY
+  wheelDeltaX += e.deltaX
+  wheelDeltaY += e.deltaY
   loop.scheduleRender()
 }, { passive: false })
 
 mustGet('lb-scrim').addEventListener('click', closeLightbox)
 
-mustGet('lb-strip').addEventListener('click', (e) => {
+mustGet('lb-frames').addEventListener('click', (e) => {
   const target = (e.target as HTMLElement).closest<HTMLElement>('.lb-thumb')
   const lb = state.lightbox
   if (target == null || lb == null) return
@@ -889,6 +906,17 @@ mustGet('lb-strip').addEventListener('click', (e) => {
   const tile = findTile(state.tiles, lb.sessionId)
   if (tile == null || !Number.isInteger(frame)) throw new Error(`strip click on bad frame "${target.dataset['frame']}"`)
   state.lightbox = jumpToFrame(lb, tile, frame)
+  loop.scheduleRender()
+})
+
+mustGet('lb-jobs').addEventListener('click', (e) => {
+  const target = (e.target as HTMLElement).closest<HTMLElement>('.lb-thumb')
+  const lb = state.lightbox
+  if (target == null || lb == null) return
+  const id = target.dataset['session']
+  if (id == null) throw new Error('jobs reel thumb without a session id')
+  state.lightbox = jumpToJob(lb, state.tiles, id)
+  fetchLightboxDetail()
   loop.scheduleRender()
 })
 
@@ -969,6 +997,16 @@ window.addEventListener('keydown', (e) => {
       const tile = findTile(state.tiles, lb.sessionId)
       if (tile == null) throw new Error(`lightbox on unknown session ${lb.sessionId}`)
       state.lightbox = stepFrame(lb, tile, intent === 'frame-next' ? 1 : -1)
+      loop.scheduleRender()
+      return
+    }
+    case 'job-prev':
+    case 'job-next': {
+      const lb = state.lightbox
+      if (lb == null) return // lightbox-scoped; arrows keep scrolling the gallery otherwise
+      e.preventDefault()
+      state.lightbox = stepJob(lb, state.tiles, intent === 'job-next' ? 1 : -1)
+      if (state.lightbox.sessionId !== lb.sessionId) fetchLightboxDetail()
       loop.scheduleRender()
       return
     }
