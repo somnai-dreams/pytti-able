@@ -939,6 +939,30 @@ class RenderManager:
                 proc.wait()
             self._finalize(sid, proc.returncode, list(self._fail_tail))
 
+    @staticmethod
+    def _stream_segments(stream):
+        """Yield output segments split on BOTH newline and carriage return.
+
+        tqdm redraws its bar with bare '\\r' and only writes '\\n' when the bar
+        CLOSES — a readline() pump therefore receives an entire render's
+        progress as one blob at the end (measured: a full mlx_full run's tqdm
+        arrived as a single line), which is why stepsDone sat at 0 until
+        terminal. Character reads are cheap at render-log volume.
+        """
+        buf: list = []
+        while True:
+            ch = stream.read(1)
+            if ch == "":
+                if buf:
+                    yield "".join(buf)
+                return
+            if ch == "\n" or ch == "\r":
+                if buf:
+                    yield "".join(buf)
+                    buf.clear()
+                continue
+            buf.append(ch)
+
     def _pump_stdout_inner(self, proc: subprocess.Popen, sid: str):
         values = self.live_values or {}
         pre_steps = int(values.get("pre_animation_steps", 0) or 0)
@@ -952,19 +976,22 @@ class RenderManager:
         fail_tail = self._fail_tail
         rendering_announced = False
 
-        for line in iter(proc.stdout.readline, ""):
+        for line in self._stream_segments(proc.stdout):
           try:
-            text = ANSI_ESCAPE.sub("", line.split("\r")[-1].rstrip())
+            text = ANSI_ESCAPE.sub("", line.rstrip())
             if not text.strip():
                 continue
-            fail_tail.append(text)
-            is_noise = bool(LOG_NOISE.search(text))
-
             m = TQDM_RE.search(text)
             if m and scene_prompts_seen == 0:
                 # model-download progress bars also match TQDM_RE; real
                 # training bars only appear after the first "Running prompt:"
                 m = None
+            if m is None:
+                # training-bar redraws arrive one segment per '\r' now — keep
+                # them out of the failure excerpt (a crash tail of progress
+                # bars buries the actual error).
+                fail_tail.append(text)
+            is_noise = bool(LOG_NOISE.search(text))
             if m:
                 if not rendering_announced:
                     rendering_announced = True

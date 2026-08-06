@@ -859,5 +859,51 @@ class TestStopEndpoint(QueueBase):
         self.assertFalse(self.manager.stop_requested)
 
 
+class TestStreamSegments(unittest.TestCase):
+    """The pump's stream splitter (task #9 root cause): tqdm redraws with bare
+    '\\r' and only newlines when the bar closes, so a readline() pump received a
+    whole render's progress as one end-of-run blob — stepsDone sat at 0 for the
+    entire render. Segments must arrive per redraw."""
+
+    def segments(self, raw: str) -> list:
+        return list(server.RenderManager._stream_segments(io.StringIO(raw)))
+
+    def test_cr_redraws_yield_one_segment_each(self):
+        raw = " 0%| | 0/10 [00:00<?, ?it/s]\r10%|X| 1/10 [00:00<00:01, 6.7it/s]\r20%|XX| 2/10 [00:00<00:01, 7.1it/s]\n"
+        self.assertEqual(
+            [s.strip() for s in self.segments(raw)],
+            [
+                "0%| | 0/10 [00:00<?, ?it/s]",
+                "10%|X| 1/10 [00:00<00:01, 6.7it/s]",
+                "20%|XX| 2/10 [00:00<00:01, 7.1it/s]",
+            ],
+        )
+
+    def test_plain_lines_unchanged_and_unterminated_tail_flushes(self):
+        raw = "Running prompt: a check\npartial tail without newline"
+        self.assertEqual(
+            self.segments(raw),
+            ["Running prompt: a check", "partial tail without newline"],
+        )
+
+    def test_crlf_and_empty_runs_yield_no_empty_segments(self):
+        self.assertEqual(self.segments("a\r\nb\n\n\r\rc\n"), ["a", "b", "c"])
+
+    def test_progress_matches_every_redraw_segment(self):
+        # End-to-end through the regexes the pump uses: every redraw segment
+        # after the scene gate must be a countable progress event.
+        raw = "Running prompt: x\n 1/50 [00:00<00:20, 2.2it/s]\r 2/50 [00:00<00:20, 2.3it/s]\r 3/50 [00:01<00:19, 2.4it/s]\n"
+        steps = []
+        gated = False
+        for seg in self.segments(raw):
+            if server.SCENE_RE.search(seg):
+                gated = True
+                continue
+            m = server.TQDM_RE.search(seg)
+            if m and gated:
+                steps.append(int(m.group(1)))
+        self.assertEqual(steps, [1, 2, 3])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
