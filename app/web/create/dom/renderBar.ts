@@ -3,10 +3,11 @@
 // popover anchors to the bar through the shell CSS (layout data, never measured) and
 // springs open/closed. §15 additions: the init chip (thumb · MASK · ✕) between the
 // input and the gear, and the INIT row (strength presets + HOLD + torch note) that
-// exists iff an image is attached.
+// exists iff an image is attached. §5.1a: the ASPECT row's AUTO chip is disabled
+// (MASK-chip surface treatment) until the attachment's natural dims are known.
 import { spring, springGoToEnd, springMostlyDone, springStep } from '@kit/midui/motion'
 import { uploadUrl } from '../core/api'
-import { maskEditingLocked } from '../core/init'
+import { initNaturalDims, maskEditingLocked } from '../core/init'
 import type { CreateState } from '../core/model'
 import { STEPS_IDS } from '../core/presets'
 
@@ -16,6 +17,7 @@ let attachEl: HTMLButtonElement
 let popEl: HTMLElement
 let sseEl: HTMLElement
 let chips: { el: HTMLElement; row: 'aspect' | 'size' | 'steps' | 'look' | 'init'; value: string | null }[] = []
+let aspectAutoEl: HTMLButtonElement
 let seedRandomEl: HTMLElement
 let seedLockedEl: HTMLElement
 let stepsCustomEl: HTMLInputElement
@@ -82,6 +84,7 @@ export function initBar(deps: {
   for (const el of popEl.querySelectorAll<HTMLElement>('[data-init-strength]')) {
     chips.push({ el, row: 'init', value: el.dataset['initStrength'] === 'custom' ? null : el.dataset['initStrength']! })
   }
+  aspectAutoEl = mustQuery('[data-aspect="auto"]') as HTMLButtonElement
   seedRandomEl = mustQuery('[data-seed="random"]')
   seedLockedEl = mustQuery('[data-seed="locked"]')
   stepsCustomEl = mustQuery('#steps-custom') as HTMLInputElement
@@ -194,6 +197,13 @@ export function renderBar(state: CreateState, springSteps: number): boolean {
       stepsCustomEl.classList.remove('invalid')
     }
     stepsCustomEl.classList.toggle('sel', !STEPS_IDS.includes(state.composer.steps))
+    // AUTO is selectable only while the attachment's own dims are known (§5.1a) —
+    // same surface treatment as the MASK chip's locked states (disabled + title).
+    const autoReady = initNaturalDims(init) != null
+    aspectAutoEl.disabled = !autoReady
+    aspectAutoEl.title = autoReady
+      ? 'size the canvas to the image’s aspect ratio'
+      : 'attach an image to size the canvas from it'
     const seed = state.composer.seedMode
     seedRandomEl.classList.toggle('sel', seed.kind === 'random')
     seedLockedEl.classList.toggle('sel', seed.kind === 'locked')

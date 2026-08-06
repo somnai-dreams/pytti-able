@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   ASPECT_IDS,
+  autoDims,
   composeSubmission,
   composerDims,
   DEFAULT_STEPS,
@@ -29,6 +30,30 @@ describe('resolveDims', () => {
     expect(resolveDims('3:4', 'full')).toEqual({ width: 448, height: 576 })
     expect(resolveDims('4:3', 'full')).toEqual({ width: 576, height: 448 })
     expect(resolveDims('16:9', 'full')).toEqual({ width: 640, height: 360 })
+  })
+})
+
+describe('autoDims (§5.1a — AR from the attachment, area from the size class)', () => {
+  test('square attachment reproduces the 1:1 table pair exactly (budget = class²)', () => {
+    expect(autoDims({ width: 1000, height: 1000 }, 512, 8)).toEqual({ width: 512, height: 512 })
+    expect(autoDims({ width: 3000, height: 3000 }, 256, 8)).toEqual({ width: 256, height: 256 })
+    expect(autoDims({ width: 512, height: 512 }, 512, 16)).toEqual({ width: 512, height: 512 })
+  })
+  test('AR preserved, both dims on the multiple, area near the budget (16:9 photo)', () => {
+    // ideal 682.7 x 384; ÷8 rounds to 680 x 384 — 0.4% off the true AR, area 261120 ≈ 512²
+    expect(autoDims({ width: 1920, height: 1080 }, 512, 8)).toEqual({ width: 680, height: 384 })
+    // ÷16: 688 x 384 — VQGAN renders these dims EXACTLY (stride-16 latents, no engine floor drift)
+    expect(autoDims({ width: 1920, height: 1080 }, 512, 16)).toEqual({ width: 688, height: 384 })
+  })
+  test('portrait 3:4-ish attachment lands near the table pair', () => {
+    expect(autoDims({ width: 1500, height: 2000 }, 512, 8)).toEqual({ width: 440, height: 592 })
+  })
+  test('extreme AR: no clamp, the short dim floors at one multiple', () => {
+    expect(autoDims({ width: 8000, height: 100 }, 256, 8)).toEqual({ width: 2288, height: 32 })
+    expect(autoDims({ width: 1, height: 512 }, 256, 16)).toEqual({ width: 16, height: 5792 })
+  })
+  test('degenerate natural dims throw (decode boundary owns rejecting these)', () => {
+    expect(() => autoDims({ width: 0, height: 100 }, 512, 8)).toThrow()
   })
 })
 
@@ -296,6 +321,80 @@ describe('composerDims', () => {
       composerDims({ prompt: 'p', aspect: null, size: null, steps: 200, look: null, seedMode: { kind: 'random' }, tweak: { of: "s", baseValues: {} }, init: null }),
     ).toEqual({ width: 512, height: 512 })
   })
+  test('AUTO matches what composeSubmission emits (optimistic tile AR = session AR)', () => {
+    const input = {
+      prompt: 'p',
+      aspect: 'auto' as const,
+      size: 'full' as const,
+      steps: 200 as const,
+      look: 'limited' as const,
+      seedMode: { kind: 'random' as const },
+      tweak: null,
+      init: { path: '/up/a.png', natural: { width: 1920, height: 1080 }, strength: 'medium' as const, holdMeaning: false, mask: null },
+    }
+    const dims = composerDims(input)
+    expect(dims).toEqual({ width: 680, height: 384 })
+    const payload = composeSubmission(input)
+    expect(payload.values['width']).toBe(dims.width)
+    expect(payload.values['height']).toBe(dims.height)
+  })
+})
+
+describe('AUTO aspect through composeSubmission (§5.1a)', () => {
+  const freshAuto = (look: 'limited' | 'unlimited' | 'vqgan', natural: { width: number; height: number } | null) => ({
+    prompt: 'p',
+    aspect: 'auto' as const,
+    size: 'full' as const,
+    steps: 200 as const,
+    look,
+    seedMode: { kind: 'random' as const },
+    tweak: null,
+    init: { path: '/up/a.png', natural, strength: 'medium' as const, holdMeaning: false, mask: null },
+  })
+
+  test('fresh: rounding multiple follows the LOOK — 8 for the pixel models, 16 for VQGAN', () => {
+    expect(composeSubmission(freshAuto('limited', { width: 1920, height: 1080 })).values['width']).toBe(680)
+    expect(composeSubmission(freshAuto('unlimited', { width: 1920, height: 1080 })).values['width']).toBe(680)
+    expect(composeSubmission(freshAuto('vqgan', { width: 1920, height: 1080 })).values['width']).toBe(688)
+  })
+
+  test('fresh without attachment dims throws (chip is disabled until they are known)', () => {
+    expect(() => composeSubmission(freshAuto('limited', null))).toThrow()
+    expect(() =>
+      composeSubmission({ ...freshAuto('limited', null), init: null }),
+    ).toThrow()
+  })
+
+  test('tweak: AUTO overrides the base dims; the size class comes from the base like any aspect', () => {
+    // base dims in the 256 table -> draft budget; base look Limited -> multiple 8
+    const payload = composeSubmission({
+      prompt: 'p',
+      aspect: 'auto',
+      size: null,
+      steps: 200,
+      look: null,
+      seedMode: { kind: 'random' },
+      tweak: { of: 's', baseValues: { width: 224, height: 288, image_model: 'Limited Palette' } },
+      init: { path: '/up/a.png', natural: { width: 1000, height: 1000 }, strength: null, holdMeaning: false, mask: null },
+    })
+    expect(payload.values['width']).toBe(256)
+    expect(payload.values['height']).toBe(256)
+  })
+
+  test('tweak with CUSTOM look reads the base image_model for the multiple (VQGAN base -> 16)', () => {
+    const payload = composeSubmission({
+      prompt: 'p',
+      aspect: 'auto',
+      size: 'full',
+      steps: 200,
+      look: null,
+      seedMode: { kind: 'random' },
+      tweak: { of: 's', baseValues: { width: 512, height: 512, image_model: 'VQGAN' } },
+      init: { path: '/up/a.png', natural: { width: 1920, height: 1080 }, strength: null, holdMeaning: false, mask: null },
+    })
+    expect(payload.values['width']).toBe(688)
+    expect(payload.values['height']).toBe(384)
+  })
 })
 
 describe('matchPresets (exact-match only; steps is NOT preset-matched — §5.3)', () => {
@@ -323,6 +422,19 @@ describe('matchPresets (exact-match only; steps is NOT preset-matched — §5.3)
   test('non-numeric dims -> nulls', () => {
     expect(matchPresets({ width: '512', height: 512 }).aspect).toBeNull()
     expect(matchPresets({ width: '512', height: 512 }).size).toBeNull()
+  })
+  test("AUTO never rematerializes: auto-computed dims off the tables come back CUSTOM (§5.3)", () => {
+    // 680x384 is exactly what AUTO emits for a 1920x1080 attachment at full/limited,
+    // but the snapshot carries no attachment dims to decide that by — not cleanly
+    // decidable, so no guessing: CUSTOM inherits the base dims verbatim instead.
+    expect(matchPresets({ width: 680, height: 384, steps_per_scene: 200, image_model: 'Limited Palette' })).toEqual({
+      aspect: null,
+      size: null,
+      look: 'limited',
+    })
+    // A square attachment's AUTO dims ARE a table pair — that exact match is cleanly
+    // decidable and rematerializes as the equivalent 1:1 chip (same dims either way).
+    expect(matchPresets({ width: 512, height: 512 }).aspect).toBe('1:1')
   })
 })
 
@@ -363,7 +475,7 @@ describe('composeSubmission init — fresh (§15.6)', () => {
   test('attached at medium, no mask, hold off: init_image + "4", no semantic/backend keys', () => {
     const payload = composeSubmission({
       ...fresh,
-      init: { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: null },
+      init: { path: '/up/a.png', natural: null, strength: 'medium', holdMeaning: false, mask: null },
     })
     expect(payload.values['init_image']).toBe('/up/a.png')
     expect(payload.values['direct_init_weight']).toBe('4')
@@ -373,11 +485,11 @@ describe('composeSubmission init — fresh (§15.6)', () => {
 
   test('subtle / strong map to 1.5 / 10', () => {
     expect(
-      composeSubmission({ ...fresh, init: { path: '/up/a.png', strength: 'subtle', holdMeaning: false, mask: null } })
+      composeSubmission({ ...fresh, init: { path: '/up/a.png', natural: null, strength: 'subtle', holdMeaning: false, mask: null } })
         .values['direct_init_weight'],
     ).toBe('1.5')
     expect(
-      composeSubmission({ ...fresh, init: { path: '/up/a.png', strength: 'strong', holdMeaning: false, mask: null } })
+      composeSubmission({ ...fresh, init: { path: '/up/a.png', natural: null, strength: 'strong', holdMeaning: false, mask: null } })
         .values['direct_init_weight'],
     ).toBe('10')
   })
@@ -386,13 +498,13 @@ describe('composeSubmission init — fresh (§15.6)', () => {
     expect(
       composeSubmission({
         ...fresh,
-        init: { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: false } },
+        init: { path: '/up/a.png', natural: null, strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: false } },
       }).values['direct_init_weight'],
     ).toBe('4_[/up/m.png]')
     expect(
       composeSubmission({
         ...fresh,
-        init: { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: true } },
+        init: { path: '/up/a.png', natural: null, strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: true } },
       }).values['direct_init_weight'],
     ).toBe('4_[-/up/m.png]')
   })
@@ -400,7 +512,7 @@ describe('composeSubmission init — fresh (§15.6)', () => {
   test('hold meaning pins semantic 0.3 AND the torch backend', () => {
     const payload = composeSubmission({
       ...fresh,
-      init: { path: '/up/a.png', strength: 'medium', holdMeaning: true, mask: null },
+      init: { path: '/up/a.png', natural: null, strength: 'medium', holdMeaning: true, mask: null },
     })
     expect(payload.values['semantic_init_weight']).toBe('4')
     expect(payload.values['perceptor_backend']).toBe('torch')
@@ -415,7 +527,7 @@ describe('composeSubmission init — fresh (§15.6)', () => {
 
   test('fresh init with null strength throws (unreachable per bar-clear rule)', () => {
     expect(() =>
-      composeSubmission({ ...fresh, init: { path: '/up/a.png', strength: null, holdMeaning: false, mask: null } }),
+      composeSubmission({ ...fresh, init: { path: '/up/a.png', natural: null, strength: null, holdMeaning: false, mask: null } }),
     ).toThrow()
   })
 })
@@ -456,7 +568,7 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
 
   test('untouched OPAQUE base weight rides verbatim (cutoffs survive)', () => {
     const base = { init_image: '/x/a.png', direct_init_weight: '1_r_0.3' }
-    const payload = composeSubmission(tweakInput(base, { path: '/x/a.png', strength: null, holdMeaning: false, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/x/a.png', natural: null, strength: null, holdMeaning: false, mask: null }))
     expect(payload.values['direct_init_weight']).toBe('1_r_0.3')
   })
 
@@ -465,6 +577,7 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
     const payload = composeSubmission(
       tweakInput(base, {
         path: '/up/a.png',
+        natural: null,
         strength: null,
         holdMeaning: false,
         mask: { path: '/up/m.png', inverted: false },
@@ -475,7 +588,7 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
 
   test('picking a strength recomposes and drops an opaque tail', () => {
     const base = { init_image: '/x/a.png', direct_init_weight: '1_r_0.3' }
-    const payload = composeSubmission(tweakInput(base, { path: '/x/a.png', strength: 'strong', holdMeaning: false, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/x/a.png', natural: null, strength: 'strong', holdMeaning: false, mask: null }))
     expect(payload.values['direct_init_weight']).toBe('10')
   })
 
@@ -484,6 +597,7 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
     const payload = composeSubmission(
       tweakInput(base, {
         path: '/up/a.png',
+        natural: null,
         strength: null,
         holdMeaning: false,
         mask: { path: '/up/new.png', inverted: true },
@@ -498,6 +612,7 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
       composeSubmission(
         tweakInput(base, {
           path: '/x/a.png',
+          natural: null,
           strength: null,
           holdMeaning: false,
           mask: { path: '/up/m.png', inverted: false },
@@ -508,21 +623,21 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
 
   test('init_image always rides (replaced image on an untouched weight)', () => {
     const base = { init_image: '/up/old.png', direct_init_weight: '0.45' }
-    const payload = composeSubmission(tweakInput(base, { path: '/up/new.png', strength: null, holdMeaning: false, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/up/new.png', natural: null, strength: null, holdMeaning: false, mask: null }))
     expect(payload.values['init_image']).toBe('/up/new.png')
     expect(payload.values['direct_init_weight']).toBe('0.45')
   })
 
   test('semantic: matching toggle -> a non-0.3 base value rides verbatim, backend pinned', () => {
     const base = { init_image: '/up/a.png', direct_init_weight: '4', semantic_init_weight: '0.7' }
-    const payload = composeSubmission(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: true, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/up/a.png', natural: null, strength: null, holdMeaning: true, mask: null }))
     expect(payload.values['semantic_init_weight']).toBe('0.7')
     expect(payload.values['perceptor_backend']).toBe('torch') // unconditional while on
   })
 
   test('semantic toggled ON over an off base -> 0.3 + torch', () => {
     const base = { init_image: '/up/a.png', direct_init_weight: '4', semantic_init_weight: '' }
-    const payload = composeSubmission(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: true, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/up/a.png', natural: null, strength: null, holdMeaning: true, mask: null }))
     expect(payload.values['semantic_init_weight']).toBe('4')
     expect(payload.values['perceptor_backend']).toBe('torch')
   })
@@ -534,7 +649,7 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
       semantic_init_weight: '0.7',
       perceptor_backend: 'torch',
     }
-    const payload = composeSubmission(tweakInput(base, { path: '/up/a.png', strength: null, holdMeaning: false, mask: null }))
+    const payload = composeSubmission(tweakInput(base, { path: '/up/a.png', natural: null, strength: null, holdMeaning: false, mask: null }))
     expect('semantic_init_weight' in payload.values).toBe(false)
     expect(payload.values['perceptor_backend']).toBe('torch')
   })
@@ -552,6 +667,7 @@ test('fresh composeSubmission with HOLD MEANING omits coarse_to_fine (engine ref
     tweak: null,
     init: {
       path: '/up/a.png',
+      natural: null,
       strength: 'medium',
       holdMeaning: true,
       mask: null,
@@ -575,19 +691,25 @@ describe('isolation invariant: submissions are reconstructible from what the use
   const STEPS_AXIS: readonly number[] = [...STEPS_IDS, 275, MAX_CUSTOM_STEPS]
   const INITS: Parameters<typeof composeSubmission>[0]['init'][] = [
     null,
-    { path: '/up/a.png', strength: 'subtle', holdMeaning: false, mask: null },
-    { path: '/up/a.png', strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: true } },
-    { path: '/up/a.png', strength: 'strong', holdMeaning: true, mask: null },
+    { path: '/up/a.png', natural: null, strength: 'subtle', holdMeaning: false, mask: null },
+    { path: '/up/a.png', natural: { width: 1920, height: 1080 }, strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: true } },
+    { path: '/up/a.png', natural: { width: 800, height: 2000 }, strength: 'strong', holdMeaning: true, mask: null },
   ]
 
   test('fresh: payload keys ⊆ visible controls ∪ documented pins', () => {
+    // AUTO joins the walk (§5.1a): it is an aspect VALUE — width/height stay determined
+    // by visible controls (the chip + the visible attachment; SIZE still picks the
+    // budget). It only pairs with attachments whose dims are known — elsewhere the
+    // chip is disabled, so those combinations are unreachable by construction.
+    const aspects = [...ASPECT_IDS, 'auto' as const]
     const violations: string[] = []
-    for (const aspect of ASPECT_IDS) {
+    for (const aspect of aspects) {
       for (const size of SIZE_IDS) {
         for (const steps of STEPS_AXIS) {
           for (const look of LOOK_IDS) {
             for (const seedMode of SEED_MODES) {
               for (const init of INITS) {
+                if (aspect === 'auto' && (init == null || init.natural == null)) continue
                 const payload = composeSubmission({ prompt: 'p', aspect, size, steps, look, seedMode, tweak: null, init })
                 for (const key of Object.keys(payload.values)) {
                   if (!VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
@@ -601,6 +723,28 @@ describe('isolation invariant: submissions are reconstructible from what the use
       }
     }
     expect(violations).toEqual([])
+  })
+
+  test('auto+attachment: exactly the computed dims land in values — nothing else changes (§5.6)', () => {
+    const init = {
+      path: '/up/a.png',
+      natural: { width: 1920, height: 1080 },
+      strength: 'medium' as const,
+      holdMeaning: false,
+      mask: null,
+    }
+    const at = (aspect: '1:1' | 'auto') =>
+      composeSubmission({ prompt: 'p', aspect, size: 'full', steps: 200, look: 'limited', seedMode: { kind: 'random' }, tweak: null, init })
+    const table = at('1:1')
+    const auto = at('auto')
+    expect(auto.values['width']).toBe(680) // autoDims(1920x1080, 512-class, ÷8)
+    expect(auto.values['height']).toBe(384)
+    expect(Object.keys(auto.values).sort()).toEqual(Object.keys(table.values).sort())
+    for (const key of Object.keys(table.values)) {
+      if (key !== 'width' && key !== 'height') expect(auto.values[key]).toEqual(table.values[key])
+    }
+    expect(auto.forkOf).toBe(table.forkOf)
+    expect(auto.seedLocked).toBe(table.seedLocked)
   })
 
   test('tweak: payload keys ⊆ the fork base snapshot ∪ visible controls ∪ pins', () => {

@@ -205,8 +205,9 @@ button {
   letter-spacing: 0.5px;
   white-space: nowrap;
 }
-.chip:hover { color: var(--text); border-color: #3a3a44; }
+.chip:hover:not(:disabled) { color: var(--text); border-color: #3a3a44; }
 .chip.sel { color: var(--accent); border-color: var(--accent); }
+.chip:disabled { opacity: 0.35; cursor: default; } /* the MASK-chip disabled treatment */
 .chip.custom { display: none; pointer-events: none; }
 
 /* the STEPS row's custom numeric input — chip-shaped; sel when a non-preset value is live */

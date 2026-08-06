@@ -22,13 +22,16 @@
 //
 // types:
 //   AspectId = '1:1'|'3:4'|'4:3'|'16:9'    SizeId = 'draft'|'full'  (256- / 512-class)
+//   ComposerAspect = AspectId | 'auto'     'auto' = size the canvas to the attachment's
+//     own aspect ratio (§5.1a); selectable only while the attachment's natural dims are
+//     known — the AspectId tables stay closed (they key the dims Records)
 //   LookId = 'limited'|'unlimited'|'vqgan'
 //   SeedMode = {kind:'random'} | {kind:'locked', seed}
-//   ComposerSubmitInput = { prompt, aspect|null, size|null, steps: number, look|null,
-//     seedMode, tweak|null, init: InitSubmitInput|null }   (null preset ids = "inherit
-//     tweak base", reachable only while tweak != null; steps is never null — §5.3;
-//     init per §15.6 — main maps the attachment through core/init toInitSubmitInput,
-//     which enforces image-is-ready)
+//   ComposerSubmitInput = { prompt, aspect: ComposerAspect|null, size|null, steps: number,
+//     look|null, seedMode, tweak|null, init: InitSubmitInput|null }   (null preset ids =
+//     "inherit tweak base", reachable only while tweak != null; steps is never null —
+//     §5.3; init per §15.6 — main maps the attachment through core/init
+//     toInitSubmitInput, which enforces image-is-ready)
 //   SubmissionPayload = { values, forkOf, seedLocked }   — POST /api/sessions body fields
 //
 // constants:
@@ -40,6 +43,10 @@
 //
 // functions:
 //   resolveDims(aspect, size) -> {width, height}        pure table lookup
+//   autoDims(natural, sizeClass, multiple) -> {width, height}   the AUTO aspect's dims
+//     (§5.1a): the attachment's AR fitted into the class's pixel-area budget (class² —
+//     the §5.1 tables are roughly equal-area), each dim rounded to the engine-safe
+//     multiple and floored at one multiple (no artificial AR clamp)
 //   parseStepsId(raw) -> number                         the STEPS chips' dataset boundary:
 //     exact match against STEPS_IDS, throws on unknown markup (never a nearest number)
 //   parseCustomSteps(raw) -> number | null              the gear's custom-input boundary:
@@ -51,9 +58,17 @@
 //   lookModel(look) -> image_model string
 //   composeSubmission(composer) -> SubmissionPayload    throws on empty prompt, a fresh
 //     composer with null ids, or a non-positive-integer steps (caller-contract
-//     violations — the three steps boundaries above guarantee validity). Tweak rules:
-//     steps_per_scene always carries composer.steps (rematerialized from the base, so
-//     an untouched tweak still submits the base's count verbatim); width/height
+//     violations — the three steps boundaries above guarantee validity). AUTO aspect
+//     resolves through autoDims — throws without attachment natural dims (the popover
+//     only enables the chip once they are known; main's submit guard covers the gap).
+//     The rounding multiple comes from the LOOK (verified against pytti-core, §5.1a):
+//     Limited/Unlimited Palette tensors are exactly height x width -> 8 (mp4 encode
+//     needs even dims; 8 matches the c2f ladder's own granularity); VQGAN floors each
+//     dim to its latent stride f = 2^(num_resolutions-1) = 16 for every model Create
+//     reaches (vqgan.py line 184-192) -> 16 keeps declared dims == rendered dims. A
+//     tweak CUSTOM look reads the base's image_model; non-pixel/unknown models take 16.
+//     Tweak rules: steps_per_scene always carries composer.steps (rematerialized from
+//     the base, so an untouched tweak still submits the base's count verbatim); width/height
 //     override only when aspect != null; their size class comes from size when non-null,
 //     else from exact-matching the BASE dims against the 256 table (miss -> 512 class).
 //     Init rule (§15.6): fresh emits init_image + formatInitWeight (+ semantic '4' and
@@ -65,14 +80,18 @@
 //     (optimistic tile sizing); same dims rule as composeSubmission, base-dims fallback 512x512
 //   matchPresets(values) -> {aspect|null, size|null, look|null}   exact-match only, no
 //     nearest-neighbor guessing; dims match one class table -> aspect + size together
-//     (miss -> both null). Steps is NOT preset-matched anymore — it rematerializes as
-//     a plain number via rematerializeSteps; chip highlighting is a render-time
-//     comparison, not composer state
+//     (miss -> both null). NEVER returns 'auto': the base's attachment dims are not in
+//     the snapshot (they load async, §15.8), so "these dims came from AUTO" is not
+//     cleanly decidable at rematerialization time — per §5.3 doctrine the miss
+//     rematerializes CUSTOM, which inherits the base dims verbatim. Steps is NOT
+//     preset-matched anymore — it rematerializes as a plain number via
+//     rematerializeSteps; chip highlighting is a render-time comparison, not composer state
 //   submittableValues(config, schemaFields) -> Record       whitelist filter
 // @/cs
 import {
   formatInitWeight,
   type InitSubmitInput,
+  type NaturalDims,
   parseInitWeight,
   sameMask,
   semanticOn,
@@ -80,6 +99,10 @@ import {
 } from './init'
 
 export type AspectId = '1:1' | '3:4' | '4:3' | '16:9'
+// The composer's aspect value: a table id, or AUTO — size the canvas to the
+// attachment's own aspect ratio (§5.1a). Kept apart from AspectId so the dims
+// Records stay exhaustively keyed by the table ids alone.
+export type ComposerAspect = AspectId | 'auto'
 export type SizeId = 'draft' | 'full'
 export type LookId = 'limited' | 'unlimited' | 'vqgan'
 export type SeedMode = { kind: 'random' } | { kind: 'locked'; seed: number }
@@ -135,6 +158,54 @@ export function resolveDims(aspect: AspectId, size: SizeId): { width: number; he
   return { width: entry[0], height: entry[1] }
 }
 
+// The engine-safe rounding multiple for AUTO dims, per image model (verified against
+// pytti-core, §5.1a): PixelImage/RGBImage parameter tensors are exactly height x width —
+// any dims render, so 8 is chosen for the DOWNLOAD path (libx264/yuv420p needs even
+// dims; no scale filter in the encode command) and to match stage_dims' own non-final
+// rounding. VQGAN floors each dim to its latent stride f = 2^(num_resolutions-1) = 16
+// for every model Create reaches (default sflickr; all taming ckpts are f16) — emitting
+// multiples of 16 keeps declared dims == rendered dims. Everything else (LlamaGen
+// ds16/ds8, unknown bench models) takes 16: every stride in the engine divides it.
+function autoDimsMultiple(model: string): 8 | 16 {
+  return model === 'Limited Palette' || model === 'Unlimited Palette' ? 8 : 16
+}
+
+// §5.1a: fit the attachment's own AR into the size class's pixel-area budget (class² —
+// the §5.1 tables are roughly equal-area), preserving AR, each dim rounded to the
+// engine-safe multiple. No artificial AR clamp; the floor is one multiple per dim (the
+// smallest the engine renders: one VQGAN latent token / one rounded pixel row).
+export function autoDims(natural: NaturalDims, sizeClass: 256 | 512, multiple: 8 | 16): { width: number; height: number } {
+  if (natural.width < 1 || natural.height < 1) {
+    throw new Error(`autoDims: natural dims must be positive, got ${natural.width}x${natural.height}`)
+  }
+  const budget = sizeClass * sizeClass
+  const idealWidth = Math.sqrt((budget * natural.width) / natural.height)
+  const idealHeight = budget / idealWidth
+  return {
+    width: Math.max(multiple, Math.round(idealWidth / multiple) * multiple),
+    height: Math.max(multiple, Math.round(idealHeight / multiple) * multiple),
+  }
+}
+
+// The AUTO branch shared by composeSubmission and composerDims: throws without known
+// attachment dims — the popover only enables the chip once they are known (§5.1a) and
+// main's submit guard covers the async gap, so reaching here without them is a bug.
+function autoAspectDims(composer: ComposerSubmitInput, sizeClass: 256 | 512): { width: number; height: number } {
+  const init = composer.init
+  if (init == null || init.natural == null) {
+    throw new Error('autoDims: AUTO aspect without attachment dims (caller must guard, §5.1a)')
+  }
+  let model: string
+  if (composer.look != null) {
+    model = LOOK[composer.look]
+  } else if (composer.tweak != null) {
+    model = String(composer.tweak.baseValues['image_model'] ?? '') // '' -> 16, safe everywhere
+  } else {
+    throw new Error('autoDims: fresh composer without a concrete look (caller contract)')
+  }
+  return autoDims(init.natural, sizeClass, autoDimsMultiple(model))
+}
+
 // The STEPS chips' dataset strings enter core through this exact match — unknown
 // markup throws (fail loud, §5.3 doctrine: never a nearest number).
 export function parseStepsId(raw: string): number {
@@ -175,7 +246,7 @@ export function lookModel(look: LookId): string {
 
 export type ComposerSubmitInput = {
   prompt: string
-  aspect: AspectId | null
+  aspect: ComposerAspect | null
   size: SizeId | null
   steps: number // always concrete — validated positive integer (§5.3, no null-inherit)
   look: LookId | null
@@ -202,7 +273,7 @@ export type SubmissionPayload = {
 // Field -> the visible control that determines it.
 export const VISIBLE_CONTROL_FIELDS: readonly string[] = [
   'scenes', // the prompt bar
-  'width', // ASPECT x SIZE chips (dims table, §5.1)
+  'width', // ASPECT x SIZE chips (dims table §5.1; AUTO fits the visible attachment's AR, §5.1a)
   'height', // ASPECT x SIZE chips
   'steps_per_scene', // STEPS chips — the raw numbers, steps_per_scene verbatim
   'image_model', // LOOK chips
@@ -259,10 +330,13 @@ export function composerDims(composer: ComposerSubmitInput): { width: number; he
     if (composer.aspect == null || composer.size == null) {
       throw new Error('composerDims: a fresh composer must have concrete preset ids')
     }
+    if (composer.aspect === 'auto') return autoAspectDims(composer, SIZE_CLASS[composer.size])
     return resolveDims(composer.aspect, composer.size)
   }
   if (composer.aspect != null) {
-    const entry = dimsTable(tweakDimsClass(composer.size, composer.tweak.baseValues))[composer.aspect]
+    const sizeClass = tweakDimsClass(composer.size, composer.tweak.baseValues)
+    if (composer.aspect === 'auto') return autoAspectDims(composer, sizeClass)
+    const entry = dimsTable(sizeClass)[composer.aspect]
     return { width: entry[0], height: entry[1] }
   }
   const width = composer.tweak.baseValues['width']
@@ -287,7 +361,10 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
     if (composer.aspect == null || composer.size == null || composer.look == null) {
       throw new Error('composeSubmission: a fresh composer must have concrete preset ids')
     }
-    const dims = resolveDims(composer.aspect, composer.size)
+    const dims =
+      composer.aspect === 'auto'
+        ? autoAspectDims(composer, SIZE_CLASS[composer.size])
+        : resolveDims(composer.aspect, composer.size)
     const values: Record<string, unknown> = {
       scenes: prompt,
       width: dims.width,
@@ -342,9 +419,16 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
   }
   values['scenes'] = prompt
   if (composer.aspect != null) {
-    const entry = dimsTable(tweakDimsClass(composer.size, composer.tweak.baseValues))[composer.aspect]
-    values['width'] = entry[0]
-    values['height'] = entry[1]
+    const sizeClass = tweakDimsClass(composer.size, composer.tweak.baseValues)
+    let dims: { width: number; height: number }
+    if (composer.aspect === 'auto') {
+      dims = autoAspectDims(composer, sizeClass)
+    } else {
+      const entry = dimsTable(sizeClass)[composer.aspect]
+      dims = { width: entry[0], height: entry[1] }
+    }
+    values['width'] = dims.width
+    values['height'] = dims.height
   }
   // Steps always carries the composer's concrete number: tweakSession rematerialized
   // the base's count into it, so an untouched tweak submits the base verbatim (§5.3).

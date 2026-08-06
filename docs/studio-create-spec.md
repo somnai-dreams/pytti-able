@@ -352,6 +352,9 @@ type Pending =
 type QueueItem = { id: string; position: number; prompt: string; sizeX: number; sizeY: number }
 
 type AspectId = '1:1' | '3:4' | '4:3' | '16:9'
+type ComposerAspect = AspectId | 'auto'      // 'auto' = the attachment's own AR (§5.1a);
+                                             //   kept apart from AspectId so the dims
+                                             //   Records stay exhaustively table-keyed
 type SizeId = 'draft' | 'full'
 type LookId = 'limited' | 'unlimited' | 'vqgan'
 type SeedMode = { kind: 'random' } | { kind: 'locked'; seed: number }
@@ -360,7 +363,9 @@ type Composer = {
   prompt: string
   // null = "inherit tweak base" — reachable ONLY while tweak != null (a fresh
   // composer always has concrete ids). Renders as a CUSTOM chip in the popover.
-  aspect: AspectId | null
+  // 'auto' is reachable ONLY while init != null (§5.1a) — clearing the attachment
+  // reverts it to '1:1' in the same transition (core replaceInit).
+  aspect: ComposerAspect | null
   size: SizeId | null
   // steps_per_scene verbatim (§5.1) — a plain validated positive integer, never
   // null: the chips are shortcuts that set it, the gear's custom input takes
@@ -471,13 +476,71 @@ behind the gear.
 | `unlimited` | `Unlimited Palette` |
 | `vqgan` | `VQGAN` |
 
-Popover display labels: `1:1 · 3:4 · 4:3 · 16:9`; `DRAFT · FULL`;
+Popover display labels: `1:1 · 3:4 · 4:3 · 16:9 · AUTO`; `DRAFT · FULL`;
 `150 · 200 · 300 · 600 · 1200 · 2400 · [custom]`; `LIMITED · UNLIMITED · VQGAN`;
 `SEED ⚄ RANDOM / 🔒 <n>`.
 
 Fresh composer defaults: `1:1`, `full`, `200`, `limited`, random seed — exactly
 what the retired `standard` quality resolved to (512-class dims, 200 steps), so
 a user who never opens the gear submits the identical payload.
+
+### 5.1a The AUTO aspect (added 2026-08-05)
+
+The ASPECT row gains an `AUTO` chip: size the canvas to the **attachment's own
+aspect ratio** (the mask is painted over the init image at its dims, so a
+mask-fitting canvas is an attachment-fitting canvas). It is an aspect **value**
+(`Composer.aspect: AspectId | 'auto' | null`) — SIZE still picks the pixel-area
+budget, and the §5.6 invariant is untouched: width/height remain determined by
+visible controls (the chip + the visible attachment chip).
+
+**Enablement.** The chip is selectable **iff** the attachment's natural pixel
+dims are known (`core/init.ts initNaturalDims(init) != null`); otherwise it is
+`disabled` with a title, the MASK chip's locked-surface treatment (§15.4). Dims
+are known for a fresh attachment as soon as it is `ready` (§15.4 reads them
+before the handoff); a rematerialized attachment loads them async (§15.8) —
+until they land (or forever, for an unreadable/404 image) AUTO simply stays
+disabled. No spinner machinery.
+
+**Removal reverts, loudly.** `aspect === 'auto'` is reachable only while an
+attachment exists. Clearing the attachment (chip ✕, bar clear, upload failure)
+while AUTO is selected reverts the aspect to `1:1` in the same state transition
+(core `replaceInit`, model-tested) — the chip selection visibly moves; a
+dangling silent AUTO cannot exist. **Replacing** the attachment keeps AUTO: it
+re-derives from the new image's dims once they are known (submits in the gap
+are covered by the A1 uploading guard plus an `image size unknown — pick an
+aspect` toast guard).
+
+**Dims rule** (`core/presets.ts autoDims(natural, sizeClass, multiple)`): fit
+the attachment's AR into the SIZE class's pixel-area budget, preserving AR,
+each dim rounded to the engine-safe multiple:
+
+```
+budget = class²   (65 536 draft / 262 144 full — the §5.1 tables are
+                   roughly equal-area; the 1:1 pair is reproduced exactly)
+idealW = √(budget · arW/arH);  idealH = budget / idealW
+dim    = max(multiple, round(ideal / multiple) · multiple)
+```
+
+No artificial AR clamp; the floor is one multiple per dim — the smallest the
+engine renders.
+
+The rounding multiple follows the LOOK (**verified against pytti-core**, the
+per-model dims contract):
+
+| look | multiple | why (pytti-core) |
+|---|---|---|
+| `limited`, `unlimited` | **8** | `PixelImage`/`RGBImage` parameter tensors are exactly `height × width` (`pixel.py`, `rgb_image.py`) — no stride; 8 is chosen because the mp4 DOWNLOAD path (libx264 + `yuv420p`, no scale filter) requires **even** dims, and it matches `coarse_to_fine.stage_dims`' own non-final rounding granularity |
+| `vqgan` | **16** | the engine silently **floors** each dim to the latent stride `f = 2^(num_resolutions−1)` (`vqgan.py` 184–192) — 16 for every model Create reaches (default `sflickr`; all taming ckpts are f16). Emitting multiples of 16 keeps declared dims == rendered dims (tile layout, thumbs, encode) |
+| tweak CUSTOM look | base's `image_model` | pixel models → 8; VQGAN/LlamaGen (ds16 f=16, ds8 f=8)/unknown → **16**, which every stride in the engine divides |
+
+`coarse_to_fine` (pinned on fresh non-HOLD submissions) imposes no
+back-constraint: its final stage runs the **exact** configured dims and its
+non-final stages self-round to multiples of 8 with a 64 floor.
+
+`composeSubmission` and `composerDims` resolve AUTO through the same helper
+(the optimistic tile's AR always matches the session's); both **throw** when
+AUTO is reached without known attachment dims — a caller-contract violation
+(the chip's enablement plus the submit guard make it unreachable).
 
 ### 5.2 `composeSubmission(composer): { values, forkOf, seedLocked }`
 
@@ -532,6 +595,16 @@ CUSTOM (§5.6: what the user sees is exactly what submits). No
 nearest-neighbor doctrine survives at the chips: 275 never highlights 300 — it
 sits in the custom input as itself.
 
+**`matchPresets` never returns `'auto'`** (decided with §5.1a): whether a base's
+dims equal the AUTO-computed dims for its attachment is **not cleanly decidable**
+at rematerialization time — the snapshot carries no attachment pixel dims (they
+load async, §15.8, and may never load). Per the exact-match doctrine that miss
+rematerializes `CUSTOM`, which inherits the base dims **verbatim** on resubmit —
+a byte-identical replay, strictly better than re-deriving. (A square
+attachment's AUTO dims are exactly a table pair; that exact match rematerializes
+as the equivalent table chip — same dims either way.) The chip does not
+retro-flip to AUTO when the dims arrive later: no silent state changes.
+
 ### 5.4 Seed control
 
 Two-state toggle. `random` → the draft omits `seed`, `seedLocked: false`, server
@@ -585,7 +658,7 @@ Visible controls (field → the control that determines it):
 | field | control |
 |---|---|
 | `scenes` | the prompt bar |
-| `width`, `height` | ASPECT × SIZE chips (§5.1 dims table) |
+| `width`, `height` | ASPECT × SIZE chips (§5.1 dims table; AUTO fits the **visible** attachment's AR into the SIZE budget, §5.1a) |
 | `steps_per_scene` | STEPS chips + the CUSTOM input (the raw number, verbatim) |
 | `image_model` | LOOK chips |
 | `seed` | SEED toggle (the locked value is displayed next to it) |
@@ -1014,7 +1087,7 @@ Exactly the chassis-notes composition:
         └───────────────────────────────────┬──────────────────┘
                                             │
                           ┌─────────────────▼───────────────────────────────┐
-                          │ ASPECT   [1:1] [3:4] [4:3] [16:9]               │
+                          │ ASPECT   [1:1] [3:4] [4:3] [16:9] [AUTO]        │
                           │ SIZE     [DRAFT] [FULL]                         │
                           │ STEPS    [150][200][300][600][1200][2400][____] │
                           │ LOOK     [LIMITED] [UNLTD] [VQGAN]              │
@@ -1022,9 +1095,23 @@ Exactly the chassis-notes composition:
                           └─────────────────────────────────────────────────┘
    segmented chips, one selected per row — nothing else, ever. STEPS ends in
    the custom numeric input (§5.1): a non-preset value (e.g. 275) shows there,
-   highlighted as the selection; preset values leave it empty.
+   highlighted as the selection; preset values leave it empty. AUTO on the
+   aspect row is enabled only while an attachment's natural dims are known
+   (§5.1a).
    Tweak mode may show [CUSTOM] as the selected chip on the aspect/size/look
    rows (§5.3) — steps always shows its concrete number instead.
+=======
+                          ┌─────────────────▼───────────────────┐
+                          │ ASPECT [1:1][3:4][4:3][16:9][AUTO]  │
+                          │ SIZE     [DRAFT] [FULL]             │
+                          │ STEPS    [150][200][300][450][600]  │
+                          │ LOOK     [LIMITED] [UNLTD] [VQGAN]  │
+                          │ SEED     [⚄ RANDOM] [🔒 3982117]    │
+                          └─────────────────────────────────────┘
+   segmented chips, one selected per row — nothing else, ever.
+   Tweak mode may show [CUSTOM] as the selected chip on a row (§5.3).
+   AUTO is disabled until an attachment's dims are known (§5.1a).
+>>>>>>> worktree-agent-ac9e8ae238c0fdfa3
 ```
 
 ### 10.3 Tile states (gallery)
@@ -1161,13 +1248,13 @@ DRAFT size / 1:1 / 150 steps so each finishes in ~1 minute on this machine.
 4. On Create, pressing `/` focuses the prompt bar; typing echoes without caret
    jumps; Esc blurs.
 5. ⚙ opens the settings popover with a spring; it contains exactly five rows —
-   aspect (4 chips), size (2), steps (6 numeric chips 150–2400 + the custom
-   input), look (3), seed toggle — and nothing else; outside-click and Esc
-   close it. Typing 275 in the custom input un-highlights every steps chip and
-   highlights the input; clicking a steps chip empties it again; typing 20001
-   or junk marks the input invalid and keeps the last valid number — parsing is
-   live, so valid prefixes commit as typed (20001 lands on the 2000 typed en
-   route) and blur re-syncs the text to that committed value.
+   aspect (4 chips + AUTO, enabled per §5.1a), size (2), steps (6 numeric chips
+   150–2400 + the custom input), look (3), seed toggle — and nothing else;
+   outside-click and Esc close it. Typing 275 in the custom input un-highlights
+   every steps chip and highlights the input; clicking a steps chip empties it
+   again; typing 20001 or junk marks the input invalid and keeps the last valid
+   number — parsing is live, so valid prefixes commit as typed (20001 lands on
+   the 2000 typed en route) and blur re-syncs the text to that committed value.
 6. Type a prompt, Enter: an optimistic tile appears at the top-left **in the
    same frame** (before any network response — verify via throttled network),
    then transitions through `warming up…`/`loading models…` into a live
@@ -1278,7 +1365,8 @@ rematerialization, no-empty-init-keys, error states) are restated here as spec.
 - `init_image` is a plain `str` path (`structured_config.py` line 51, default
   `""`). The engine stretches it to `width × height` — attaching an image does
   **not** auto-switch the aspect preset; matching them is the user's call (no
-  silent state changes).
+  silent state changes). The **opt-in** path is the AUTO aspect chip (§5.1a),
+  which the user selects explicitly.
 - `direct_init_weight` / `semantic_init_weight` are `str` weight expressions
   (lines 52–53, default `""`). Weight fields support the `weight_mask` grammar
   (`prompt_spec.py` `parse_weight_spec` line 145 / `parse_mask_token` line 119):
@@ -1337,12 +1425,21 @@ No other server change.
 // is the checked surface)
 type InitStrengthId = 'subtle' | 'medium' | 'strong'   // 1.5 / 4 / 10
 
+type NaturalDims = { width: number; height: number }
+
 type InitImage =
   | { kind: 'uploading'; name: string; localUrl: string }
-  | { kind: 'ready'; name: string; path: string; localUrl: string | null }
+  | { kind: 'ready'; name: string; path: string; localUrl: string | null;
+      natural: NaturalDims | null }
     // localUrl: object URL when attached this session (created/revoked by dom —
     //   it enters core as boundary data, like `now`); null when rematerialized
     //   from a tweak base (display goes through uploadUrl(path), §15.8)
+    // natural: the image file's own pixel dims — the AUTO aspect's input (§5.1a).
+    //   Read client-side by dom (Image load) and handed to core as boundary data:
+    //   fresh attaches decode the object URL alongside the upload so a ready fresh
+    //   image always carries them (or a decode-failed null); rematerialized
+    //   attachments start null and load async via uploadUrl (§15.8) — null keeps
+    //   AUTO disabled, nothing more.
 
 type InitMask = { path: string; inverted: boolean }    // abs path of the mask PNG upload
 
@@ -1409,12 +1506,22 @@ working as text — this is an input-type boundary, not an error).
 
 Attach flow (dom): create an object URL → `composer.init = { image: { kind:
 'uploading', name, localUrl }, strength: 'medium', holdMeaning: false, mask:
-null }` → the chip renders this frame → `uploadFile(...)`. On `200` → `image =
-{ kind: 'ready', path, name, localUrl }`. On any failure (non-200, network) →
-toast `parseErrorBody` (or `upload failed`), `composer.init = null`, revoke the
-object URL (ruling 6). Attaching while a chip exists **replaces** it (old object
-URL revoked, mask cleared — a new image invalidates a mask painted on the old
-one).
+null }` → the chip renders this frame → `uploadFile(...)` **and** an `Image`
+decode of the object URL for the natural dims, awaited together — both land
+before 'ready', so a ready fresh attachment always knows its dims (§5.1a; a
+failed decode resolves `natural: null` and AUTO just stays disabled). On `200` →
+`image = { kind: 'ready', path, name, localUrl, natural }`. On any failure
+(non-200, network) → toast `parseErrorBody` (or `upload failed`),
+`composer.init = null`, revoke the object URL (ruling 6). Attaching while a
+chip exists **replaces** it (old object URL revoked, mask cleared — a new image
+invalidates a mask painted on the old one; a selected AUTO aspect stays and
+re-derives from the new image, §5.1a).
+
+Every attachment write — attach, replace, chip ✕, bar clear, upload failure,
+tweak rematerialization — routes through core `replaceInit` (dom's `setInit`
+wraps it with the object-URL revoke), which owns the §5.1a revert: clearing the
+attachment while `aspect === 'auto'` reverts the aspect to `1:1` in the same
+transition.
 
 **Chip anatomy** (in the bar, between the input and ⚙): `[28px thumb] MASK ✕`.
 Thumb from `localUrl` (fresh) or `uploadUrl(path)` (rematerialized). `✕` →
@@ -1424,11 +1531,15 @@ kind === 'uploading'`, when the thumb failed to load (§15.8), or when the tweak
 base's weight is opaque (§15.6). A saved mask renders the affordance as
 `MASK ✓`.
 
-**A1 guard addition**: submitting while `init.image.kind === 'uploading'` →
-toast `image still uploading`, no optimistic tile, stop. **Bar-clear rule
-extension** (A1 step 4): clearing the bar resets the *whole* composer — tweak
-AND attachment (chip, mask, INIT row) — so `strength: null` stays unreachable
-outside tweak mode, mirroring the aspect/size/steps invariant.
+**A1 guard additions**: submitting while `init.image.kind === 'uploading'` →
+toast `image still uploading`, no optimistic tile, stop. Submitting with
+`aspect === 'auto'` while the attachment's dims are unknown (rematerialized
+load in flight, or an unreadable image) → toast `image size unknown — pick an
+aspect`, stop (§5.1a — composeSubmission would rightly throw past this point).
+**Bar-clear rule extension** (A1 step 4): clearing the bar resets the *whole*
+composer — tweak AND attachment (chip, mask, INIT row) — so `strength: null`
+stays unreachable outside tweak mode, mirroring the aspect/size/steps
+invariant.
 
 ### 15.5 INIT row (settings popover — amends §10.2 and checklist item 5)
 
@@ -1437,7 +1548,7 @@ without an attachment, six with — item 5 is amended accordingly):
 
 ```
    ┌─────────────────────────────────────────────────┐
-   │ ASPECT   [1:1] [3:4] [4:3] [16:9]               │
+   │ ASPECT   [1:1] [3:4] [4:3] [16:9] [AUTO]        │
    │ SIZE     [DRAFT] [FULL]                         │
    │ STEPS    [150][200][300][600][1200][2400][____] │
    │ LOOK     [LIMITED] [UNLTD] [VQGAN]              │
@@ -1532,8 +1643,9 @@ in `{'', '0'}`):
     backend); off → untouched.
 
 `matchPresets` is **not** widened — init has its own reverse map,
-`deriveInitFromBase(baseValues)` (§15.8). `composerDims` is unaffected (an init
-never changes dims).
+`deriveInitFromBase(baseValues)` (§15.8). `composerDims` reads the init only
+for the AUTO aspect (§5.1a: `init.natural` feeds the dims); every other aspect
+is unaffected by the attachment.
 
 ### 15.7 The mask editor (paint surface)
 
@@ -1647,8 +1759,11 @@ Cmd+Enter replay the init exactly (only the seed differs on A3, per its design).
 (`core/init.ts deriveInitFromBase(baseValues) -> InitAttachment | null`):
 
 - `init_image` empty → `init = null` (no chip). Else chip with `image = { kind:
-  'ready', path, name: basename, localUrl: null }` — thumb via
-  `uploadUrl(path)`.
+  'ready', path, name: basename, localUrl: null, natural: null }` — thumb via
+  `uploadUrl(path)`. The natural dims load async (dom, `Image` decode of
+  `uploadUrl(path)`, §5.1a): on load they land on the still-current attachment
+  and AUTO becomes selectable; a 404 (bench-external image) or undecodable file
+  leaves them null — AUTO stays disabled, no other degradation.
 - `strength = matchStrength(base.weight)` when `parseInitWeight` says `simple`
   (miss → `null` = CUSTOM chip); `opaque` → `null` + MASK affordance disabled
   (title: `bench-authored weight — attach a new image to repaint`). Picking a
@@ -1676,7 +1791,9 @@ clearing the bar clears it (§15.4).
 | remove image (chip ✕) | clears chip + mask + INIT row in one gesture |
 | empty (all-black) mask save | toast; editor stays open (§15.7) |
 | init file deleted before submit | server preflight 400 → existing A1 toast path (§15.1) |
-| tweak-base image not an upload | thumbless chip, MASK disabled; weight rides verbatim (§15.8) |
+| tweak-base image not an upload | thumbless chip, MASK disabled; weight rides verbatim (§15.8); natural dims never load → AUTO stays disabled (§5.1a) |
+| submit with AUTO while dims unknown | toast `image size unknown — pick an aspect`; no optimistic tile (§15.4) |
+| remove image while AUTO selected | aspect visibly reverts to `1:1` in the same transition (§5.1a) |
 | stale mask thumb/PNG unreadable | fail-soft: thumbs degrade at the display boundary (§15.8); in the editor the unreadable mask also drops `init.mask` (§15.7) — never blocks submit |
 
 ### 15.10 Wireframes
@@ -1766,3 +1883,17 @@ Mask editor (toplayer, lightbox-class):
 48. `cd app/web && bun run check` exits 0 with the new core files (`init.ts` +
     test, `mask.ts` + test with `mask.ts` pinned in `fr-audit.ts`);
     `app/static/create.js` stays ≤ 100 KB.
+49. AUTO aspect (§5.1a): with no attachment the ASPECT row's AUTO chip is
+    disabled (dimmed, title `attach an image to size the canvas from it`);
+    attaching an image enables it once the upload lands. Selecting AUTO and
+    submitting with a 1920×1080 image at FULL + LIMITED creates a session whose
+    config shows `width: 680, height: 384` (the optimistic tile renders at the
+    same AR); the same submit at VQGAN shows `width: 688, height: 384`
+    (stride-16 rounding — dims the engine renders exactly).
+50. With AUTO selected, removing the attachment (chip ✕ or clearing the bar)
+    visibly moves the ASPECT selection back to `1:1`; re-opening the popover
+    shows AUTO disabled again.
+51. TWEAK on an AUTO-submitted session rematerializes ASPECT and SIZE as
+    CUSTOM (never AUTO — §5.3): re-submitting untouched replays the base dims
+    verbatim; once the rematerialized chip's thumb has loaded, AUTO is
+    selectable again and re-derives from the base image's dims.

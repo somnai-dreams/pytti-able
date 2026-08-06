@@ -8,9 +8,16 @@ import { readEnv, watchEnv } from '@kit/env/dom'
 import { msPerAnimationStep, springStepCount } from '@kit/midui/motion'
 import { createWakeLoop } from '@kit/onestore/core'
 import { rafRenderLoop } from '@kit/onestore/dom'
-import { artifactUrl } from '../core/api'
+import { artifactUrl, uploadUrl } from '../core/api'
 import { feel } from '../core/feel'
-import { deriveInitFromBase, type InitAttachment, type InitStrengthId, toInitSubmitInput } from '../core/init'
+import {
+  deriveInitFromBase,
+  type InitAttachment,
+  initNaturalDims,
+  type InitStrengthId,
+  type NaturalDims,
+  toInitSubmitInput,
+} from '../core/init'
 import { keyIntent } from '../core/keys'
 import { applyWheel, jumpToFrame, stepFrame } from '../core/lightbox'
 import {
@@ -28,6 +35,7 @@ import {
   reconcileSessions,
   removeQueueItem,
   removeTile,
+  replaceInit,
   showToast,
   type SseEvent,
   type Tile,
@@ -423,6 +431,13 @@ function submit(): void {
     toastNow('image still uploading')
     return
   }
+  if (composer.aspect === 'auto' && initNaturalDims(composer.init) == null) {
+    // A1 guard addition (§5.1a): AUTO selected but the attachment's dims aren't known
+    // yet (rematerialized load in flight, or an unreadable image) — same surface as
+    // the uploading guard; composeSubmission would rightly throw past this point.
+    toastNow('image size unknown — pick an aspect')
+    return
+  }
   const submitInput = {
     prompt: composer.prompt,
     aspect: composer.aspect,
@@ -494,6 +509,18 @@ async function tweakSession(id: string): Promise<void> {
   const seed = config['seed']
   composer.seedMode = typeof seed === 'number' ? { kind: 'locked', seed } : { kind: 'random' }
   setInit(deriveInitFromBase(composer.tweak.baseValues))
+  // A4 dims capture (§15.8): a rematerialized attachment carries no pixel dims (the
+  // snapshot has none) — load them async via the uploads route. AUTO stays disabled
+  // until they land; a 404 (bench-external base image) just leaves them null.
+  const att = composer.init
+  if (att != null && att.image.kind === 'ready' && att.image.natural == null) {
+    const image = att.image
+    void loadImageDims(uploadUrl(image.path)).then((natural) => {
+      if (natural == null || state.composer.init !== att) return // 404/undecodable, or replaced
+      image.natural = natural
+      loop.scheduleRender()
+    })
+  }
   composer.popoverOpen = false
   closeLightbox()
   loop.renderNow()
@@ -506,11 +533,24 @@ async function tweakSession(id: string): Promise<void> {
 const ACCEPTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/bmp']
 
 // Replace the attachment, revoking the object URL the dom layer created for the old one
-// (rematerialized attachments have localUrl null — nothing to revoke).
+// (rematerialized attachments have localUrl null — nothing to revoke). The state move is
+// core's replaceInit, which also reverts a now-referentless AUTO aspect to '1:1' (§5.1a).
 function setInit(init: InitAttachment | null): void {
   const prev = state.composer.init
   if (prev != null && prev.image.localUrl != null) URL.revokeObjectURL(prev.image.localUrl)
-  state.composer.init = init
+  replaceInit(state, init)
+}
+
+// The attachment's own pixel dims, decoded client-side (§15.4) — the AUTO aspect's
+// input. Resolves null on a failed decode/404: expected display-boundary degradation
+// (same class as thumb onerror), AUTO just stays disabled — never rejects.
+function loadImageDims(url: string): Promise<NaturalDims | null> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
+    img.onerror = () => resolve(null)
+    img.src = url
+  })
 }
 
 function attachImage(file: File): void {
@@ -526,12 +566,13 @@ function attachImage(file: File): void {
   }
   setInit(att)
   loop.renderNow() // the chip renders THIS frame, before any network
-  void net
-    .uploadFile(file, file.name)
-    .then((result) => {
+  // Natural dims ride the upload wait (§15.4): both must land before 'ready', so a
+  // ready fresh attachment always knows its dims (or knows they are unreadable).
+  void Promise.all([net.uploadFile(file, file.name), loadImageDims(localUrl)])
+    .then(([result, natural]) => {
       if (state.composer.init !== att) return // replaced or removed while uploading
       if (result.ok) {
-        att.image = { kind: 'ready', name: file.name, path: result.path, localUrl }
+        att.image = { kind: 'ready', name: file.name, path: result.path, localUrl, natural }
       } else {
         setInit(null) // ruling 6: toast, chip cleared, object URL revoked
         showToast(state, result.message, performance.now())
