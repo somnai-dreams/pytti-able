@@ -1446,3 +1446,82 @@ init_spectrum_chroma:
     broadcast to all channels — full composition prior, zero palette
     push. For Limited Palette, mono shapes only the brightness plane and
     leaves palette selection unshaped. Ignored for white and gray.
+
+structure_annealing:
+  label: STRUCTURE ANNEALING
+  type: BOOL
+  section: null
+  group: annealing
+  hint: >-
+    Periodically re-liquify the image's low-frequency band so CLIP gets
+    fresh votes on composition while detail survives in the high bands.
+  prose: >-
+    A diffusion-style structure schedule without a denoiser: at scheduled
+    steps the low-frequency band is blended toward shaped noise (or its
+    own attenuated self), with geometric strength decay across cycles and
+    the last ~35% of steps protected so detail settles. Generalizes the
+    pyramid's single cycle. With coarse-to-fine on, cycles run in the
+    final stage only and the stage's init hold releases at the first
+    cycle. Pixel models re-liquify the brightness plane only. Refuses
+    VQGAN/LlamaGen, adamw_sf, auto_stop, and multi-scene ramps that would
+    put a cycle inside a crossfade.
+
+anneal_cycles:
+  label: ANNEAL CYCLES
+  type: NUM
+  section: null
+  group: annealing
+  relevantWhen: {field: structure_annealing, in: [true]}
+  hint: >-
+    Number of re-liquify events across the run (1-12), evenly spaced
+    before the protected tail.
+  prose: >-
+    Cycles are spaced through the first ~65% of the scene's steps. Every
+    cycle needs at least 5 recovery steps — too many cycles for the step
+    budget fails loudly instead of shredding the image.
+
+anneal_strength:
+  label: ANNEAL STRENGTH
+  type: NUM
+  section: null
+  group: annealing
+  relevantWhen: {field: structure_annealing, in: [true]}
+  hint: >-
+    Low-band blend factor at the FIRST cycle (0-1, exclusive of 0); later
+    cycles decay geometrically to 10% of it.
+  prose: >-
+    How much of the low band the first cycle replaces. 1 = a full
+    composition reset; the default 0.5 keeps half the standing structure.
+    Later cycles decay geometrically so late-run structure is nudged, not
+    demolished. Zero is rejected — turn STRUCTURE ANNEALING off instead.
+
+anneal_band:
+  label: ANNEAL BAND
+  type: NUM
+  section: null
+  group: annealing
+  relevantWhen: {field: structure_annealing, in: [true]}
+  hint: >-
+    Fraction of the Nyquist radius treated as "structure" (0.02-0.5),
+    re-liquified with a soft raised-cosine edge. DC (exposure) is
+    always preserved.
+  prose: >-
+    Frequencies below this fraction of Nyquist are the band that gets
+    re-liquified; the raised-cosine edge spans ±50% of the cutoff so the
+    boundary never rings. Larger values re-decide coarser AND finer
+    layout; smaller values only nudge the largest masses.
+
+anneal_source:
+  label: ANNEAL SOURCE
+  type: CHOICE
+  section: null
+  group: annealing
+  relevantWhen: {field: structure_annealing, in: [true]}
+  hint: >-
+    What the low band is blended toward: noise (shaped mono pink) or
+    blur (its own attenuated lows — zero foreign content).
+  prose: >-
+    noise injects fresh shaped structure votes (mono pink — annealing
+    never injects chroma, that pathology is measured); blur is a partial
+    reset toward the image's own smoothed lows, adding nothing foreign.
+    Falloff follows INIT SPECTRUM FALLOFF.
