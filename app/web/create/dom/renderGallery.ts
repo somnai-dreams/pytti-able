@@ -19,6 +19,7 @@ type TileNodes = {
   label: HTMLElement
   chip: HTMLElement
   cancel: HTMLElement
+  stop: HTMLElement
   bar: HTMLElement
   barFill: HTMLElement
   foot: HTMLElement
@@ -72,6 +73,12 @@ function makeNode(key: string): TileNodes {
   cancel.className = 'tile-x'
   cancel.textContent = '×'
   cancel.title = 'cancel queued render'
+  // STOP is visually distinct from the queued ×: stopping KEEPS the work (the session
+  // lands 'stopped' with its frames); × discards a queued item (A13 vs A8).
+  const stop = document.createElement('button')
+  stop.className = 'tile-stop'
+  stop.textContent = '◼ STOP'
+  stop.title = 'stop — keeps the frames rendered so far'
   const bar = document.createElement('div')
   bar.className = 'tile-bar'
   const barFill = document.createElement('div')
@@ -79,9 +86,9 @@ function makeNode(key: string): TileNodes {
   bar.appendChild(barFill)
   const foot = document.createElement('div')
   foot.className = 'tile-foot'
-  root.append(img, skel, label, chip, cancel, bar, foot)
+  root.append(img, skel, label, chip, cancel, stop, bar, foot)
   const node: TileNodes = {
-    root, img, skel, label, chip, cancel, bar, barFill, foot,
+    root, img, skel, label, chip, cancel, stop, bar, barFill, foot,
     rect: { x: 0, y: 0, sizeX: 0, sizeY: 0 },
     imgSrc: '',
     imgLoaded: false,
@@ -133,6 +140,7 @@ function updateNode(node: TileNodes, entry: GalleryEntry): void {
       node.chip.textContent = chipText
       node.chip.classList.remove('danger')
       show(node.cancel, false)
+      show(node.stop, false)
       show(node.bar, false)
       show(node.foot, false)
       return
@@ -151,6 +159,7 @@ function updateNode(node: TileNodes, entry: GalleryEntry): void {
       node.chip.textContent = `QUEUED #${item.position}`
       node.chip.classList.remove('danger')
       show(node.cancel, true)
+      show(node.stop, false)
       show(node.bar, false)
       show(node.foot, false)
       return
@@ -161,6 +170,9 @@ function updateNode(node: TileNodes, entry: GalleryEntry): void {
       node.root.classList.toggle('clickable', tile.frames >= 1)
       node.root.classList.toggle('failed', tile.state === 'failed')
       show(node.cancel, false)
+      // ◼ STOP (A13): rendering tiles only; hides once a stop is in flight (the
+      // STOPPING chip takes over — the affordance and the request are one-shot).
+      show(node.stop, tile.state === 'rendering' && !(tile.live != null && tile.live.substate === 'stopping'))
       show(node.label, false)
 
       const src = tile.frames >= 1 ? thumbUrl(tile.id, tile.frames) : ''

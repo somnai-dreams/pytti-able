@@ -3,11 +3,15 @@ import {
   ASPECT_IDS,
   composeSubmission,
   composerDims,
+  DEFAULT_STEPS,
   LOOK_IDS,
   lookModel,
   matchPresets,
+  MAX_CUSTOM_STEPS,
+  parseCustomSteps,
   parseStepsId,
   PIN_FIELDS,
+  rematerializeSteps,
   resolveDims,
   SIZE_IDS,
   STEPS_IDS,
@@ -29,12 +33,13 @@ describe('resolveDims', () => {
 })
 
 describe('steps/look tables', () => {
-  test('the steps presets are exactly the five spec numbers, in gear order', () => {
-    expect([...STEPS_IDS]).toEqual([150, 200, 300, 450, 600])
+  test('the steps presets are exactly the six spec numbers, in gear order (§5.1)', () => {
+    expect([...STEPS_IDS]).toEqual([150, 200, 300, 600, 1200, 2400])
   })
   test('parseStepsId: exact match on the chip dataset strings, throw on anything else', () => {
     expect(parseStepsId('150')).toBe(150)
-    expect(parseStepsId('600')).toBe(600)
+    expect(parseStepsId('2400')).toBe(2400)
+    expect(() => parseStepsId('450')).toThrow() // retired preset — no longer chip markup
     expect(() => parseStepsId('175')).toThrow() // no nearest-neighbor (§5.3 doctrine)
     expect(() => parseStepsId('nope')).toThrow()
   })
@@ -42,6 +47,40 @@ describe('steps/look tables', () => {
     expect(lookModel('limited')).toBe('Limited Palette')
     expect(lookModel('unlimited')).toBe('Unlimited Palette')
     expect(lookModel('vqgan')).toBe('VQGAN')
+  })
+})
+
+describe('parseCustomSteps (the gear input boundary — recoverable data, never a throw)', () => {
+  test('plain positive integers in range parse, whitespace tolerated', () => {
+    expect(parseCustomSteps('275')).toBe(275)
+    expect(parseCustomSteps('1')).toBe(1)
+    expect(parseCustomSteps(' 7500 ')).toBe(7500)
+    expect(parseCustomSteps(String(MAX_CUSTOM_STEPS))).toBe(20000)
+  })
+  test('out of range, non-integer, signed, and junk are null', () => {
+    expect(parseCustomSteps('0')).toBeNull()
+    expect(parseCustomSteps('20001')).toBeNull()
+    expect(parseCustomSteps('2.5')).toBeNull()
+    expect(parseCustomSteps('-5')).toBeNull()
+    expect(parseCustomSteps('+5')).toBeNull()
+    expect(parseCustomSteps('1e3')).toBeNull()
+    expect(parseCustomSteps('')).toBeNull()
+    expect(parseCustomSteps('abc')).toBeNull()
+  })
+})
+
+describe('rematerializeSteps (§5.3 — always concrete, no null-inherit)', () => {
+  test('the base steps_per_scene rides verbatim, preset or not', () => {
+    expect(rematerializeSteps({ steps_per_scene: 200 })).toBe(200)
+    expect(rematerializeSteps({ steps_per_scene: 275 })).toBe(275)
+    // beyond the INPUT cap: a bench-authored count still rematerializes verbatim
+    expect(rematerializeSteps({ steps_per_scene: 50000 })).toBe(50000)
+  })
+  test('missing or unusable base values fall to DEFAULT_STEPS, shown concretely', () => {
+    expect(rematerializeSteps({})).toBe(DEFAULT_STEPS)
+    expect(rematerializeSteps({ steps_per_scene: '275' })).toBe(DEFAULT_STEPS)
+    expect(rematerializeSteps({ steps_per_scene: 0 })).toBe(DEFAULT_STEPS)
+    expect(rematerializeSteps({ steps_per_scene: 2.5 })).toBe(DEFAULT_STEPS)
   })
 })
 
@@ -72,12 +111,12 @@ describe('composeSubmission (fresh)', () => {
     expect(payload.seedLocked).toBe(false)
   })
 
-  test('steps rides verbatim, decoupled from size (600 on draft dims)', () => {
+  test('steps rides verbatim, decoupled from size (2400 on draft dims)', () => {
     const payload = composeSubmission({
       prompt: 'x',
       aspect: '1:1',
       size: 'draft',
-      steps: 600,
+      steps: 2400,
       look: 'limited',
       seedMode: { kind: 'random' },
       tweak: null,
@@ -85,7 +124,28 @@ describe('composeSubmission (fresh)', () => {
     })
     expect(payload.values['width']).toBe(256)
     expect(payload.values['height']).toBe(256)
-    expect(payload.values['steps_per_scene']).toBe(600)
+    expect(payload.values['steps_per_scene']).toBe(2400)
+  })
+
+  test('a custom (non-preset) steps value rides verbatim too', () => {
+    const payload = composeSubmission({
+      prompt: 'x',
+      aspect: '1:1',
+      size: 'full',
+      steps: 275,
+      look: 'limited',
+      seedMode: { kind: 'random' },
+      tweak: null,
+      init: null,
+    })
+    expect(payload.values['steps_per_scene']).toBe(275)
+  })
+
+  test('non-positive-integer steps throws (the boundaries guarantee validity)', () => {
+    const fresh = { prompt: 'x', aspect: '1:1' as const, size: 'full' as const, look: 'limited' as const, seedMode: { kind: 'random' as const }, tweak: null, init: null }
+    expect(() => composeSubmission({ ...fresh, steps: 0 })).toThrow()
+    expect(() => composeSubmission({ ...fresh, steps: 2.5 })).toThrow()
+    expect(() => composeSubmission({ ...fresh, steps: -100 })).toThrow()
   })
 
   test('locked seed adds the seed field and seedLocked', () => {
@@ -109,15 +169,12 @@ describe('composeSubmission (fresh)', () => {
     ).toThrow()
   })
 
-  test('fresh composer with null ids throws (aspect, size, steps each)', () => {
+  test('fresh composer with null ids throws (aspect, size each — steps admits no null)', () => {
     expect(() =>
       composeSubmission({ prompt: 'x', aspect: null, size: 'draft', steps: 150, look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null }),
     ).toThrow()
     expect(() =>
       composeSubmission({ prompt: 'x', aspect: '1:1', size: null, steps: 150, look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null }),
-    ).toThrow()
-    expect(() =>
-      composeSubmission({ prompt: 'x', aspect: '1:1', size: 'draft', steps: null, look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null }),
     ).toThrow()
   })
 })
@@ -130,7 +187,7 @@ describe('composeSubmission (tweak)', () => {
       prompt: 'new prompt',
       aspect: null,
       size: null,
-      steps: null,
+      steps: rematerializeSteps(base), // what tweakSession materializes — the base's 200
       look: null,
       seedMode: { kind: 'random' },
       tweak: { of: 's-0001-x', baseValues: { ...base } },
@@ -159,7 +216,7 @@ describe('composeSubmission (tweak)', () => {
     expect(payload.values['seed']).toBe(7)
   })
 
-  test('steps overrides alone: dims stay inherited (CUSTOM aspect/size untouched)', () => {
+  test('steps overrides alone (a custom 450): dims stay inherited (CUSTOM aspect/size untouched)', () => {
     const payload = composeSubmission({
       prompt: 'p',
       aspect: null,
@@ -175,15 +232,16 @@ describe('composeSubmission (tweak)', () => {
     expect(payload.values['steps_per_scene']).toBe(450)
   })
 
-  test('base steps inherit verbatim while steps is CUSTOM, even with concrete dims chips', () => {
+  test('an untouched tweak submits the rematerialized base steps verbatim, even with concrete dims chips', () => {
+    const baseValues = { width: 999, height: 333, steps_per_scene: 275 }
     const payload = composeSubmission({
       prompt: 'p',
       aspect: '16:9',
       size: 'full',
-      steps: null,
+      steps: rematerializeSteps(baseValues), // 275, shown in the custom input
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's', baseValues: { width: 999, height: 333, steps_per_scene: 275 } },
+      tweak: { of: 's', baseValues },
       init: null,
     })
     expect(payload.values['width']).toBe(640)
@@ -196,7 +254,7 @@ describe('composeSubmission (tweak)', () => {
       prompt: 'p',
       aspect: '16:9',
       size: null,
-      steps: null,
+      steps: 200,
       look: null,
       seedMode: { kind: 'random' },
       tweak: { of: 's', baseValues: { width: 224, height: 288 } },
@@ -211,7 +269,7 @@ describe('composeSubmission (tweak)', () => {
       prompt: 'p',
       aspect: '1:1',
       size: null,
-      steps: null,
+      steps: 200,
       look: null,
       seedMode: { kind: 'random' },
       tweak: { of: 's', baseValues: { width: 999, height: 333 } },
@@ -230,22 +288,21 @@ describe('composerDims', () => {
   })
   test('tweak with CUSTOM aspect inherits base dims', () => {
     expect(
-      composerDims({ prompt: 'p', aspect: null, size: null, steps: null, look: null, seedMode: { kind: 'random' }, tweak: { of: "s", baseValues: { width: 640, height: 360 } }, init: null }),
+      composerDims({ prompt: 'p', aspect: null, size: null, steps: 200, look: null, seedMode: { kind: 'random' }, tweak: { of: "s", baseValues: { width: 640, height: 360 } }, init: null }),
     ).toEqual({ width: 640, height: 360 })
   })
   test('tweak without numeric base dims falls to 512x512', () => {
     expect(
-      composerDims({ prompt: 'p', aspect: null, size: null, steps: null, look: null, seedMode: { kind: 'random' }, tweak: { of: "s", baseValues: {} }, init: null }),
+      composerDims({ prompt: 'p', aspect: null, size: null, steps: 200, look: null, seedMode: { kind: 'random' }, tweak: { of: "s", baseValues: {} }, init: null }),
     ).toEqual({ width: 512, height: 512 })
   })
 })
 
-describe('matchPresets (exact-match only)', () => {
+describe('matchPresets (exact-match only; steps is NOT preset-matched — §5.3)', () => {
   test('full match, 512 class -> size full', () => {
     expect(matchPresets({ width: 640, height: 360, steps_per_scene: 200, image_model: 'Limited Palette' })).toEqual({
       aspect: '16:9',
       size: 'full',
-      steps: 200,
       look: 'limited',
     })
   })
@@ -253,33 +310,13 @@ describe('matchPresets (exact-match only)', () => {
     expect(matchPresets({ width: 256, height: 256, steps_per_scene: 150, image_model: 'VQGAN' })).toEqual({
       aspect: '1:1',
       size: 'draft',
-      steps: 150,
       look: 'vqgan',
     })
   })
-  test('steps is decoupled from the dims class: 150 on 512-class dims stays concrete', () => {
-    // Under the retired quality preset this combination forced CUSTOM; the split
-    // controls each rematerialize on their own exact match.
-    expect(matchPresets({ width: 512, height: 512, steps_per_scene: 150, image_model: 'Limited Palette' })).toEqual({
-      aspect: '1:1',
-      size: 'full',
-      steps: 150,
-      look: 'limited',
-    })
-  })
-  test('steps matches even when the dims miss (aspect + size null together)', () => {
-    expect(matchPresets({ width: 500, height: 500, steps_per_scene: 450, image_model: 'nope' })).toEqual({
-      aspect: null,
-      size: null,
-      steps: 450,
-      look: null,
-    })
-  })
   test('any miss -> null for that control, no nearest-neighbor', () => {
-    expect(matchPresets({ width: 500, height: 500, steps_per_scene: 275, image_model: 'nope' })).toEqual({
+    expect(matchPresets({ width: 500, height: 500, image_model: 'nope' })).toEqual({
       aspect: null,
       size: null,
-      steps: null, // 275 is between presets — CUSTOM, never rounded to 300
       look: null,
     })
   })
@@ -391,7 +428,7 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
     prompt: 'p',
     aspect: null,
     size: null,
-    steps: null,
+    steps: 200,
     look: null,
     seedMode: { kind: 'random' },
     tweak: { of: 's-1', baseValues },
@@ -533,6 +570,9 @@ test('fresh composeSubmission with HOLD MEANING omits coarse_to_fine (engine ref
 // undocumented.
 describe('isolation invariant: submissions are reconstructible from what the user sees', () => {
   const SEED_MODES = [{ kind: 'random' as const }, { kind: 'locked' as const, seed: 7 }]
+  // The steps axis is no longer a closed set: walk the preset chips PLUS a non-preset
+  // custom value (275 — the custom input) and the input's extreme (MAX_CUSTOM_STEPS).
+  const STEPS_AXIS: readonly number[] = [...STEPS_IDS, 275, MAX_CUSTOM_STEPS]
   const INITS: Parameters<typeof composeSubmission>[0]['init'][] = [
     null,
     { path: '/up/a.png', strength: 'subtle', holdMeaning: false, mask: null },
@@ -544,7 +584,7 @@ describe('isolation invariant: submissions are reconstructible from what the use
     const violations: string[] = []
     for (const aspect of ASPECT_IDS) {
       for (const size of SIZE_IDS) {
-        for (const steps of STEPS_IDS) {
+        for (const steps of STEPS_AXIS) {
           for (const look of LOOK_IDS) {
             for (const seedMode of SEED_MODES) {
               for (const init of INITS) {
@@ -572,15 +612,17 @@ describe('isolation invariant: submissions are reconstructible from what the use
       init_image: '/up/a.png', direct_init_weight: '4', semantic_init_weight: '',
     }
     const violations: string[] = []
-    for (const seedMode of SEED_MODES) {
-      for (const init of INITS) {
-        const payload = composeSubmission({
-          prompt: 'new', aspect: '16:9', size: 'full', steps: 300, look: 'vqgan', seedMode,
-          tweak: { of: 's-1', baseValues: { ...base } }, init,
-        })
-        for (const key of Object.keys(payload.values)) {
-          if (!(key in base) && !VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
-            violations.push(`${seedMode.kind}/${init == null ? 'no-init' : 'init'}: ${key}`)
+    for (const steps of STEPS_AXIS) {
+      for (const seedMode of SEED_MODES) {
+        for (const init of INITS) {
+          const payload = composeSubmission({
+            prompt: 'new', aspect: '16:9', size: 'full', steps, look: 'vqgan', seedMode,
+            tweak: { of: 's-1', baseValues: { ...base } }, init,
+          })
+          for (const key of Object.keys(payload.values)) {
+            if (!(key in base) && !VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
+              violations.push(`${steps}/${seedMode.kind}/${init == null ? 'no-init' : 'init'}: ${key}`)
+            }
           }
         }
       }

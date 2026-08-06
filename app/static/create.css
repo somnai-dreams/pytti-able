@@ -209,6 +209,25 @@ button {
 .chip.sel { color: var(--accent); border-color: var(--accent); }
 .chip.custom { display: none; pointer-events: none; }
 
+/* the STEPS row's custom numeric input — chip-shaped; sel when a non-preset value is live */
+#steps-custom {
+  width: 58px;
+  padding: 5px 8px;
+  border: 1px solid #26262c;
+  border-radius: 5px;
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  text-align: center;
+}
+#steps-custom::placeholder { color: #4a4a52; }
+#steps-custom:hover { color: var(--text); border-color: #3a3a44; }
+#steps-custom:focus { color: var(--text); border-color: #3a3a44; outline: none; }
+#steps-custom.sel { color: var(--accent); border-color: var(--accent); }
+#steps-custom.invalid { color: var(--danger); border-color: var(--danger); }
+
 /* ── gallery ───────────────────────────────────────────────────────────── */
 
 #gallery-scroll {
@@ -297,6 +316,21 @@ button {
   line-height: 1;
 }
 .tile-x:hover { color: var(--danger); }
+
+/* ◼ STOP on a rendering tile — keeps the work (accent), unlike the discarding × (danger) */
+.tile-stop {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: #000000b0;
+  color: var(--text);
+  font-size: 10px;
+  letter-spacing: 1px;
+  line-height: 1;
+}
+.tile-stop:hover { color: var(--accent); }
 
 .tile-bar {
   position: absolute;

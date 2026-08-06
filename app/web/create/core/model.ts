@@ -50,7 +50,7 @@ import type { SwipeDirection } from '@kit/reel-strip/core'
 import type { Env } from '@kit/env/core'
 import { feel } from './feel'
 import type { InitAttachment } from './init'
-import type { AspectId, LookId, SeedMode, SizeId, StepsId } from './presets'
+import type { AspectId, LookId, SeedMode, SizeId } from './presets'
 
 export type SessionState = 'rendering' | 'stopped' | 'done' | 'failed' | 'imported'
 export type TerminalState = 'done' | 'stopped' | 'failed'
@@ -119,7 +119,10 @@ export type Composer = {
   // null = "inherit tweak base" — reachable ONLY while tweak != null.
   aspect: AspectId | null
   size: SizeId | null
-  steps: StepsId | null // steps_per_scene verbatim (§5.1 — the biggest lever)
+  // steps_per_scene verbatim (§5.1 — the biggest lever). Always a concrete validated
+  // positive integer — no null-inherit: chips are shortcuts, the custom input takes
+  // 1..MAX_CUSTOM_STEPS, and a tweak base rematerializes via rematerializeSteps (§5.3).
+  steps: number
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null

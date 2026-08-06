@@ -88,6 +88,19 @@ export async function uploadFile(data: Blob, name: string): Promise<UploadResult
   return { ok: false, message: parseErrorBody(await res.json()) }
 }
 
+export type StopResult = { ok: true } | { ok: false; message: string }
+
+// POST /api/sessions/{id}/stop (A13) — gracefully stop the RUNNING render. 202 = the
+// server SIGTERMed the render's process group and published 'stopping'; the session
+// finalizes as 'stopped' (frames kept, FIFO advances) via SSE. 404 is expected-
+// recoverable data: the render reached a terminal state in the gap.
+export async function postStop(id: string): Promise<StopResult> {
+  const res = await fetch(`/api/sessions/${id}/stop`, { method: 'POST' })
+  if (res.status === 202) return { ok: true }
+  if (res.status === 404) return { ok: false, message: parseErrorBody(await res.json()) }
+  throw new Error(`POST /api/sessions/${id}/stop -> unexpected status ${res.status}`)
+}
+
 export type EncodeResult = { ok: true; jobId: string } | { ok: false; message: string }
 
 export async function postEncode(id: string): Promise<EncodeResult> {

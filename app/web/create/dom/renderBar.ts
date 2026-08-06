@@ -8,6 +8,7 @@ import { spring, springGoToEnd, springMostlyDone, springStep } from '@kit/midui/
 import { uploadUrl } from '../core/api'
 import { maskEditingLocked } from '../core/init'
 import type { CreateState } from '../core/model'
+import { STEPS_IDS } from '../core/presets'
 
 let promptEl: HTMLInputElement
 let goEl: HTMLButtonElement
@@ -17,6 +18,7 @@ let sseEl: HTMLElement
 let chips: { el: HTMLElement; row: 'aspect' | 'size' | 'steps' | 'look' | 'init'; value: string | null }[] = []
 let seedRandomEl: HTMLElement
 let seedLockedEl: HTMLElement
+let stepsCustomEl: HTMLInputElement
 let initRowEl: HTMLElement
 let initNoteEl: HTMLElement
 let holdEl: HTMLElement
@@ -70,7 +72,9 @@ export function initBar(deps: {
     chips.push({ el, row: 'size', value: el.dataset['size'] === 'custom' ? null : el.dataset['size']! })
   }
   for (const el of popEl.querySelectorAll<HTMLElement>('[data-steps]')) {
-    chips.push({ el, row: 'steps', value: el.dataset['steps'] === 'custom' ? null : el.dataset['steps']! })
+    // No CUSTOM chip in this row — the custom input is the custom path (§5.1),
+    // so every dataset value feeds parseStepsId verbatim.
+    chips.push({ el, row: 'steps', value: el.dataset['steps']! })
   }
   for (const el of popEl.querySelectorAll<HTMLElement>('[data-look]')) {
     chips.push({ el, row: 'look', value: el.dataset['look'] === 'custom' ? null : el.dataset['look']! })
@@ -80,6 +84,7 @@ export function initBar(deps: {
   }
   seedRandomEl = mustQuery('[data-seed="random"]')
   seedLockedEl = mustQuery('[data-seed="locked"]')
+  stepsCustomEl = mustQuery('#steps-custom') as HTMLInputElement
   initRowEl = mustQuery('#init-row')
   initNoteEl = mustQuery('#init-note')
   holdEl = mustQuery('[data-hold]')
@@ -99,8 +104,9 @@ function rowValue(state: CreateState, row: 'aspect' | 'size' | 'steps' | 'look' 
       return state.composer.size
     case 'steps':
       // The chips' dataset strings are the numbers verbatim — String() is the dual of
-      // main's parseStepsId at the same dom boundary.
-      return state.composer.steps == null ? null : String(state.composer.steps)
+      // main's parseStepsId at the same dom boundary. steps is never null (§5.3:
+      // always a concrete validated number), so this row never shows a CUSTOM chip.
+      return String(state.composer.steps)
     case 'look':
       return state.composer.look
     case 'init':
@@ -178,6 +184,16 @@ export function renderBar(state: CreateState, springSteps: number): boolean {
         chip.el.classList.toggle('sel', current === chip.value)
       }
     }
+    // The steps CUSTOM input: a preset value lives on its chip (input empty); any other
+    // value shows as the number itself, highlighted like a selected chip. Never rewrite
+    // while focused — main's input listener owns the text mid-edit (invalid text keeps
+    // the last valid composer.steps); this projection re-syncs on blur/close.
+    if (document.activeElement !== stepsCustomEl) {
+      const text = STEPS_IDS.includes(state.composer.steps) ? '' : String(state.composer.steps)
+      if (stepsCustomEl.value !== text) stepsCustomEl.value = text
+      stepsCustomEl.classList.remove('invalid')
+    }
+    stepsCustomEl.classList.toggle('sel', !STEPS_IDS.includes(state.composer.steps))
     const seed = state.composer.seedMode
     seedRandomEl.classList.toggle('sel', seed.kind === 'random')
     seedLockedEl.classList.toggle('sel', seed.kind === 'locked')

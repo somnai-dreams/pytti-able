@@ -353,7 +353,6 @@ type QueueItem = { id: string; position: number; prompt: string; sizeX: number; 
 
 type AspectId = '1:1' | '3:4' | '4:3' | '16:9'
 type SizeId = 'draft' | 'full'
-type StepsId = 150 | 200 | 300 | 450 | 600   // steps_per_scene verbatim (§5.1)
 type LookId = 'limited' | 'unlimited' | 'vqgan'
 type SeedMode = { kind: 'random' } | { kind: 'locked'; seed: number }
 
@@ -363,7 +362,11 @@ type Composer = {
   // composer always has concrete ids). Renders as a CUSTOM chip in the popover.
   aspect: AspectId | null
   size: SizeId | null
-  steps: StepsId | null
+  // steps_per_scene verbatim (§5.1) — a plain validated positive integer, never
+  // null: the chips are shortcuts that set it, the gear's custom input takes
+  // 1..20000, and a tweak base rematerializes concretely (§5.3). Replaced the
+  // StepsId literal union 2026-08-05 ("way more than 600 steps" + custom).
+  steps: number
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
@@ -444,10 +447,19 @@ shape within the class. `resolveDims(aspect, size)` is a pure table lookup:
 | `draft` | 256 |
 | `full` | 512 |
 
-**STEPS** is the literal union `150 | 200 | 300 | 450 | 600` — `steps_per_scene`
-**verbatim** in the payload, displayed in the gear as the actual numbers, no
-euphemism labels. The lead's directive, verbatim: "i desperately need to be able
-to control the step count from the settings dropdown, its the biggest lever."
+**STEPS** is a plain validated number (reworked 2026-08-05 — "i need an option
+for way more than 600 steps. let me also add a custom amount if i want"), still
+`steps_per_scene` **verbatim** in the payload and displayed as the actual
+numbers, no euphemism labels. The preset chips are `150 · 200 · 300 · 600 ·
+1200 · 2400` (450 retired) — **shortcuts** that set `composer.steps`, not a
+closed set. Next to them sits the **CUSTOM input** (`#steps-custom`): a positive
+integer `1..20000` (`MAX_CUSTOM_STEPS`), parsed at the boundary by
+`parseCustomSteps` (invalid text is recoverable data — the input marks itself
+`invalid`, the composer keeps its last valid number, and the projection re-syncs
+the text on blur). A `composer.steps` value matching a chip highlights that
+chip (input empty); any other value shows in the input, highlighted as the
+selection. The original directive stands: "i desperately need to be able to
+control the step count from the settings dropdown, its the biggest lever."
 The detail-recovery battery (2026-08-06, `/tmp/pytti-eval/detail-recovery/report.md`)
 established steps as the dominant detail lever — 300 beat 200 at 7W/1L on the
 calibrated judge. The user controls the count now; nothing in Create adjusts it
@@ -460,7 +472,7 @@ behind the gear.
 | `vqgan` | `VQGAN` |
 
 Popover display labels: `1:1 · 3:4 · 4:3 · 16:9`; `DRAFT · FULL`;
-`150 · 200 · 300 · 450 · 600`; `LIMITED · UNLIMITED · VQGAN`;
+`150 · 200 · 300 · 600 · 1200 · 2400 · [custom]`; `LIMITED · UNLIMITED · VQGAN`;
 `SEED ⚄ RANDOM / 🔒 <n>`.
 
 Fresh composer defaults: `1:1`, `full`, `200`, `limited`, random seed — exactly
@@ -494,16 +506,31 @@ its exact meaning.)
   fetched at boot). This is parse-at-the-boundary: a snapshot key the server's
   coercion would 400 on (e.g. anything non-schema) never leaves the client.
 
-### 5.3 `matchPresets(values): { aspect, size, steps, look }` (reverse map, for Tweak)
+### 5.3 `matchPresets(values): { aspect, size, look }` + `rematerializeSteps` (reverse map, for Tweak)
 
 Exact-match only: `(width,height)` against the dims table → aspect **and** size
 together (a pair in the 256 table is `draft`, in the 512 table `full`; a miss
-leaves both `null` — never one without the other); `steps_per_scene` ∈
-{150,200,300,450,600} → steps, **independent of the dims class** (the controls
-are decoupled — 512×512 at 150 steps rematerializes `full` + `150`, both
-concrete); `image_model` against the look table → look. Any miss → `null` for
-that control (renders as `CUSTOM`, inherits base on submit). No nearest-neighbor
-guessing — 275 steps is `CUSTOM`, never rounded to 300.
+leaves both `null` — never one without the other); `image_model` against the
+look table → look. Any miss → `null` for that control (renders as `CUSTOM`,
+inherits base on submit). No nearest-neighbor guessing.
+
+**Steps is no longer preset-matched** (2026-08-05, decided with the
+steps-as-plain-number rework): the base's `steps_per_scene` rematerializes
+**concretely** via `rematerializeSteps(baseValues)` — verbatim when it is a
+positive integer (275 shows as 275 in the custom input, `2400` highlights its
+chip; a bench-authored 50000 rematerializes verbatim, uncapped — the 20000 cap
+governs only what the input *accepts*), else the fresh default `200`
+(`DEFAULT_STEPS`; reachable only for legacy imports without a usable snapshot).
+The steps null-inherit state is **removed**: keeping it was only load-bearing
+while the composer couldn't represent non-preset numbers, and dropping it does
+not touch the composer-null contract for aspect/size/look (each control's null
+stands on its own; nothing switches over them jointly). Consequence, deliberate:
+`composeSubmission` now always emits `steps_per_scene` on a tweak — the
+rematerialized number equals the base's, so an untouched tweak submits the same
+count it always did, and the gear now *shows* it instead of hiding it behind
+CUSTOM (§5.6: what the user sees is exactly what submits). No
+nearest-neighbor doctrine survives at the chips: 275 never highlights 300 — it
+sits in the custom input as itself.
 
 ### 5.4 Seed control
 
@@ -547,9 +574,11 @@ not procedural:
 3. **Enforced by tests on both sides**: `presets.test.ts` walks the full
    composer-option product and fails on any `composeSubmission` key outside
    `VISIBLE_CONTROL_FIELDS ∪ PIN_FIELDS` (fresh) or that union plus the base
-   snapshot (tweak) — a new emitted key cannot land undocumented.
-   `app/test_server.py` asserts the draft file is byte- and mtime-identical
-   across a self-contained POST.
+   snapshot (tweak) — a new emitted key cannot land undocumented. The steps
+   axis of that product is no longer a closed set: it walks the six preset
+   chips PLUS a non-preset custom value (275) and the input's extreme (20000),
+   on both the fresh and tweak sides. `app/test_server.py` asserts the draft
+   file is byte- and mtime-identical across a self-contained POST.
 
 Visible controls (field → the control that determines it):
 
@@ -557,7 +586,7 @@ Visible controls (field → the control that determines it):
 |---|---|
 | `scenes` | the prompt bar |
 | `width`, `height` | ASPECT × SIZE chips (§5.1 dims table) |
-| `steps_per_scene` | STEPS chips (the raw numbers, verbatim) |
+| `steps_per_scene` | STEPS chips + the CUSTOM input (the raw number, verbatim) |
 | `image_model` | LOOK chips |
 | `seed` | SEED toggle (the locked value is displayed next to it) |
 | `init_image` | the attachment chip (thumb + name) |
@@ -684,6 +713,35 @@ deliberately not on the Create surface).
 **A12 — `/`** focuses the bar (unless focus is already in an input). Esc with no
 surface open blurs the bar.
 
+**A13 — STOP the running render (◼ STOP on the rendering tile; added
+2026-08-05, "lets make sure i can stop then whenever i want").**
+`POST /api/sessions/{id}/stop` — the endpoint predates Create (the bench's
+STOP; `server.py` MANAGER.stop): it SIGTERMs the render's process group (202
+`{stopping}`, SIGKILL after a 5 s grace), `_finalize` lands the session in the
+**existing** `'stopped'` terminal state — no new union member was needed; every
+switch over `SessionState` already handles it — and `_start_next()` advances
+the FIFO **exactly like natural completion**. A stopped session keeps
+everything rendered so far: frames in the gallery (`◼ n frames` chip, §7.3),
+TWEAK/RE-RUN from its intact config snapshot, DOWNLOAD/DELETE like any other
+terminal session.
+
+Client flow: guard `tile.state === 'rendering'` and not already `stopping`;
+optimistically set `live.substate = 'stopping'` (the STOPPING chip lands this
+frame; the server's SSE `stopping` event confirms and the terminal `stopped`
+settles it); `postStop` → 202 done. 404 is expected-recoverable data (the
+render reached a terminal state in the gap — the SSE event owns the tile):
+toast `no longer rendering — it already finished`. **Confirm-free**: stopping
+is cheap and non-destructive — it KEEPS the work, unlike the queued tile's ×
+(A8), which discards; the two controls are visually distinct for exactly that
+reason (◼ STOP pill, accent hover vs bare ×, danger hover).
+
+Frames-on-stop caveat (accepted): frames save every `steps_per_frame`
+(~20 steps); the engine has **no** signal-time save — `pytti.workhorse`'s only
+interrupt handling is a `KeyboardInterrupt: pass` (verified 2026-08-05,
+read-only), so a stop keeps the last SAVED frame and up to ~`steps_per_frame`
+steps of optimization past it are lost. Not worth an engine feature; documented
+here and in `test_server.py`.
+
 ### 6.2 SSE events → state mutations
 
 One `EventSource('/api/events')` for the page's lifetime. Every payload goes
@@ -785,9 +843,9 @@ lightbox). Exhaustive tile states:
 | pending `posting` | dashed 1px border, shimmer sweep, prompt's first words centered, no image |
 | queued (one tile PER queue item) | as posting + `QUEUED #n` chip (its 1-based position, refreshed by every queue SSE event as the queue drains) + its own `×` cancel (A8) |
 | pending `starting` | as posting + `STARTING` chip, no cancel |
-| session `rendering` / `launching`/`loading_models` substate | skeleton shimmer (0 frames) or latest thumb; substate label (`warming up…` / `loading models…`); indeterminate bar |
-| session `rendering` / `rendering` substate | latest thumb, swaps on every `frame` event; bottom progress bar `step/stepsTotal`; thin cyan pulse |
-| session `rendering` / `stopping` | as above + `STOPPING` chip, bar frozen |
+| session `rendering` / `launching`/`loading_models` substate | skeleton shimmer (0 frames) or latest thumb; substate label (`warming up…` / `loading models…`); indeterminate bar; `◼ STOP` control top-right (A13 — keeps the work; visually distinct from the queued ×, which discards) |
+| session `rendering` / `rendering` substate | latest thumb, swaps on every `frame` event; bottom progress bar `step/stepsTotal`; thin cyan pulse; `◼ STOP` control top-right |
+| session `rendering` / `stopping` | as above + `STOPPING` chip, bar frozen, `◼ STOP` hidden (one-shot — the request is in flight) |
 | session `done` | newest thumb; no chrome until hover |
 | session `stopped` | newest thumb; small `◼ n frames` chip |
 | session `failed` | thumb if `frames > 0` else dark slab; `FAILED` chip (danger); hover footer shows `failExcerpt` first line |
@@ -955,15 +1013,18 @@ Exactly the chassis-notes composition:
         │ ⌕  prompt…                                       ⚙ ▶ │
         └───────────────────────────────────┬──────────────────┘
                                             │
-                          ┌─────────────────▼──────────────────┐
-                          │ ASPECT   [1:1] [3:4] [4:3] [16:9]  │
-                          │ SIZE     [DRAFT] [FULL]            │
-                          │ STEPS    [150][200][300][450][600] │
-                          │ LOOK     [LIMITED] [UNLTD] [VQGAN] │
-                          │ SEED     [⚄ RANDOM] [🔒 3982117]   │
-                          └────────────────────────────────────┘
-   segmented chips, one selected per row — nothing else, ever.
-   Tweak mode may show [CUSTOM] as the selected chip on a row (§5.3).
+                          ┌─────────────────▼───────────────────────────────┐
+                          │ ASPECT   [1:1] [3:4] [4:3] [16:9]               │
+                          │ SIZE     [DRAFT] [FULL]                         │
+                          │ STEPS    [150][200][300][600][1200][2400][____] │
+                          │ LOOK     [LIMITED] [UNLTD] [VQGAN]              │
+                          │ SEED     [⚄ RANDOM] [🔒 3982117]                │
+                          └─────────────────────────────────────────────────┘
+   segmented chips, one selected per row — nothing else, ever. STEPS ends in
+   the custom numeric input (§5.1): a non-preset value (e.g. 275) shows there,
+   highlighted as the selection; preset values leave it empty.
+   Tweak mode may show [CUSTOM] as the selected chip on the aspect/size/look
+   rows (§5.3) — steps always shows its concrete number instead.
 ```
 
 ### 10.3 Tile states (gallery)
@@ -1100,8 +1161,13 @@ DRAFT size / 1:1 / 150 steps so each finishes in ~1 minute on this machine.
 4. On Create, pressing `/` focuses the prompt bar; typing echoes without caret
    jumps; Esc blurs.
 5. ⚙ opens the settings popover with a spring; it contains exactly five rows —
-   aspect (4 chips), size (2), steps (5 numeric chips: 150–600), look (3), seed
-   toggle — and nothing else; outside-click and Esc close it.
+   aspect (4 chips), size (2), steps (6 numeric chips 150–2400 + the custom
+   input), look (3), seed toggle — and nothing else; outside-click and Esc
+   close it. Typing 275 in the custom input un-highlights every steps chip and
+   highlights the input; clicking a steps chip empties it again; typing 20001
+   or junk marks the input invalid and keeps the last valid number — parsing is
+   live, so valid prefixes commit as typed (20001 lands on the 2000 typed en
+   route) and blur re-syncs the text to that committed value.
 6. Type a prompt, Enter: an optimistic tile appears at the top-left **in the
    same frame** (before any network response — verify via throttled network),
    then transitions through `warming up…`/`loading models…` into a live
@@ -1370,15 +1436,15 @@ The row exists **iff** `composer.init != null` (the popover has five rows
 without an attachment, six with — item 5 is amended accordingly):
 
 ```
-   ┌─────────────────────────────────────────────┐
-   │ ASPECT   [1:1] [3:4] [4:3] [16:9]           │
-   │ SIZE     [DRAFT] [FULL]                     │
-   │ STEPS    [150] [200] [300] [450] [600]      │
-   │ LOOK     [LIMITED] [UNLTD] [VQGAN]          │
-   │ SEED     [⚄ RANDOM] [🔒 3982117]            │
-   │ INIT     [SUBTLE] [MEDIUM] [STRONG]  ◈ HOLD │
-   │          torch engine                       │  ← note, only while HOLD is on
-   └─────────────────────────────────────────────┘
+   ┌─────────────────────────────────────────────────┐
+   │ ASPECT   [1:1] [3:4] [4:3] [16:9]               │
+   │ SIZE     [DRAFT] [FULL]                         │
+   │ STEPS    [150][200][300][600][1200][2400][____] │
+   │ LOOK     [LIMITED] [UNLTD] [VQGAN]              │
+   │ SEED     [⚄ RANDOM] [🔒 3982117]                │
+   │ INIT     [SUBTLE] [MEDIUM] [STRONG]  ◈ HOLD     │
+   │          torch engine                           │  ← note, only while HOLD is on
+   └─────────────────────────────────────────────────┘
 ```
 
 - Strength chips map to `direct_init_weight` `1.5 / 4 / 10`; **medium is the

@@ -1426,3 +1426,23 @@ init_spectrum_falloff:
     the natural ~1/f^2 power spectrum of photographs; higher values push
     energy into low frequencies for smoother, cloudier starts; values near
     0 approach white noise. Only consulted when INIT SPECTRUM is pink.
+
+init_spectrum_chroma:
+  label: INIT CHROMA
+  type: CHOICE
+  section: null
+  group: seeding
+  relevantWhen: {field: init_spectrum, in: ["pink", "fractal"]}
+  hint: >-
+    Color structure of shaped init noise: mono (brightness only), natural
+    (natural-image color statistics), full (independent RGB channels).
+  prose: >-
+    How much the shaped init noise gets to vote on color. full = three
+    independent channel fields — the low-frequency differences between
+    them are literal color blobs that can drive the final palette (the
+    chroma-leakage failure mode). natural = fields generated in a
+    decorrelated color basis with natural-image variance ratios: mostly
+    luminance structure, a whisper of chroma. mono = one luminance field
+    broadcast to all channels — full composition prior, zero palette
+    push. For Limited Palette, mono shapes only the brightness plane and
+    leaves palette selection unshaped. Ignored for white and gray.

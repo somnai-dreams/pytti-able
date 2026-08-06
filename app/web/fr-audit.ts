@@ -46,7 +46,11 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // 1/10 -> 2/10 with the SIZE/STEPS split: qualitySteps (unsupported Record read)
   // retired; parseStepsId (numeric exact-match loop, ensures return in 150..600) is
   // fully analyzed alongside dimsTable.
-  { file: 'create/core/presets.ts', coverage: '2/10', partial: 0 },
+  // 2/10 -> 2/12 with steps-as-plain-number: +parseCustomSteps (string domain —
+  // regex boundary, unsupported as expected), +rematerializeSteps (Record read,
+  // unsupported as expected). Both covered by presets.test.ts. parseStepsId's
+  // table is now 150..2400 (450 retired; 1200/2400 added) — same analyzed shape.
+  { file: 'create/core/presets.ts', coverage: '2/12', partial: 0 },
   { file: 'create/core/surfaces.ts', coverage: '1/2', partial: 0 },
 ]
 

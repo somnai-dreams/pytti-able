@@ -17,6 +17,14 @@ Invariants under test:
   without wedging the queue (even when preflight raises or the failure record
   cannot be written), and preempt parks at the head with the rest of the queue
   intact behind it, REPLACING a previous still-parked preemptor.
+- STOP is first-class (POST /api/sessions/{id}/stop): the running render lands
+  'stopped' keeping its frames and config snapshot (tweak/re-run capable), the
+  FIFO auto-advances exactly like natural completion, double-stop is idempotent,
+  and stop-with-nothing-running is a clean 404. The stop/finalize ordering is
+  pinned: the 'stopping' write happens under the manager lock (a stop landing as
+  the render exits naturally can never revert the terminal record), pump phase
+  announces are dropped once stop is requested, and the next spawn starts with a
+  clean stop_requested flag.
 
 Run: .venv/bin/python app/test_server.py
 """
@@ -25,6 +33,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import signal
 import sys
 import tempfile
 import time
@@ -257,8 +267,15 @@ class TestDraftBasedPathRegression(SessionsPostBase):
 
 
 class FakeProc:
-    """Sentinel standing in for a live subprocess: MANAGER only checks `is not None`."""
+    """Sentinel standing in for a live subprocess: MANAGER checks `is not None`;
+    stop()'s SIGTERM enforcer also calls wait(). The pid is an arbitrary sentinel,
+    NOT protection — Linux pid_max can exceed any constant — so tests routing
+    through the real MANAGER.stop monkeypatch os.killpg (TestStopEndpoint.setUp)
+    instead of trusting the pid to be unused."""
     pid = 424242
+
+    def wait(self, timeout=None):
+        return 0
 
 
 class QueueBase(unittest.TestCase):
@@ -652,6 +669,194 @@ class TestQueueAutoStart(QueueBase):
         p2 = self.manager.preempt({"scenes": "preempt two", "width": 256, "height": 256}, None, False)
         self.assertEqual(p2["preempting"], p1["queuedId"])
         self.assertEqual(self.queue_ids(), [p2["queuedId"], a])  # a survives — no replace
+
+
+class TestStopEndpoint(QueueBase):
+    """POST /api/sessions/{id}/stop — stop-anytime, first-class (2026-08-05; the
+    endpoint predates Create as the bench's STOP; these tests pin the contract
+    Create's ◼ STOP tile control relies on): 202 {stopping}; the session finalizes
+    'stopped' KEEPING every frame rendered so far (gallery-visible, tweak/re-run
+    capable via its intact config snapshot); the FIFO auto-advances exactly like
+    natural completion; stop with nothing running (or after the terminal state)
+    is a clean 404. Frames caveat, accepted: the engine has no signal-time save
+    (workhorse's KeyboardInterrupt handler just exits), so a stop keeps the last
+    SAVED frame — up to ~steps_per_frame steps of work past it are lost."""
+
+    LIVE = "s-8000-live"
+
+    def setUp(self):
+        super().setUp()
+        self.started: list = []
+
+        def fake_spawn_locked(values, fork_of, seed_locked, session_id=None):
+            self.started.append(session_id)
+            self.manager.proc = FakeProc()
+            self.manager.live_id = session_id
+            self.manager.stop_requested = False  # mirrors the real _spawn_locked reset
+            return session_id, 1234, FakeProc()
+
+        self.manager._spawn_locked = fake_spawn_locked
+        self.manager._announce_spawn = lambda sid, seed, proc: None
+
+        # These tests route through the REAL MANAGER.stop, so killpg must be stubbed:
+        # FakeProc's pid is no guarantee of an unused process group (Linux pid_max can
+        # exceed any constant) — recording the calls also lets tests assert the SIGTERM.
+        self.killpg_calls: list = []
+        self._orig_killpg = os.killpg
+
+        def fake_killpg(pgid, sig):
+            self.killpg_calls.append((pgid, sig))
+            raise ProcessLookupError(pgid)
+
+        os.killpg = fake_killpg
+
+    def tearDown(self):
+        os.killpg = self._orig_killpg
+        super().tearDown()
+
+    def seed_live_session(self, frames=0):
+        frames_dir = server.OUTPUTS_DIR / self.LIVE / "images_out" / self.LIVE
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for n in range(frames):
+            (frames_dir / f"{self.LIVE}_{n + 1:04d}.png").write_bytes(b"png")
+        server.STORE.put({
+            "schemaVersion": 1, "id": self.LIVE, "slug": "live", "state": "rendering",
+            "seed": 1, "startedAt": server.now_ms(), "stepsDone": 0, "stepsTotal": 100,
+            "frames": frames, "forkedFrom": None, "artifacts": [],
+            "config": {"scenes": "live prompt", "width": 256, "height": 256, "steps_per_scene": 100},
+        })
+        self.make_busy(self.LIVE)
+        self.manager.started_at = time.time()
+
+    def finalize_live(self):
+        # The SIGTERMed render exits (negative exit code); the pump thread finalizes.
+        self.manager._finalize(self.LIVE, -15, [])
+
+    def test_stop_running_202_keeps_frames_and_advances_queue(self):
+        self.seed_live_session(frames=3)
+        queued = self.manager.enqueue(
+            {"scenes": "next in line", "width": 256, "height": 256}, None, False)["queuedId"]
+        status, resp = http("POST", f"/api/sessions/{self.LIVE}/stop")
+        self.assertEqual(status, 202)
+        self.assertEqual(resp, {"stopping": self.LIVE})
+        self.assertTrue(self.manager.stop_requested)
+        self.assertEqual(server.STORE.sessions[self.LIVE]["state"], "stopping")
+        self.assertEqual(self.queue_ids(), [queued])  # stop itself never touches the queue
+        self.finalize_live()
+        s = server.STORE.sessions[self.LIVE]
+        self.assertEqual(s["state"], "stopped")  # terminal — gallery shows its frames
+        self.assertEqual(s["frames"], 3)  # KEEPS everything rendered so far
+        self.assertIsNone(s.get("failExcerpt"))
+        self.assertIsNotNone(s.get("endedAt"))
+        # …and the FIFO advanced exactly like natural completion
+        self.assertEqual(self.started, [queued])
+        self.assertEqual(self.queue_ids(), [])
+        self.assertIn((FakeProc.pid, signal.SIGTERM), self.killpg_calls)  # the group was signalled
+        # the advanced render starts with a CLEAN flag — a stale True would finalize
+        # every queue-advanced render after any stop as 'stopped' regardless of its
+        # real exit code (the real reset is pinned by test_real_spawn_resets_stop_requested)
+        self.assertFalse(self.manager.stop_requested)
+
+    def test_stop_with_empty_queue_idles(self):
+        self.seed_live_session(frames=1)
+        status, _ = http("POST", f"/api/sessions/{self.LIVE}/stop")
+        self.assertEqual(status, 202)
+        self.finalize_live()
+        self.assertEqual(server.STORE.sessions[self.LIVE]["state"], "stopped")
+        self.assertIsNone(self.manager.proc)
+        self.assertIsNone(self.manager.live_id)
+        self.assertEqual(self.started, [])
+        self.assertEqual(self.queue_ids(), [])
+
+    def test_stop_then_detail_supports_tweak(self):
+        # TWEAK/RE-RUN rematerialize from GET /api/sessions/{id}'s config snapshot —
+        # a stopped session must serve it intact, exactly like a completed one.
+        self.seed_live_session(frames=2)
+        http("POST", f"/api/sessions/{self.LIVE}/stop")
+        self.finalize_live()
+        status, detail = http("GET", f"/api/sessions/{self.LIVE}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["state"], "stopped")
+        self.assertEqual(detail["frames"], 2)
+        self.assertEqual(detail["config"],
+                         {"scenes": "live prompt", "width": 256, "height": 256, "steps_per_scene": 100})
+
+    def test_double_stop_is_idempotent_then_404_after_terminal(self):
+        self.seed_live_session()
+        s1, _ = http("POST", f"/api/sessions/{self.LIVE}/stop")
+        s2, _ = http("POST", f"/api/sessions/{self.LIVE}/stop")
+        self.assertEqual((s1, s2), (202, 202))  # impatient double-click: one death, no error
+        self.finalize_live()
+        self.assertEqual(server.STORE.sessions[self.LIVE]["state"], "stopped")
+        s3, _ = http("POST", f"/api/sessions/{self.LIVE}/stop")
+        self.assertEqual(s3, 404)  # nothing running under this id anymore — clean 4xx
+        # …and the late stop never touched the settled record: a terminal state
+        # must stay terminal (the stop/finalize race, other interleaving)
+        self.assertEqual(server.STORE.sessions[self.LIVE]["state"], "stopped")
+
+    def test_stopping_write_holds_the_manager_lock(self):
+        # THE stop/finalize race (a stop landing at the instant the render exits
+        # naturally): the 'stopping' record write must serialize against _finalize's
+        # terminal write, i.e. happen while the manager lock is held — an unlocked
+        # write can land AFTER 'stopped' and permanently revert the record to a
+        # non-terminal state (phantom rendering tile until the next server restart).
+        self.seed_live_session()
+        locked_at_write = []
+        orig_update = server.STORE.update
+
+        def spy_update(sid, **fields):
+            if fields.get("state") == "stopping":
+                locked_at_write.append(self.manager._lock.locked())
+            return orig_update(sid, **fields)
+
+        server.STORE.update = spy_update
+        try:
+            status, _ = http("POST", f"/api/sessions/{self.LIVE}/stop")
+        finally:
+            del server.STORE.update  # instance attr; deleting restores the real method
+        self.assertEqual(status, 202)
+        self.assertEqual(locked_at_write, [True])
+
+    def test_phase_announce_dropped_once_stopping(self):
+        # tqdm/log lines already in the pipe when stop() lands (or emitted during the
+        # SIGTERM grace) reach the pump's one-shot phase announce AFTER the 'stopping'
+        # write; the flip must be dropped or the client's STOPPING chip reverts to a
+        # live bar and the STOP control resurfaces mid-stop (spec §7.3).
+        self.seed_live_session()
+        http("POST", f"/api/sessions/{self.LIVE}/stop")
+        self.manager._announce_phase(self.LIVE, "rendering")
+        self.assertEqual(server.STORE.sessions[self.LIVE]["state"], "stopping")
+
+    def test_real_spawn_resets_stop_requested(self):
+        # The production reset lives in _spawn_locked (the fake above mirrors it):
+        # pin the REAL one — a refactor dropping it would poison every queue-advanced
+        # render after any stop (stop_requested stays True across _finalize ->
+        # _start_next -> spawn, finalizing them all as 'stopped').
+        self.manager.stop_requested = True
+        orig_popen = server.subprocess.Popen
+        orig_conf_dir = server.SESSIONS_CONF_DIR
+        server.subprocess.Popen = lambda *a, **k: FakeProc()
+        server.SESSIONS_CONF_DIR = Path(self._tmp.name) / "_sessions"
+        try:
+            with self.manager._lock:
+                server.RenderManager._spawn_locked(
+                    self.manager, {"scenes": "clean flag", "width": 256, "height": 256}, None, False)
+        finally:
+            server.subprocess.Popen = orig_popen
+            server.SESSIONS_CONF_DIR = orig_conf_dir
+        self.assertFalse(self.manager.stop_requested)
+
+    def test_stop_nothing_running_404(self):
+        status, _ = http("POST", "/api/sessions/s-0042-anything/stop")
+        self.assertEqual(status, 404)
+        self.assertIsNone(self.manager.proc)
+
+    def test_stop_wrong_id_404_live_untouched(self):
+        self.seed_live_session()
+        status, _ = http("POST", "/api/sessions/s-0042-other/stop")
+        self.assertEqual(status, 404)
+        self.assertIsNotNone(self.manager.proc)
+        self.assertFalse(self.manager.stop_requested)
 
 
 if __name__ == "__main__":

@@ -771,8 +771,15 @@ class RenderManager:
                 raise KeyError(session_id)
             self.stop_requested = True
             proc = self.proc
-        STORE.update(session_id, state="stopping")
-        HUB.publish("state", {"sessionId": session_id, "state": "stopping"})
+            # 'stopping' is written and published UNDER the lock so it serializes
+            # against _finalize: a stop landing at the instant the render exits
+            # naturally used to run these lines unlocked AFTER the terminal
+            # write/publish, permanently reverting the record to non-terminal and
+            # flipping settled client tiles back to STOPPING. _finalize clears
+            # proc inside its locked section, so whichever side wins the lock,
+            # 'stopping' either precedes the terminal event or becomes a KeyError.
+            STORE.update(session_id, state="stopping")
+            HUB.publish("state", {"sessionId": session_id, "state": "stopping"})
         import signal
 
         def signal_group(sig):
@@ -906,6 +913,18 @@ class RenderManager:
 
     # ── subprocess plumbing ────────────────────────────────────────────────
 
+    def _announce_phase(self, sid: str, state: str):
+        """Pump-side phase flip ('loading_models'/'rendering'), checked and written
+        under the lock: lines already in the pipe when stop() lands (or emitted
+        during the SIGTERM grace) must not overwrite 'stopping' — the STOPPING chip
+        is one-shot (spec §7.3), so once stop_requested is set the phase flip is
+        dropped and the next state event the client sees is the terminal one."""
+        with self._lock:
+            if self.stop_requested:
+                return
+            STORE.update(sid, state=state)
+            HUB.publish("state", {"sessionId": sid, "state": state, "seed": STORE.sessions[sid].get("seed")})
+
     def _pump_stdout(self, proc: subprocess.Popen, sid: str):
         self._fail_tail = deque(maxlen=25)
         try:
@@ -949,8 +968,7 @@ class RenderManager:
             if m:
                 if not rendering_announced:
                     rendering_announced = True
-                    STORE.update(sid, state="rendering")
-                    HUB.publish("state", {"sessionId": sid, "state": "rendering", "seed": STORE.sessions[sid].get("seed")})
+                    self._announce_phase(sid, "rendering")
                 bar_step, _bar_total = int(m.group(1)), int(m.group(2))
                 rate = float(m.group(3))
                 s_per_step = rate if m.group(4) == "s/it" else (1.0 / rate if rate else 0.0)
@@ -993,8 +1011,7 @@ class RenderManager:
                     self.scene = max(0, scene_prompts_seen - 1)
                 if not rendering_announced:
                     rendering_announced = True
-                    STORE.update(sid, state="rendering")
-                    HUB.publish("state", {"sessionId": sid, "state": "rendering", "seed": STORE.sessions[sid].get("seed")})
+                    self._announce_phase(sid, "rendering")
                 HUB.publish("log", {"sessionId": sid, "line": text, "kind": "scene"})
                 continue
             if is_noise:
@@ -1005,8 +1022,7 @@ class RenderManager:
             elif re.search(r"warn", text, re.IGNORECASE):
                 kind = "warn"
             if not rendering_announced and re.search(r"Loading CLIP|Loading AdaBins|Downloading", text):
-                STORE.update(sid, state="loading_models")
-                HUB.publish("state", {"sessionId": sid, "state": "loading_models", "seed": STORE.sessions[sid].get("seed")})
+                self._announce_phase(sid, "loading_models")
             HUB.publish("log", {"sessionId": sid, "line": text, "kind": kind})
           except Exception:
             # one bad line must never stop the pump: stdout has to keep

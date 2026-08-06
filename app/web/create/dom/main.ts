@@ -32,7 +32,17 @@ import {
   type SseEvent,
   type Tile,
 } from '../core/model'
-import { composeSubmission, composerDims, matchPresets, parseStepsId, type SubmissionPayload, submittableValues } from '../core/presets'
+import {
+  composeSubmission,
+  composerDims,
+  DEFAULT_STEPS,
+  matchPresets,
+  parseCustomSteps,
+  parseStepsId,
+  rematerializeSteps,
+  type SubmissionPayload,
+  submittableValues,
+} from '../core/presets'
 import { topmostDismissable } from '../core/surfaces'
 import * as net from './net'
 import { initBar, renderBar } from './renderBar'
@@ -95,7 +105,7 @@ const state: CreateState = {
     prompt: '',
     aspect: '1:1',
     size: 'full', // the retired 'standard' quality's pair: 512-class dims + 200 steps —
-    steps: 200, //   the never-opened-gear payload is byte-identical (§5.1)
+    steps: DEFAULT_STEPS, //   the never-opened-gear payload is byte-identical (§5.1)
     look: 'limited',
     seedMode: { kind: 'random' },
     tweak: null,
@@ -477,7 +487,9 @@ async function tweakSession(id: string): Promise<void> {
   const match = matchPresets(config)
   composer.aspect = match.aspect
   composer.size = match.size
-  composer.steps = match.steps
+  // Steps rematerializes CONCRETELY (§5.3): the base's count verbatim (chip highlight
+  // if it matches a preset, the custom input otherwise) — no null-inherit for steps.
+  composer.steps = rematerializeSteps(config)
   composer.look = match.look
   const seed = config['seed']
   composer.seedMode = typeof seed === 'number' ? { kind: 'locked', seed } : { kind: 'random' }
@@ -644,6 +656,38 @@ function cancelQueuedItem(id: string): void {
   })().catch(toastError)
 }
 
+// A13 — STOP the running render (its tile's ◼ STOP): keeps everything rendered so far.
+// The session lands 'stopped' — terminal, gallery-visible, tweak/re-run capable — and
+// the FIFO advances exactly like natural completion (server _finalize -> _start_next).
+// Confirm-free: stopping is cheap and non-destructive (the queued ×, by contrast,
+// discards). Optimistically flip the substate so the STOPPING chip lands this frame;
+// the server's SSE 'stopping' event confirms, and the terminal 'stopped' settles it.
+// A 404 means it already reached a terminal state in the gap — the SSE event owns the
+// tile; just say so.
+function stopSession(id: string): void {
+  const tile = findTile(state.tiles, id)
+  if (tile == null || tile.state !== 'rendering') return
+  const live = tile.live
+  if (live != null && live.substate === 'stopping') return // already stopping
+  const prior = live == null ? null : live.substate
+  if (live != null) live.substate = 'stopping'
+  loop.scheduleRender()
+  void (async () => {
+    const result = await net.postStop(id)
+    if (!result.ok) toastNow('no longer rendering — it already finished')
+  })().catch((err: unknown) => {
+    // The POST never took effect (network refusal, server 500): no SSE event will
+    // clear the optimistic chip — progress ticks deliberately never touch substate —
+    // so restore the prior substate or the tile is stuck STOPPING with the STOP
+    // control hidden and the re-entry guard blocking every retry.
+    if (live != null && tile.live === live && live.substate === 'stopping' && prior != null) {
+      live.substate = prior
+      loop.scheduleRender()
+    }
+    toastError(err)
+  })
+}
+
 // --- lightbox open/close (A9)
 
 function openLightbox(id: string): void {
@@ -777,7 +821,7 @@ promptEl.addEventListener('input', () => {
       state.composer.tweak = null
       state.composer.aspect = '1:1'
       state.composer.size = 'full'
-      state.composer.steps = 200
+      state.composer.steps = DEFAULT_STEPS
       state.composer.look = 'limited'
       state.composer.seedMode = { kind: 'random' }
     }
@@ -836,7 +880,7 @@ popoverEl.addEventListener('click', (e) => {
   const init = state.composer.init
   if (aspect != null && aspect !== 'custom') state.composer.aspect = aspect as CreateState['composer']['aspect']
   else if (size != null && size !== 'custom') state.composer.size = size as CreateState['composer']['size']
-  else if (steps != null && steps !== 'custom') state.composer.steps = parseStepsId(steps)
+  else if (steps != null) state.composer.steps = parseStepsId(steps) // chips = shortcuts; no custom chip (the input is the custom path)
   else if (look != null && look !== 'custom') state.composer.look = look as CreateState['composer']['look']
   else if (seed === 'random') state.composer.seedMode = { kind: 'random' }
   else if (seed === 'locked') state.composer.seedMode = { kind: 'locked', seed: pinnedSeed() }
@@ -844,6 +888,20 @@ popoverEl.addEventListener('click', (e) => {
   else if (chip.dataset['hold'] != null && init != null) init.holdMeaning = !init.holdMeaning
   loop.scheduleRender()
 })
+
+// The steps CUSTOM input (§5.1): parseCustomSteps is the boundary — a valid integer
+// (1..MAX_CUSTOM_STEPS) sets composer.steps live (chips re-highlight on match); invalid
+// text is ignored (composer keeps its last valid number, mirroring the empty-prompt
+// no-op guard) and marked on the input; renderBar re-syncs the text on blur.
+const stepsCustomEl = mustGet('steps-custom') as HTMLInputElement
+stepsCustomEl.addEventListener('input', () => {
+  const raw = stepsCustomEl.value
+  const parsed = parseCustomSteps(raw)
+  if (parsed != null) state.composer.steps = parsed
+  stepsCustomEl.classList.toggle('invalid', raw.trim() !== '' && parsed == null)
+  loop.renderNow() // keystroke echo — the chips' highlight tracks the typed value this frame
+})
+stepsCustomEl.addEventListener('blur', () => loop.scheduleRender()) // projection re-syncs the text
 
 // Popover outside-click closes it (A11).
 document.addEventListener('pointerdown', (e) => {
@@ -866,6 +924,11 @@ scrollerEl.addEventListener('click', (e) => {
   if (target.closest('.tile-x') != null) {
     // × only renders on queued entries, whose key is the queue item id.
     if (key != null && key !== 'pending') cancelQueuedItem(key)
+    return
+  }
+  if (target.closest('.tile-stop') != null) {
+    // ◼ STOP only renders on rendering session tiles, whose key is the session id (A13).
+    if (key != null && key !== 'pending') stopSession(key)
     return
   }
   if (key == null || key === 'pending') return

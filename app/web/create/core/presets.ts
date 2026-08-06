@@ -11,18 +11,24 @@
 // QUALITY preset that bundled them): size picks the dims class, steps is
 // steps_per_scene VERBATIM — the chips show the raw numbers ("its the biggest
 // lever" — the lead; the detail-recovery battery made steps the dominant lever).
+// STEPS is a plain validated number (2026-08-05, "way more than 600 steps" + custom):
+// the chips (150..2400) are shortcuts that set it; the gear's custom input takes any
+// integer 1..MAX_CUSTOM_STEPS. There is NO null-inherit for steps — a tweak base's
+// steps_per_scene rematerializes concretely (rematerializeSteps) and the number the
+// user sees is the number that submits (§5.6).
 //
 // String/JSON domain — outside freerange's numeric subset; presets.test.ts is the
 // checked surface.
 //
 // types:
 //   AspectId = '1:1'|'3:4'|'4:3'|'16:9'    SizeId = 'draft'|'full'  (256- / 512-class)
-//   StepsId = 150|200|300|450|600          LookId = 'limited'|'unlimited'|'vqgan'
+//   LookId = 'limited'|'unlimited'|'vqgan'
 //   SeedMode = {kind:'random'} | {kind:'locked', seed}
-//   ComposerSubmitInput = { prompt, aspect|null, size|null, steps|null, look|null,
+//   ComposerSubmitInput = { prompt, aspect|null, size|null, steps: number, look|null,
 //     seedMode, tweak|null, init: InitSubmitInput|null }   (null preset ids = "inherit
-//     tweak base", reachable only while tweak != null; init per §15.6 — main maps the
-//     attachment through core/init toInitSubmitInput, which enforces image-is-ready)
+//     tweak base", reachable only while tweak != null; steps is never null — §5.3;
+//     init per §15.6 — main maps the attachment through core/init toInitSubmitInput,
+//     which enforces image-is-ready)
 //   SubmissionPayload = { values, forkOf, seedLocked }   — POST /api/sessions body fields
 //
 // constants:
@@ -34,12 +40,20 @@
 //
 // functions:
 //   resolveDims(aspect, size) -> {width, height}        pure table lookup
-//   parseStepsId(raw) -> StepsId                        the STEPS chips' dataset boundary:
+//   parseStepsId(raw) -> number                         the STEPS chips' dataset boundary:
 //     exact match against STEPS_IDS, throws on unknown markup (never a nearest number)
+//   parseCustomSteps(raw) -> number | null              the gear's custom-input boundary:
+//     integer 1..MAX_CUSTOM_STEPS or null (user input is expected-recoverable — data,
+//     not a throw; the dom layer surfaces null as the input's invalid state)
+//   rematerializeSteps(baseValues) -> number            tweak rematerialization (§5.3):
+//     the base's steps_per_scene verbatim when a positive integer, else DEFAULT_STEPS —
+//     always concrete, no null-inherit; what the gear shows is what submits
 //   lookModel(look) -> image_model string
-//   composeSubmission(composer) -> SubmissionPayload    throws on empty prompt or a fresh
-//     composer with null ids (caller-contract violations). Tweak rules: steps_per_scene
-//     overrides only when steps != null (null inherits the base verbatim); width/height
+//   composeSubmission(composer) -> SubmissionPayload    throws on empty prompt, a fresh
+//     composer with null ids, or a non-positive-integer steps (caller-contract
+//     violations — the three steps boundaries above guarantee validity). Tweak rules:
+//     steps_per_scene always carries composer.steps (rematerialized from the base, so
+//     an untouched tweak still submits the base's count verbatim); width/height
 //     override only when aspect != null; their size class comes from size when non-null,
 //     else from exact-matching the BASE dims against the 256 table (miss -> 512 class).
 //     Init rule (§15.6): fresh emits init_image + formatInitWeight (+ semantic '4' and
@@ -49,10 +63,11 @@
 //     (perceptor_backend untouched); holdMeaning pins torch unconditionally when on.
 //   composerDims(composer) -> {width, height}          the dims the submission renders at
 //     (optimistic tile sizing); same dims rule as composeSubmission, base-dims fallback 512x512
-//   matchPresets(values) -> {aspect|null, size|null, steps|null, look|null}   exact-match
-//     only, no nearest-neighbor guessing; dims match one class table -> aspect + size
-//     together (miss -> both null); steps matches a preset number exactly, independent
-//     of the dims class (the controls are decoupled)
+//   matchPresets(values) -> {aspect|null, size|null, look|null}   exact-match only, no
+//     nearest-neighbor guessing; dims match one class table -> aspect + size together
+//     (miss -> both null). Steps is NOT preset-matched anymore — it rematerializes as
+//     a plain number via rematerializeSteps; chip highlighting is a render-time
+//     comparison, not composer state
 //   submittableValues(config, schemaFields) -> Record       whitelist filter
 // @/cs
 import {
@@ -66,15 +81,22 @@ import {
 
 export type AspectId = '1:1' | '3:4' | '4:3' | '16:9'
 export type SizeId = 'draft' | 'full'
-export type StepsId = 150 | 200 | 300 | 450 | 600
 export type LookId = 'limited' | 'unlimited' | 'vqgan'
 export type SeedMode = { kind: 'random' } | { kind: 'locked'; seed: number }
 
 export const ASPECT_IDS: readonly AspectId[] = ['1:1', '3:4', '4:3', '16:9']
 export const SIZE_IDS: readonly SizeId[] = ['draft', 'full']
 // steps_per_scene VERBATIM — the gear shows these numbers, no euphemism labels
-// ("its the biggest lever" — Max; spec §5.1).
-export const STEPS_IDS: readonly StepsId[] = [150, 200, 300, 450, 600]
+// ("its the biggest lever" — Max; spec §5.1). Preset SHORTCUTS, not a closed set:
+// composer.steps is any validated positive integer; these highlight when it matches.
+export const STEPS_IDS: readonly number[] = [150, 200, 300, 600, 1200, 2400]
+// The fresh composer's steps default (§5.1: the retired 'standard' pair, full + 200) —
+// also the rematerialization fallback for a base without a usable steps_per_scene.
+export const DEFAULT_STEPS = 200
+// Custom-input ceiling (spec §5.1): typed values above this are rejected at the input
+// boundary. A tweak BASE beyond it still rematerializes verbatim — the cap governs
+// what the input accepts, not what a bench-authored snapshot may carry.
+export const MAX_CUSTOM_STEPS = 20000
 export const LOOK_IDS: readonly LookId[] = ['limited', 'unlimited', 'vqgan']
 
 type SizeClass = 256 | 512
@@ -115,12 +137,36 @@ export function resolveDims(aspect: AspectId, size: SizeId): { width: number; he
 
 // The STEPS chips' dataset strings enter core through this exact match — unknown
 // markup throws (fail loud, §5.3 doctrine: never a nearest number).
-export function parseStepsId(raw: string): StepsId {
+export function parseStepsId(raw: string): number {
   const n = Number(raw)
   for (const steps of STEPS_IDS) {
     if (steps === n) return steps
   }
   throw new Error(`parseStepsId: unknown steps preset "${raw}"`)
+}
+
+// The gear's custom steps input boundary. User input is a provably shaky boundary —
+// invalid text is expected-recoverable DATA (null), never a throw: the dom layer keeps
+// the last valid number and surfaces null as the input's invalid state. Accepts only
+// a plain positive decimal integer, 1..MAX_CUSTOM_STEPS.
+export function parseCustomSteps(raw: string): number | null {
+  const text = raw.trim()
+  if (!/^\d+$/.test(text)) return null
+  const n = Number(text)
+  if (n < 1 || n > MAX_CUSTOM_STEPS) return null
+  return n
+}
+
+// Tweak rematerialization (§5.3): steps has no null-inherit — the base's count is shown
+// concretely (chip highlight when it matches a preset, the custom input otherwise) and
+// submits verbatim. A base without a usable steps_per_scene (legacy imports with no
+// snapshot, malformed values) falls to DEFAULT_STEPS — shown concretely too, so what
+// the gear displays is exactly what the payload carries (§5.6). NOT capped at
+// MAX_CUSTOM_STEPS: a bench-authored 50000 rematerializes as 50000.
+export function rematerializeSteps(baseValues: Record<string, unknown>): number {
+  const raw = baseValues['steps_per_scene']
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 1) return raw
+  return DEFAULT_STEPS
 }
 
 export function lookModel(look: LookId): string {
@@ -131,7 +177,7 @@ export type ComposerSubmitInput = {
   prompt: string
   aspect: AspectId | null
   size: SizeId | null
-  steps: StepsId | null
+  steps: number // always concrete — validated positive integer (§5.3, no null-inherit)
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
@@ -230,10 +276,15 @@ export function composerDims(composer: ComposerSubmitInput): { width: number; he
 export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayload {
   const prompt = composer.prompt.trim()
   if (prompt === '') throw new Error('composeSubmission: empty prompt (caller must guard)')
+  if (!Number.isInteger(composer.steps) || composer.steps < 1) {
+    // The three steps boundaries (parseStepsId, parseCustomSteps, rematerializeSteps)
+    // guarantee a positive integer — anything else is a caller-contract violation.
+    throw new Error(`composeSubmission: invalid steps ${composer.steps} (must be a positive integer)`)
+  }
   const seedLocked = composer.seedMode.kind === 'locked'
 
   if (composer.tweak == null) {
-    if (composer.aspect == null || composer.size == null || composer.steps == null || composer.look == null) {
+    if (composer.aspect == null || composer.size == null || composer.look == null) {
       throw new Error('composeSubmission: a fresh composer must have concrete preset ids')
     }
     const dims = resolveDims(composer.aspect, composer.size)
@@ -295,7 +346,9 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
     values['width'] = entry[0]
     values['height'] = entry[1]
   }
-  if (composer.steps != null) values['steps_per_scene'] = composer.steps
+  // Steps always carries the composer's concrete number: tweakSession rematerialized
+  // the base's count into it, so an untouched tweak submits the base verbatim (§5.3).
+  values['steps_per_scene'] = composer.steps
   if (composer.look != null) values['image_model'] = lookModel(composer.look)
   switch (composer.seedMode.kind) {
     case 'locked':
@@ -355,7 +408,6 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
 export function matchPresets(values: Record<string, unknown>): {
   aspect: AspectId | null
   size: SizeId | null
-  steps: StepsId | null
   look: LookId | null
 } {
   const width = values['width']
@@ -376,18 +428,8 @@ export function matchPresets(values: Record<string, unknown>): {
     }
   }
 
-  // Decoupled from the dims class (unlike the retired quality preset): any exact preset
-  // number rematerializes concrete, whatever the base renders at.
-  const rawSteps = values['steps_per_scene']
-  let steps: StepsId | null = null
-  if (typeof rawSteps === 'number') {
-    for (const s of STEPS_IDS) {
-      if (s === rawSteps) {
-        steps = s
-        break
-      }
-    }
-  }
+  // Steps is deliberately absent: it is no longer a preset-matched control — the base's
+  // steps_per_scene rematerializes as a plain number via rematerializeSteps (§5.3).
 
   const model = values['image_model']
   let look: LookId | null = null
@@ -400,7 +442,7 @@ export function matchPresets(values: Record<string, unknown>): {
     }
   }
 
-  return { aspect, size, steps, look }
+  return { aspect, size, look }
 }
 
 // Keep only keys the config schema knows — parse-at-the-boundary: a snapshot key the
