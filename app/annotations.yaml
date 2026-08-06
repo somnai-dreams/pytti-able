@@ -1447,6 +1447,42 @@ init_spectrum_chroma:
     push. For Limited Palette, mono shapes only the brightness plane and
     leaves palette selection unshaped. Ignored for white and gray.
 
+fourier_parameterization:
+  label: FOURIER PARAM
+  type: BOOL
+  section: null
+  group: seeding
+  relevantWhen: {field: image_model, in: ["Unlimited Palette"]}
+  hint: >-
+    Optimize the image as a 1/f-scaled Fourier spectrum instead of raw
+    pixels — composition forms before texture by construction (lucid
+    preconditioning). Unlimited Palette + torch backend only.
+  prose: >-
+    The distill.pub/lucid preconditioning: the trainable is an rfft2
+    spectrum whose coefficients are scaled ~1/f^decay, decoded through a
+    decorrelated natural-image color basis and a sigmoid. Low
+    frequencies move with large amplitude from the first step, so global
+    composition settles early and texture arrives later. v1 scope:
+    Unlimited Palette look on the torch backend; refuses MLX backends,
+    other image models, shaped INIT SPECTRUM (its init is 1/f by
+    construction), structure annealing, and animation.
+
+fourier_decay:
+  label: FOURIER DECAY
+  type: NUM
+  section: null
+  group: seeding
+  relevantWhen: {field: fourier_parameterization, in: [true]}
+  hint: >-
+    Spectral shape (0.1-4): higher = softer, more compositional; 1 = the
+    lucid/natural-image balance. Energy-normalized, safe everywhere.
+  prose: >-
+    The amplitude decay power of the spectrum scaling — Aphantasia
+    documented the same knob as "compositional softness". Higher values
+    concentrate optimization energy in coarse structure; lower approach
+    pixel-like behavior. The grid is energy-normalized so any value in
+    range starts near-gray and optimizes healthily.
+
 structure_annealing:
   label: STRUCTURE ANNEALING
   type: BOOL
