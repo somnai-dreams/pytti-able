@@ -190,21 +190,24 @@ function renderFramesStrip(state: CreateState, tile: Tile, resolved: number): vo
   const restLeft = bandX / 2 - feel.frameAnchorSize / 2
   // anchorTravelY is 1-D scan-axis math — here the scan axis is horizontal.
   const focusedLeft = anchorTravelY(acc, feel.swipeThreshold, restLeft, feel.frameItemSize, feel.frameAnchorSize, 0, false)
-  const grow = feel.frameAnchorSize - feel.frameItemSize
   const bandMiddleY = feel.frameBandY / 2
+
+  // Contiguous flow anchored at the focused thumb's TRAVELED position: siblings ride
+  // the same strip translation the anchor encodes, so mid-gesture the strip never
+  // tears apart and the commit re-anchor is continuous (at |acc| = threshold the
+  // incoming sits exactly where the new rest layout puts it — no snap).
+  const sizeOf = (i: number): number =>
+    i === focusedIndex ? morph.current : i === incomingIndex ? morph.incoming : feel.frameItemSize
+  const lefts = new Array<number>(positions.length)
+  lefts[focusedIndex] = focusedLeft
+  for (let i = focusedIndex + 1; i < positions.length; i++) lefts[i] = lefts[i - 1]! + sizeOf(i - 1)
+  for (let i = focusedIndex - 1; i >= 0; i--) lefts[i] = lefts[i + 1]! - sizeOf(i)
 
   framesMarked.clear()
   for (let i = 0; i < positions.length; i++) {
     const frame = i + 1
-    let left: number
-    let size: number
-    if (i === focusedIndex) {
-      left = focusedLeft
-      size = morph.current
-    } else {
-      left = restLeft + (positions[i]!.y - focusedPos.y) + (i > focusedIndex ? grow : 0)
-      size = i === incomingIndex ? morph.incoming : feel.frameItemSize
-    }
+    const left = lefts[i]!
+    const size = sizeOf(i)
     if (left + size < -feel.frameAnchorSize * 2 || left > bandX + feel.frameAnchorSize * 2) continue
 
     let node = framesPool.get(frame)
@@ -271,21 +274,23 @@ function renderJobsStrip(state: CreateState, tile: Tile): void {
   const restTop = viewportY / 2 - feel.anchorSize / 2
   // Every job is its own group, so a job swipe always crosses a group boundary.
   const focusedTop = anchorTravelY(acc, feel.jobSwipeThreshold, restTop, feel.itemSize, feel.anchorSize, feel.groupGapY, true)
-  const grow = feel.anchorSize - feel.itemSize
   const bandCenter = feel.stripBandX / 2
+
+  // Contiguous flow anchored at the focused thumb's TRAVELED position (see the frames
+  // strip above for the derivation): siblings ride the anchor's strip translation, so
+  // a job page never tears the reel apart mid-gesture and the commit is continuous.
+  const sizeOf = (i: number): number =>
+    i === focusedIndex ? morph.current : i === incomingIndex ? morph.incoming : feel.itemSize
+  const tops = new Array<number>(positions.length)
+  tops[focusedIndex] = focusedTop
+  for (let i = focusedIndex + 1; i < positions.length; i++) tops[i] = tops[i - 1]! + sizeOf(i - 1) + feel.groupGapY
+  for (let i = focusedIndex - 1; i >= 0; i--) tops[i] = tops[i + 1]! - feel.groupGapY - sizeOf(i)
 
   jobsMarked.clear()
   for (let i = 0; i < positions.length; i++) {
     const jobTile = tiles[positions[i]!.ref.group]!
-    let top: number
-    let size: number
-    if (i === focusedIndex) {
-      top = focusedTop
-      size = morph.current
-    } else {
-      top = restTop + (positions[i]!.y - focusedPos.y) + (i > focusedIndex ? grow : 0)
-      size = i === incomingIndex ? morph.incoming : feel.itemSize
-    }
+    const top = tops[i]!
+    const size = sizeOf(i)
     if (top + size < -feel.anchorSize * 2 || top > viewportY + feel.anchorSize * 2) continue
 
     let node = jobsPool.get(jobTile.id)
