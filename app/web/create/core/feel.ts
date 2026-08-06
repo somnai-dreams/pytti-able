@@ -29,12 +29,20 @@ export const feel = {
   maxCols: 5,
   occlusionLenienceViewports: masonryFeel.occlusionLenienceViewports, // kit mjFeel: 2
 
-  // --- lightbox reel strip (kit reel-strip mjFeel adopted unchanged)
-  swipeThreshold: reelFeel.swipeThreshold, // 60
-  anchorSize: reelFeel.anchorSize, // 68
-  itemSize: reelFeel.itemSize, // 56
-  groupGapY: reelFeel.groupGapY, // 8
-  stripBandX: 104, // right band reserved for the strip (anchorSize + padding)
+  // --- lightbox two-axis reels (§8)
+  // Jobs reel (vertical, right edge — the larger reel) adopts the kit reel-strip mjFeel
+  // metrics unchanged; the jobs threshold is 2x the frame threshold: a job hop is a
+  // deliberate page turn, a frame step is a scrub.
+  swipeThreshold: reelFeel.swipeThreshold, // 60 — frames axis (horizontal wheel)
+  jobSwipeThreshold: 120, // jobs axis (vertical wheel)
+  anchorSize: reelFeel.anchorSize, // 68 — jobs reel focused thumb
+  itemSize: reelFeel.itemSize, // 56 — jobs reel resting thumb
+  groupGapY: reelFeel.groupGapY, // 8 — gap between jobs (each job is its own group)
+  stripBandX: 104, // right band reserved for the jobs reel (anchorSize + padding)
+  // Frames reel (horizontal, bottom — the smaller reel; the image stays the hero).
+  frameAnchorSize: 48,
+  frameItemSize: 40,
+  frameBandY: 64, // bottom band reserved for the frames reel, above the chrome band
   stageMargin: 24, // stage inset from the viewport top/left
   chromeBandY: 148, // bottom band reserved for prompt + params + actions
 

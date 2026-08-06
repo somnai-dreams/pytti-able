@@ -137,10 +137,17 @@ export type MaskEditor = {
   saving: boolean // upload in flight; SAVE disabled meanwhile
 }
 
+export type LightboxSwipe = { direction: SwipeDirection; accumulated: number }
+
 export type Lightbox = {
   sessionId: string
   frame: number | 'follow' // 1-based; 'follow' tracks tile.frames live
-  swipe: { direction: SwipeDirection; accumulated: number }
+  // Two-axis navigation (§8): horizontal = frames within the job, vertical = jobs
+  // (sessions with frames, gallery order). One swipe machine per axis; the dominant-axis
+  // rule (core/lightbox dominantAxis) keeps at most ONE accumulator non-zero at a time —
+  // a live gesture owns its axis until it decays to rest.
+  swipeX: LightboxSwipe
+  swipeY: LightboxSwipe
   // Tile rect at open, copied from the masonry cursor — never re-measured.
   anchor: { x: number; y: number; sizeX: number; sizeY: number }
 }
