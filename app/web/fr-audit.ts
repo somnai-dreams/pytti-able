@@ -49,7 +49,9 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // same domain, same checked surface.
   // 3/15 -> 3/16 with §5.1a: +replaceInit (tagged-union store transition — string/JSON
   // domain like the rest, model.test.ts is the checked surface).
-  { file: 'create/core/model.ts', coverage: '3/16', partial: 0 },
+  // 3/16 -> 3/17 with the EXPERIMENTS panel (§5.7): +applyHoldMeaning (union-store
+  // transition, unsupported as expected; model.test.ts is the checked surface).
+  { file: 'create/core/model.ts', coverage: '3/17', partial: 0 },
   // 1/10 -> 2/10 with the SIZE/STEPS split: qualitySteps (unsupported Record read)
   // retired; parseStepsId (numeric exact-match loop, ensures return in 150..600) is
   // fully analyzed alongside dimsTable.
@@ -59,7 +61,12 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // is now 150..2400 (450 retired; 1200/2400 added); AUTO aspect (§5.1a) added
   // +autoDims and +autoDimsMultiple, both fully analyzed (pure numeric), and
   // +autoAspectDims unsupported as expected (Record read into the tweak base).
-  { file: 'create/core/presets.ts', coverage: '4/15', partial: 0 },
+  // 4/15 -> 5/26 with the EXPERIMENTS panel (§5.7): +defaultExperiments analyzed
+  // (pure literal producer); +applyRow/+noiseEmit/+pyramidEmit/+toggleEmit/
+  // +applyExperiments (Record writes) and +matchNoise/+matchPyramid/+matchToggle/
+  // +matchSampler/+matchExperiments (Record/unknown reads) unsupported as expected —
+  // string/JSON domain, presets.test.ts is the checked surface.
+  { file: 'create/core/presets.ts', coverage: '5/26', partial: 0 },
   { file: 'create/core/surfaces.ts', coverage: '1/2', partial: 0 },
 ]
 

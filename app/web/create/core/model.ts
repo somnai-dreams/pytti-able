@@ -28,6 +28,12 @@
 //                                               aspect === 'auto' reverts aspect to '1:1'
 //                                               in the same transition (§5.1a — AUTO has
 //                                               no referent without an attachment)
+//   applyHoldMeaning(state, on)                 THE holdMeaning write path (§5.7): ON
+//                                               forces experiments.pyramid to 'off' in
+//                                               the same transition (the engine refuses
+//                                               c2f + semantic init); OFF restores
+//                                               nothing — the row re-enables where it
+//                                               stands. Throws without an attachment
 //   dropUnreadableMask(state)                   §15.7: unreadable existing mask -> init.mask
 //                                               = null in the same transition as the
 //                                               'starting blank' toast, so the dead path
@@ -55,7 +61,7 @@ import type { SwipeDirection } from '@kit/reel-strip/core'
 import type { Env } from '@kit/env/core'
 import { feel } from './feel'
 import type { InitAttachment } from './init'
-import type { ComposerAspect, LookId, SeedMode, SizeId } from './presets'
+import type { ComposerAspect, Experiments, LookId, SeedMode, SizeId } from './presets'
 
 export type SessionState = 'rendering' | 'stopped' | 'done' | 'failed' | 'imported'
 export type TerminalState = 'done' | 'stopped' | 'failed'
@@ -134,7 +140,16 @@ export type Composer = {
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
   init: InitAttachment | null // the image attachment (§15.3); strength null only in tweak
+  // The EXPERIMENTS panel (§5.7): opt-in engine modes, one row per schema-field
+  // mapping. Row nulls = inherit tweak base (CUSTOM), reachable only while
+  // tweak != null — same convention as aspect/size/look.
+  experiments: Experiments
   popoverOpen: boolean
+  // The EXPERIMENTS disclosure's expanded/collapsed state — projection state like
+  // popoverOpen (session-local, collapsed on load, persists across popover
+  // open/close for the page's lifetime). NEVER read by composeSubmission — it is
+  // not part of the submission payload (§5.7).
+  experimentsOpen: boolean
 }
 
 // The paint surface's control state (§15.7). The PIXELS are dom scratch beside the
@@ -263,6 +278,19 @@ export function openMaskEditor(state: CreateState): boolean {
 export function replaceInit(state: CreateState, init: InitAttachment | null): void {
   state.composer.init = init
   if (init == null && state.composer.aspect === 'auto') state.composer.aspect = '1:1'
+}
+
+// THE holdMeaning write path (§5.7 — dom's HOLD chip toggle and nothing else; tweak
+// rematerialization re-asserts the same rule after deriveInitFromBase). The engine
+// refuses coarse_to_fine + semantic init, so flipping HOLD on forces the PYRAMID row
+// to OFF in the same transition — the selection visibly moves (the AUTO-aspect revert
+// precedent, §5.1a: loud, never a silent dangling pair). Flipping HOLD off re-enables
+// the row where it stands (OFF) — no silent restore; the user re-picks.
+export function applyHoldMeaning(state: CreateState, on: boolean): void {
+  const init = state.composer.init
+  if (init == null) throw new Error('applyHoldMeaning without an attachment (the HOLD chip exists iff attached)')
+  init.holdMeaning = on
+  if (on) state.composer.experiments.pyramid = 'off'
 }
 
 // §15.7's fail-soft ('existing mask not readable — starting blank') completed at the state

@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import { defaultEnv } from '@kit/env/core'
 import { feel } from './feel'
 import type { InitAttachment } from './init'
+import { defaultExperiments } from './presets'
 import {
   applyEncodeEvent,
   applyFrameEvent,
+  applyHoldMeaning,
   applyProgressEvent,
   applyQueueEvent,
   applyStateEvent,
@@ -60,7 +62,7 @@ function state(over: Partial<CreateState> = {}): CreateState {
     tiles: [],
     pending: null,
     queue: [],
-    composer: { prompt: '', aspect: '1:1', size: 'full', steps: 200, look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null, popoverOpen: false },
+    composer: { prompt: '', aspect: '1:1', size: 'full', steps: 200, look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null, experiments: defaultExperiments(), popoverOpen: false, experimentsOpen: false },
     lastRun: null,
     lastSeed: null,
     lightbox: null,
@@ -394,6 +396,43 @@ describe('replaceInit (§5.1a — AUTO has no referent without an attachment)', 
     replaceInit(s, next)
     expect(s.composer.init).toBe(next)
     expect(aspectOf(s)).toBe('auto')
+  })
+})
+
+describe('applyHoldMeaning (§5.7 — the engine refuses c2f + semantic init)', () => {
+  test('flipping HOLD on forces the PYRAMID row to OFF in the same transition', () => {
+    const s = state()
+    s.composer.init = readyInit()
+    expect(s.composer.experiments.pyramid).toBe('3') // the fresh default (the judged pin)
+    applyHoldMeaning(s, true)
+    expect(s.composer.init!.holdMeaning).toBe(true)
+    expect(s.composer.experiments.pyramid).toBe('off')
+  })
+
+  test('forces OFF from a tweak CUSTOM (null) row too — base c2f keys must not ride under HOLD', () => {
+    // Read at the declared union width (the aspectOf precedent above): the null
+    // assignment would otherwise literal-narrow the property and defeat the assert.
+    const pyramidOf = (s: CreateState): CreateState['composer']['experiments']['pyramid'] => s.composer.experiments.pyramid
+    const s = state()
+    s.composer.init = readyInit()
+    s.composer.tweak = { of: 's-1', baseValues: {} }
+    s.composer.experiments.pyramid = null
+    applyHoldMeaning(s, true)
+    expect(pyramidOf(s)).toBe('off')
+  })
+
+  test('flipping HOLD off re-enables the row where it stands — no silent restore', () => {
+    const s = state()
+    s.composer.init = readyInit({ holdMeaning: true })
+    s.composer.experiments.pyramid = 'off'
+    applyHoldMeaning(s, false)
+    expect(s.composer.init!.holdMeaning).toBe(false)
+    expect(s.composer.experiments.pyramid).toBe('off')
+  })
+
+  test('throws without an attachment (the HOLD chip exists iff attached)', () => {
+    const s = state()
+    expect(() => applyHoldMeaning(s, true)).toThrow()
   })
 })
 

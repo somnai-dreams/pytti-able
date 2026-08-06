@@ -5,19 +5,37 @@
 // input and the gear, and the INIT row (strength presets + HOLD + torch note) that
 // exists iff an image is attached. §5.1a: the ASPECT row's AUTO chip is disabled
 // (MASK-chip surface treatment) until the attachment's natural dims are known.
+// §5.7: the collapsed EXPERIMENTS disclosure at the bottom (chevron button + six chip
+// rows); the PYRAMID row is disabled (AUTO-chip treatment) while HOLD MEANING is on.
 import { spring, springGoToEnd, springMostlyDone, springStep } from '@kit/midui/motion'
 import { uploadUrl } from '../core/api'
 import { initNaturalDims, maskEditingLocked } from '../core/init'
 import type { CreateState } from '../core/model'
 import { STEPS_IDS } from '../core/presets'
 
+type ChipRow =
+  | 'aspect'
+  | 'size'
+  | 'steps'
+  | 'look'
+  | 'init'
+  | 'noise'
+  | 'pyramid'
+  | 'coherence'
+  | 'fullvision'
+  | 'phase'
+  | 'autostop'
+
 let promptEl: HTMLInputElement
 let goEl: HTMLButtonElement
 let attachEl: HTMLButtonElement
 let popEl: HTMLElement
 let sseEl: HTMLElement
-let chips: { el: HTMLElement; row: 'aspect' | 'size' | 'steps' | 'look' | 'init'; value: string | null }[] = []
+let chips: { el: HTMLElement; row: ChipRow; value: string | null }[] = []
 let aspectAutoEl: HTMLButtonElement
+let expToggleEl: HTMLButtonElement
+let expBodyEl: HTMLElement
+let pyramidChipEls: HTMLButtonElement[] = []
 let seedRandomEl: HTMLElement
 let seedLockedEl: HTMLElement
 let stepsCustomEl: HTMLInputElement
@@ -84,7 +102,24 @@ export function initBar(deps: {
   for (const el of popEl.querySelectorAll<HTMLElement>('[data-init-strength]')) {
     chips.push({ el, row: 'init', value: el.dataset['initStrength'] === 'custom' ? null : el.dataset['initStrength']! })
   }
+  // The EXPERIMENTS rows (§5.7) — same registry, same CUSTOM convention.
+  const expRows: [ChipRow, string][] = [
+    ['noise', 'noise'],
+    ['pyramid', 'pyramid'],
+    ['coherence', 'coherence'],
+    ['fullvision', 'fullvision'],
+    ['phase', 'phase'],
+    ['autostop', 'autostop'],
+  ]
+  for (const [row, key] of expRows) {
+    for (const el of popEl.querySelectorAll<HTMLElement>(`[data-${key}]`)) {
+      chips.push({ el, row, value: el.dataset[key] === 'custom' ? null : el.dataset[key]! })
+    }
+  }
+  pyramidChipEls = [...popEl.querySelectorAll<HTMLButtonElement>('button[data-pyramid]')]
   aspectAutoEl = mustQuery('[data-aspect="auto"]') as HTMLButtonElement
+  expToggleEl = mustQuery('#exp-toggle') as HTMLButtonElement
+  expBodyEl = mustQuery('#exp-body')
   seedRandomEl = mustQuery('[data-seed="random"]')
   seedLockedEl = mustQuery('[data-seed="locked"]')
   stepsCustomEl = mustQuery('#steps-custom') as HTMLInputElement
@@ -99,7 +134,7 @@ function mustQuery(selector: string): HTMLElement {
   return el
 }
 
-function rowValue(state: CreateState, row: 'aspect' | 'size' | 'steps' | 'look' | 'init'): string | null {
+function rowValue(state: CreateState, row: ChipRow): string | null {
   switch (row) {
     case 'aspect':
       return state.composer.aspect
@@ -114,6 +149,19 @@ function rowValue(state: CreateState, row: 'aspect' | 'size' | 'steps' | 'look' 
       return state.composer.look
     case 'init':
       return state.composer.init == null ? null : state.composer.init.strength
+    // EXPERIMENTS rows (§5.7) — the ids ARE the dataset strings; null = CUSTOM.
+    case 'noise':
+      return state.composer.experiments.noise
+    case 'pyramid':
+      return state.composer.experiments.pyramid
+    case 'coherence':
+      return state.composer.experiments.coherence
+    case 'fullvision':
+      return state.composer.experiments.fullVision
+    case 'phase':
+      return state.composer.experiments.phase
+    case 'autostop':
+      return state.composer.experiments.autoStop
   }
 }
 
@@ -177,6 +225,20 @@ export function renderBar(state: CreateState, springSteps: number): boolean {
     initRowEl.style.display = init == null ? 'none' : '' // the row exists iff attached (§15.5)
     initNoteEl.style.display = init != null && init.holdMeaning ? '' : 'none'
     holdEl.classList.toggle('sel', init != null && init.holdMeaning)
+    // The EXPERIMENTS disclosure (§5.7): collapsed by default, projected from
+    // composer state (never part of the submission payload).
+    const expOpen = state.composer.experimentsOpen
+    expToggleEl.classList.toggle('open', expOpen)
+    expToggleEl.setAttribute('aria-expanded', expOpen ? 'true' : 'false')
+    expBodyEl.style.display = expOpen ? '' : 'none'
+    // §5.7 pyramid × HOLD MEANING: the engine refuses c2f + semantic init, so while
+    // HOLD is on the row shows OFF (applyHoldMeaning forced it) and disables — the
+    // AUTO-chip locked-surface treatment (disabled + title).
+    const holdOn = init != null && init.holdMeaning
+    for (const el of pyramidChipEls) {
+      el.disabled = holdOn
+      el.title = holdOn ? 'HOLD MEANING is on — the engine refuses pyramid + semantic init' : ''
+    }
     for (const chip of chips) {
       const current = rowValue(state, chip.row)
       if (chip.value == null) {

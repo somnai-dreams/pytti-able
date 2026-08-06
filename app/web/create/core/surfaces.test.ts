@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { defaultEnv } from '@kit/env/core'
 import { orderSurfaces } from '@kit/toplayer/core'
 import type { CreateState } from './model'
+import { defaultExperiments } from './presets'
 import { surfaces, topmostDismissable, zConfirm, zLightbox, zMaskEditor, zPopover, zToast } from './surfaces'
 
 function state(over: Partial<CreateState> = {}): CreateState {
@@ -12,7 +13,7 @@ function state(over: Partial<CreateState> = {}): CreateState {
     tiles: [],
     pending: null,
     queue: [],
-    composer: { prompt: '', aspect: '1:1', size: 'full', steps: 200, look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null, popoverOpen: false },
+    composer: { prompt: '', aspect: '1:1', size: 'full', steps: 200, look: 'limited', seedMode: { kind: 'random' }, tweak: null, init: null, experiments: defaultExperiments(), popoverOpen: false, experimentsOpen: false },
     lastRun: null,
     lastSeed: null,
     lightbox: null,

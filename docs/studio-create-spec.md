@@ -376,7 +376,14 @@ type Composer = {
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
+  // The EXPERIMENTS panel (§5.7): six rows, each id-or-null; null = inherit tweak
+  // base (CUSTOM chip), reachable only while tweak != null — the aspect convention.
+  experiments: Experiments
   popoverOpen: boolean
+  // The EXPERIMENTS disclosure's expanded/collapsed state — projection state like
+  // popoverOpen: session-local, collapsed on load, persists across popover
+  // open/close for the page's lifetime. NEVER part of the submission payload (§5.7).
+  experimentsOpen: boolean
 }
 
 type LightboxSwipe = { direction: SwipeDirection; accumulated: number }
@@ -484,7 +491,8 @@ behind the gear.
 
 Popover display labels: `1:1 · 3:4 · 4:3 · 16:9 · AUTO`; `DRAFT · FULL`;
 `150 · 200 · 300 · 600 · 1200 · 2400 · [custom]`; `LIMITED · UNLIMITED · VQGAN`;
-`SEED ⚄ RANDOM / 🔒 <n>`.
+`SEED ⚄ RANDOM / 🔒 <n>`. Below the rows sits the collapsed `▸ EXPERIMENTS`
+disclosure (§5.7).
 
 Fresh composer defaults: `1:1`, `full`, `200`, `limited`, random seed — exactly
 what the retired `standard` quality resolved to (512-class dims, 200 steps), so
@@ -539,9 +547,9 @@ per-model dims contract):
 | `vqgan` | **16** | the engine silently **floors** each dim to the latent stride `f = 2^(num_resolutions−1)` (`vqgan.py` 184–192) — 16 for every model Create reaches (default `sflickr`; all taming ckpts are f16). Emitting multiples of 16 keeps declared dims == rendered dims (tile layout, thumbs, encode) |
 | tweak CUSTOM look | base's `image_model` | pixel models → 8; VQGAN/LlamaGen (ds16 f=16, ds8 f=8)/unknown → **16**, which every stride in the engine divides |
 
-`coarse_to_fine` (pinned on fresh non-HOLD submissions) imposes no
-back-constraint: its final stage runs the **exact** configured dims and its
-non-final stages self-round to multiples of 8 with a 64 floor.
+`coarse_to_fine` (the PYRAMID row's default on fresh non-HOLD submissions, §5.7)
+imposes no back-constraint: its final stage runs the **exact** configured dims
+and its non-final stages self-round to multiples of 8 with a 64 floor.
 
 `composeSubmission` and `composerDims` resolve AUTO through the same helper
 (the optimistic tile's AR always matches the session's); both **throw** when
@@ -559,7 +567,9 @@ its exact meaning.)
 
 - Fresh (tweak == null):
   `values = { scenes: prompt, width, height, steps_per_scene, image_model }`
-  plus the §5.6 pins, plus `seed` iff `seedMode.kind === 'locked'`;
+  plus the §5.6 pins, plus the EXPERIMENTS rows' emissions (§5.7 — the untouched
+  panel contributes exactly `coarse_to_fine: true, coarse_stages: 3`, the retired
+  pin's bytes), plus `seed` iff `seedMode.kind === 'locked'`;
   `forkOf: null`; `seedLocked: seedMode.kind === 'locked'`.
 - Tweak (tweak != null):
   `values = { ...tweak.baseValues, ...overrides, scenes: prompt }` where
@@ -610,6 +620,26 @@ a byte-identical replay, strictly better than re-deriving. (A square
 attachment's AUTO dims are exactly a table pair; that exact match rematerializes
 as the equivalent table chip — same dims either way.) The chip does not
 retro-flip to AUTO when the dims arrive later: no silent state changes.
+
+**`matchExperiments(values)` (added 2026-08-06, §5.7)** — the EXPERIMENTS panel's
+reverse map, same exact-match doctrine, per row:
+
+- INIT NOISE: `init_spectrum` absent/`'white'` → WHITE; `'gray'` → GRAY (chroma is
+  **ignored for white/gray** — the engine is documented chroma-inert there, so the
+  match is exact, not a guess); `'pink'` + `init_spectrum_chroma: 'natural'` → PINK;
+  `'pink'` + any other chroma, `'fractal'`, or junk → CUSTOM.
+  `init_spectrum_falloff` is a bench knob, not part of the row's mapping — it rides
+  a tweak base verbatim.
+- PYRAMID: `coarse_to_fine` false/absent → OFF (any stages value alongside false is
+  schema-rejected upstream); `true` + `coarse_stages` 2/3/4 → that chip; `true` +
+  any other ladder (5, absent, junk) → CUSTOM.
+- COHERENCE / PHASE SCHEDULE / AUTO-STOP: false/absent → OFF, `true` → ON, junk →
+  CUSTOM.
+- FULL VISION: `cutout_sampler` absent/`'smart'` → OFF (smart **is** what OFF
+  means — the tuned default), `'full'` → ON, `'classic'`/`'batched'`/junk → CUSTOM.
+
+CUSTOM (null) rows inherit the base verbatim on resubmit — byte-identical replay,
+like aspect/size/look. Null is reachable only under tweak (§5.7).
 
 ### 5.4 Seed control
 
@@ -672,16 +702,88 @@ Visible controls (field → the control that determines it):
 | `direct_init_weight` | INIT strength chips + the chip's MASK state |
 | `semantic_init_weight` | the HOLD toggle |
 | `perceptor_backend` | the `torch engine` note shown while HOLD is on |
+| `init_spectrum`, `init_spectrum_chroma` | EXPERIMENTS · INIT NOISE chips (§5.7; PINK pairs chroma `natural`) |
+| `coarse_to_fine`, `coarse_stages` | EXPERIMENTS · PYRAMID row (§5.7 — the retired invisible pin, made visible 2026-08-06) |
+| `coherence_weighting` | EXPERIMENTS · COHERENCE toggle |
+| `cutout_sampler` | EXPERIMENTS · FULL VISION toggle |
+| `phase_scheduling` | EXPERIMENTS · PHASE SCHEDULE toggle |
+| `auto_stop` | EXPERIMENTS · AUTO-STOP toggle |
 
 Documented pins (constant on every fresh submission; not user-varied — their
-documentation is this table + the `PIN_FIELDS` comments in `core/presets.ts`):
+documentation is this table + the `PIN_FIELDS` comments in `core/presets.ts`).
+Changed 2026-08-06: the `coarse_to_fine`/`coarse_stages` pyramid pin **converted to
+the visible PYRAMID row** (§5.7) — strictly better under this section's rule; the
+two stills pins below stay pins (Create is stills-only by construction):
 
 | field | pinned value | why |
 |---|---|---|
 | `animation_mode` | `'off'` | Create is a stills surface by construction; the tuned defaults carry `2D` |
 | `interpolation_steps` | `0` | no scene-0 prompt ramp (composition-forming window) |
-| `coarse_to_fine` | `true` | the judged pyramid pin — **omitted iff HOLD MEANING** (engine refuses the pair) |
-| `coarse_stages` | `3` | thumbnail → half → full |
+
+### 5.7 The EXPERIMENTS panel (added 2026-08-06, binding)
+
+The user's directive, verbatim:
+
+> "I dont like how limited the current create view is. It should be simple, but
+> its too simple. I should be able to opt into the experimental modes we're
+> making... i basically want to never ever open the confusing and shitty advanced
+> view, so i need access to the higher level experiment toggles in create."
+
+A collapsed disclosure row at the **bottom** of the gear popover — `▸ EXPERIMENTS`,
+a bare label button with a rotating chevron (the one new popover idiom; everything
+inside reuses the `.pop-row`/`.chip` affordances verbatim). Expanded/collapsed
+state lives in `composer.experimentsOpen`: projection state like `popoverOpen` —
+session-local, collapsed on load, persists across popover open/close for the
+page's lifetime, and **never part of the submission payload**.
+
+The rows, curated by the eval batteries (each option maps to schema fields; every
+default = the engine/tuned default):
+
+| row | options (default first) | fields |
+|---|---|---|
+| INIT NOISE | WHITE · PINK · GRAY | `init_spectrum`; PINK also sets `init_spectrum_chroma: 'natural'` — the 2026-08-06 init-noise battery's both-judges winner. WHITE/GRAY emit the spectrum only (chroma is engine-inert for both; engine default `full`). PINK chip hint names the battery |
+| PYRAMID | 3 · 2 · 4 · OFF | `coarse_to_fine` + `coarse_stages` — the retired invisible pin as a visible control. OFF = the engine default (emits nothing); 2/3/4 emit both keys |
+| COHERENCE | OFF · ON | `coherence_weighting` |
+| FULL VISION | OFF · ON | `cutout_sampler: 'full'` when ON; OFF emits **nothing** (never an explicit `'smart'`) |
+| PHASE SCHEDULE | OFF · ON | `phase_scheduling` |
+| AUTO-STOP | OFF · ON | `auto_stop` (ON chip hint: `may stop early — detector is miscalibrated for the modern ensemble`, per the 2026-08-03 cut-at-129/200 incident) |
+
+**The payload rule (binding, enforced by `presets.test.ts`):** a row adds keys iff
+its selection differs from what the server's defaults-compose already produces.
+Five rows default to the composed default, so an untouched panel adds **zero**
+keys. PYRAMID is the deliberate exception: its default (3) is Create's judged pin
+over the engine default (off) made visible — it emits its two keys at every
+non-OFF selection and OFF emits nothing. Net: the untouched panel's payload is
+**byte-identical** to the pre-panel pin era.
+
+**Pyramid × HOLD MEANING (the one row interaction):** the engine refuses
+`coarse_to_fine` + semantic init. While HOLD is on, the PYRAMID row shows OFF and
+is disabled (the AUTO-chip locked treatment: disabled + title). Flipping HOLD on
+while the row is non-OFF **visibly forces it to OFF** in the same transition
+(core `model.applyHoldMeaning` — loud, the AUTO-aspect revert precedent, §5.1a);
+flipping HOLD off re-enables the row where it stands (OFF) — no silent restore.
+Tweak rematerialization re-asserts the same rule after `deriveInitFromBase`.
+`composeSubmission` **throws** on the pair (any non-OFF row, null included, with
+HOLD on) rather than silently omitting — what the row shows is what submits.
+
+**Tweak semantics:** concrete rows apply — delete the row's fields, then set the
+selection's keys (the random-seed delete mechanism: an OFF/WHITE re-pick restores
+the composed default); null (CUSTOM) rows leave the base verbatim, so off-menu
+bench values (fractal, `coarse_stages: 5`, `cutout_sampler: 'classic'`,
+`init_spectrum_falloff`, `auto_stop_window`…) survive an untouched tweak
+byte-for-byte. Rematerialization is `matchExperiments` (§5.3).
+
+**Deliberately NOT offered** (documented so nobody re-litigates from the UI side):
+
+| knob | why not |
+|---|---|
+| BORDER (`border_mode`) | clamp won its battery 9W/0L — a settled default, not an experiment |
+| ANNEAL (`structure_annealing` + knobs) | falsified: 0W/7L stacked — bench-only |
+| fractal / mono / full pink-chroma variants | all lost the init-noise battery; PINK+natural is the one winner offered |
+
+Accepted caveat: NOISE PINK/GRAY with LOOK VQGAN fails loud at render start (a
+codebook draw has no spectrum to shape — engine-documented); the failure surfaces
+as a `failed` tile with the engine's message. No cross-row guard is added for it.
 
 ---
 
@@ -1158,6 +1260,7 @@ Exactly the chassis-notes composition:
                           │ STEPS    [150][200][300][600][1200][2400][____] │
                           │ LOOK     [LIMITED] [UNLTD] [VQGAN]              │
                           │ SEED     [⚄ RANDOM] [🔒 3982117]                │
+                          │ ▸ EXPERIMENTS                                   │
                           └─────────────────────────────────────────────────┘
    segmented chips, one selected per row — nothing else, ever. STEPS ends in
    the custom numeric input (§5.1): a non-preset value (e.g. 275) shows there,
@@ -1166,18 +1269,23 @@ Exactly the chassis-notes composition:
    (§5.1a).
    Tweak mode may show [CUSTOM] as the selected chip on the aspect/size/look
    rows (§5.3) — steps always shows its concrete number instead.
-=======
-                          ┌─────────────────▼───────────────────┐
-                          │ ASPECT [1:1][3:4][4:3][16:9][AUTO]  │
-                          │ SIZE     [DRAFT] [FULL]             │
-                          │ STEPS    [150][200][300][450][600]  │
-                          │ LOOK     [LIMITED] [UNLTD] [VQGAN]  │
-                          │ SEED     [⚄ RANDOM] [🔒 3982117]    │
-                          └─────────────────────────────────────┘
-   segmented chips, one selected per row — nothing else, ever.
-   Tweak mode may show [CUSTOM] as the selected chip on a row (§5.3).
-   AUTO is disabled until an attachment's dims are known (§5.1a).
->>>>>>> worktree-agent-ac9e8ae238c0fdfa3
+
+   ▸ EXPERIMENTS (§5.7) is collapsed by default — the everyday gear stays clean.
+   Expanded ("i need access to the higher level experiment toggles in create"):
+
+                          ┌─────────────────────────────────────────────────┐
+                          │ …the five rows above…                           │
+                          │ ▾ EXPERIMENTS                                   │
+                          │ INIT NOISE      [WHITE] [PINK] [GRAY]           │
+                          │ PYRAMID         [3] [2] [4] [OFF]               │
+                          │ COHERENCE       [OFF] [ON]                      │
+                          │ FULL VISION     [OFF] [ON]                      │
+                          │ PHASE SCHEDULE  [OFF] [ON]                      │
+                          │ AUTO-STOP       [OFF] [ON]                      │
+                          └─────────────────────────────────────────────────┘
+   same chip idiom, defaults first; every default = the engine/tuned default
+   (untouched panel = byte-identical payload, §5.7). PYRAMID shows OFF and is
+   disabled while HOLD MEANING is on. Tweak mode may show [CUSTOM] per row.
 ```
 
 ### 10.3 Tile states (gallery)
@@ -1318,8 +1426,9 @@ DRAFT size / 1:1 / 150 steps so each finishes in ~1 minute on this machine.
    jumps; Esc blurs.
 5. ⚙ opens the settings popover with a spring; it contains exactly five rows —
    aspect (4 chips + AUTO, enabled per §5.1a), size (2), steps (6 numeric chips
-   150–2400 + the custom input), look (3), seed toggle — and nothing else;
-   outside-click and Esc close it. Typing 275 in the custom input un-highlights
+   150–2400 + the custom input), look (3), seed toggle — plus the collapsed
+   `▸ EXPERIMENTS` disclosure (§5.7) and nothing else; outside-click and Esc
+   close it. Typing 275 in the custom input un-highlights
    every steps chip and highlights the input; clicking a steps chip empties it
    again; typing 20001 or junk marks the input invalid and keeps the last valid
    number — parsing is live, so valid prefixes commit as typed (20001 lands on
@@ -1406,8 +1515,9 @@ DRAFT size / 1:1 / 150 steps so each finishes in ~1 minute on this machine.
     the page loads no framework (no react/vue/etc. in the bundle or network
     panel).
 
-Items 33–48 (image input + mask, §15) continue this list in §15.11. Item 5's
-"exactly five rows" holds only while no image is attached — see §15.5.
+Items 33–48 (image input + mask, §15) continue this list in §15.11; items 52–54
+(the EXPERIMENTS panel, §5.7) follow them there. Item 5's "exactly five rows"
+holds only while no image is attached — see §15.5.
 
 ---
 
@@ -1971,3 +2081,23 @@ Mask editor (toplayer, lightbox-class):
     CUSTOM (never AUTO — §5.3): re-submitting untouched replays the base dims
     verbatim; once the rematerialized chip's thumb has loaded, AUTO is
     selectable again and re-derives from the base image's dims.
+
+Items 52–54 (the EXPERIMENTS panel, §5.7 — continues the same list):
+
+52. The gear shows `▸ EXPERIMENTS` collapsed under SEED; clicking it rotates the
+    chevron and reveals exactly six rows — INIT NOISE (WHITE/PINK/GRAY),
+    PYRAMID (3/2/4/OFF), COHERENCE, FULL VISION, PHASE SCHEDULE, AUTO-STOP
+    (OFF/ON each); it stays expanded across popover close/reopen within the
+    session and starts collapsed after a reload.
+53. ⚑ An untouched panel submits the byte-identical pre-panel payload (network
+    panel: `coarse_to_fine: true, coarse_stages: 3` and NO other experiment
+    keys). Selecting PINK adds exactly `init_spectrum: 'pink'` +
+    `init_spectrum_chroma: 'natural'`; PYRAMID OFF removes the c2f pair; each
+    ON toggle adds exactly its own key (`coherence_weighting` /
+    `cutout_sampler: 'full'` / `phase_scheduling` / `auto_stop`); flipping back
+    to a default removes it again.
+54. With an attachment, toggling ◈ HOLD on visibly moves the PYRAMID selection
+    to OFF and disables the row (title names the engine refusal); HOLD off
+    re-enables it still on OFF. TWEAK on a session with experiment values
+    rematerializes the matching chips (off-menu values — e.g. a bench
+    `coarse_stages: 5` — show CUSTOM and replay verbatim untouched).

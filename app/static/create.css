@@ -229,6 +229,30 @@ button {
 #steps-custom.sel { color: var(--accent); border-color: var(--accent); }
 #steps-custom.invalid { color: var(--danger); border-color: var(--danger); }
 
+/* the EXPERIMENTS disclosure (§5.7) — the one new popover idiom: a bare label
+   button with a rotating chevron; the body reuses .pop-row/.chip verbatim */
+#exp-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-align: left;
+}
+#exp-toggle:hover { color: var(--text); }
+#exp-chevron { display: inline-block; transition: transform 120ms ease; }
+#exp-toggle.open #exp-chevron { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { #exp-chevron { transition: none; } }
+#exp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* two-word labels (INIT NOISE, PHASE SCHEDULE) wrap inside the label column */
+#exp-body .pop-label { line-height: 1.3; }
+
 /* ── gallery ───────────────────────────────────────────────────────────── */
 
 #gallery-scroll {

@@ -78,6 +78,48 @@
         <span class="pop-label"></span>
         <span class="dim">torch engine</span>
       </div>
+      <button id="exp-toggle" aria-expanded="false" title="opt-in engine modes — defaults change nothing"><span id="exp-chevron">▸</span> EXPERIMENTS</button>
+      <div id="exp-body" style="display:none">
+        <div class="pop-row">
+          <span class="pop-label">INIT NOISE</span>
+          <button class="chip" data-noise="white">WHITE</button>
+          <button class="chip" data-noise="pink" title="pink noise + natural chroma — won the 2026-08-06 init-noise battery on both judges">PINK</button>
+          <button class="chip" data-noise="gray">GRAY</button>
+          <button class="chip custom" data-noise="custom">CUSTOM</button>
+        </div>
+        <div class="pop-row">
+          <span class="pop-label" title="coarse-to-fine stages: compose as a thumbnail, refine up">PYRAMID</span>
+          <button class="chip" data-pyramid="3">3</button>
+          <button class="chip" data-pyramid="2">2</button>
+          <button class="chip" data-pyramid="4">4</button>
+          <button class="chip" data-pyramid="off">OFF</button>
+          <button class="chip custom" data-pyramid="custom">CUSTOM</button>
+        </div>
+        <div class="pop-row">
+          <span class="pop-label" title="weigh full-frame views over detail crops for the semantic loss">COHERENCE</span>
+          <button class="chip" data-coherence="off">OFF</button>
+          <button class="chip" data-coherence="on">ON</button>
+          <button class="chip custom" data-coherence="custom">CUSTOM</button>
+        </div>
+        <div class="pop-row">
+          <span class="pop-label" title="every cutout sees the whole frame">FULL VISION</span>
+          <button class="chip" data-fullvision="off">OFF</button>
+          <button class="chip" data-fullvision="on">ON</button>
+          <button class="chip custom" data-fullvision="custom">CUSTOM</button>
+        </div>
+        <div class="pop-row">
+          <span class="pop-label" title="structure early, detail late — fixed quality-phase schedules">PHASE SCHEDULE</span>
+          <button class="chip" data-phase="off">OFF</button>
+          <button class="chip" data-phase="on">ON</button>
+          <button class="chip custom" data-phase="custom">CUSTOM</button>
+        </div>
+        <div class="pop-row">
+          <span class="pop-label" title="end a scene early once the loss plateaus">AUTO-STOP</span>
+          <button class="chip" data-autostop="off">OFF</button>
+          <button class="chip" data-autostop="on" title="may stop early — detector is miscalibrated for the modern ensemble">ON</button>
+          <button class="chip custom" data-autostop="custom">CUSTOM</button>
+        </div>
+      </div>
     </div>
   </div>
 

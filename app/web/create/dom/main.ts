@@ -23,6 +23,7 @@ import { applyWheel, jumpToFrame, jumpToJob, stepFrame, stepJob } from '../core/
 import {
   applyEncodeEvent,
   applyFrameEvent,
+  applyHoldMeaning,
   applyProgressEvent,
   applyQueueEvent,
   applyStateEvent,
@@ -44,6 +45,9 @@ import {
   composeSubmission,
   composerDims,
   DEFAULT_STEPS,
+  defaultExperiments,
+  type Experiments,
+  matchExperiments,
   matchPresets,
   parseCustomSteps,
   parseStepsId,
@@ -118,7 +122,9 @@ const state: CreateState = {
     seedMode: { kind: 'random' },
     tweak: null,
     init: null,
+    experiments: defaultExperiments(), // §5.7: untouched panel = the pre-panel payload, byte-identical
     popoverOpen: false,
+    experimentsOpen: false, // the EXPERIMENTS disclosure starts collapsed (§5.7)
   },
   lastRun: null,
   lastSeed: null,
@@ -461,6 +467,7 @@ function submit(): void {
     seedMode: composer.seedMode,
     tweak: composer.tweak,
     init: toInitSubmitInput(composer.init),
+    experiments: composer.experiments,
   }
   const payload = composeSubmission(submitInput)
   const dims = composerDims(submitInput)
@@ -520,9 +527,16 @@ async function tweakSession(id: string): Promise<void> {
   // if it matches a preset, the custom input otherwise) — no null-inherit for steps.
   composer.steps = rematerializeSteps(config)
   composer.look = match.look
+  // Experiments rematerialize exact-match (§5.3/§5.7): off-menu base values (fractal,
+  // coarse_stages 5, cutout_sampler classic …) come back null = CUSTOM chips.
+  composer.experiments = matchExperiments(config)
   const seed = config['seed']
   composer.seedMode = typeof seed === 'number' ? { kind: 'locked', seed } : { kind: 'random' }
   setInit(deriveInitFromBase(composer.tweak.baseValues))
+  // Re-assert the §5.7 pyramid × HOLD rule after rematerialization (a base carrying
+  // both cannot render, but the invariant is composer-level: HOLD on => PYRAMID off —
+  // composeSubmission throws on the pair rather than silently omitting).
+  if (composer.init != null && composer.init.holdMeaning) composer.experiments.pyramid = 'off'
   // A4 dims capture (§15.8): a rematerialized attachment carries no pixel dims (the
   // snapshot has none) — load them async via the uploads route. AUTO stays disabled
   // until they land; a 404 (bench-external base image) just leaves them null.
@@ -881,6 +895,10 @@ promptEl.addEventListener('input', () => {
       state.composer.steps = DEFAULT_STEPS
       state.composer.look = 'limited'
       state.composer.seedMode = { kind: 'random' }
+      // Experiments reset with the rest of the composer, so row nulls (CUSTOM) stay
+      // unreachable outside tweak (§5.7). Fresh-mode picks persist like aspect/look —
+      // they are visible panel state, not hidden sticky state.
+      state.composer.experiments = defaultExperiments()
     }
   }
   loop.renderNow() // synchronous keystroke echo — the controlled-input answer
@@ -934,7 +952,14 @@ popoverEl.addEventListener('click', (e) => {
   const look = chip.dataset['look']
   const seed = chip.dataset['seed']
   const initStrength = chip.dataset['initStrength']
+  const noise = chip.dataset['noise']
+  const pyramid = chip.dataset['pyramid']
+  const coherence = chip.dataset['coherence']
+  const fullVision = chip.dataset['fullvision']
+  const phase = chip.dataset['phase']
+  const autoStop = chip.dataset['autostop']
   const init = state.composer.init
+  const experiments = state.composer.experiments
   if (aspect != null && aspect !== 'custom') state.composer.aspect = aspect as CreateState['composer']['aspect']
   else if (size != null && size !== 'custom') state.composer.size = size as CreateState['composer']['size']
   else if (steps != null) state.composer.steps = parseStepsId(steps) // chips = shortcuts; no custom chip (the input is the custom path)
@@ -942,7 +967,22 @@ popoverEl.addEventListener('click', (e) => {
   else if (seed === 'random') state.composer.seedMode = { kind: 'random' }
   else if (seed === 'locked') state.composer.seedMode = { kind: 'locked', seed: pinnedSeed() }
   else if (initStrength != null && initStrength !== 'custom' && init != null) init.strength = initStrength as InitStrengthId
-  else if (chip.dataset['hold'] != null && init != null) init.holdMeaning = !init.holdMeaning
+  else if (chip.dataset['hold'] != null && init != null) applyHoldMeaning(state, !init.holdMeaning) // §5.7: ON forces PYRAMID to OFF
+  // The EXPERIMENTS rows (§5.7). The pyramid chips are disabled while HOLD is on
+  // (renderBar), so no click reaches here in that state.
+  else if (noise != null && noise !== 'custom') experiments.noise = noise as Experiments['noise']
+  else if (pyramid != null && pyramid !== 'custom') experiments.pyramid = pyramid as Experiments['pyramid']
+  else if (coherence != null && coherence !== 'custom') experiments.coherence = coherence as Experiments['coherence']
+  else if (fullVision != null && fullVision !== 'custom') experiments.fullVision = fullVision as Experiments['fullVision']
+  else if (phase != null && phase !== 'custom') experiments.phase = phase as Experiments['phase']
+  else if (autoStop != null && autoStop !== 'custom') experiments.autoStop = autoStop as Experiments['autoStop']
+  loop.scheduleRender()
+})
+
+// The EXPERIMENTS disclosure (§5.7): expanded/collapsed is composer projection state —
+// session-local, collapsed on load, never part of the submission payload.
+mustGet('exp-toggle').addEventListener('click', () => {
+  state.composer.experimentsOpen = !state.composer.experimentsOpen
   loop.scheduleRender()
 })
 
