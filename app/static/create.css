@@ -433,12 +433,22 @@ button {
   border-radius: 4px;
 }
 
-#lb-strip {
+/* jobs reel — vertical, right edge (the larger reel): one thumb per session */
+#lb-jobs {
   position: absolute;
   top: 0;
   right: 0;
   width: 104px; /* stripBandX */
   bottom: 0;
+  overflow: hidden;
+}
+/* frames reel — horizontal, bottom (the smaller reel): the open job's frames */
+#lb-frames {
+  position: absolute;
+  left: 0;
+  right: 104px; /* stripBandX */
+  bottom: 148px; /* chromeBandY */
+  height: 64px; /* frameBandY */
   overflow: hidden;
 }
 .lb-thumb {

@@ -99,7 +99,7 @@ describe('insertTile / findTile / removeTile', () => {
   test('removeTile closes a lightbox showing it', () => {
     const s = state({
       tiles: [tile('a')],
-      lightbox: { sessionId: 'a', frame: 3, swipe: { direction: 'still', accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } },
+      lightbox: { sessionId: 'a', frame: 3, swipeX: { direction: 'still', accumulated: 0 }, swipeY: { direction: 'still', accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } },
     })
     removeTile(s, 'a')
     expect(s.tiles).toHaveLength(0)
@@ -133,7 +133,7 @@ describe('applyStateEvent', () => {
   test('terminal settles the tile and freezes a following lightbox', () => {
     const s = state({
       tiles: [tile('a', { state: 'rendering', live: { substate: 'rendering', step: 1, stepsTotal: 2, scene: 0, sceneCount: 1, phase: 'scene', sPerStep: 1, etaSec: 1 } })],
-      lightbox: { sessionId: 'a', frame: 'follow', swipe: { direction: 'still', accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } },
+      lightbox: { sessionId: 'a', frame: 'follow', swipeX: { direction: 'still', accumulated: 0 }, swipeY: { direction: 'still', accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } },
     })
     const follow = applyStateEvent(
       s,
@@ -321,7 +321,7 @@ describe('reconcileSessions', () => {
   test('a lightbox open on a dropped session closes with it (no render-loop throw)', () => {
     const s = state({
       tiles: [tile('x'), tile('keep')],
-      lightbox: { sessionId: 'x', frame: 3, swipe: { direction: 'still', accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } },
+      lightbox: { sessionId: 'x', frame: 3, swipeX: { direction: 'still', accumulated: 0 }, swipeY: { direction: 'still', accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } },
     })
     reconcileSessions(s, [tile('keep')])
     expect(s.tiles.map((t) => t.id)).toEqual(['keep'])
@@ -331,7 +331,7 @@ describe('reconcileSessions', () => {
   test('lightbox and confirm survive when their session survives; confirm on a dropped id closes', () => {
     const s = state({
       tiles: [tile('x'), tile('keep')],
-      lightbox: { sessionId: 'keep', frame: 1, swipe: { direction: 'still', accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } },
+      lightbox: { sessionId: 'keep', frame: 1, swipeX: { direction: 'still', accumulated: 0 }, swipeY: { direction: 'still', accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } },
       confirm: { kind: 'delete', sessionId: 'x' },
     })
     reconcileSessions(s, [tile('keep')])

@@ -28,7 +28,7 @@ function state(over: Partial<CreateState> = {}): CreateState {
   }
 }
 
-const lightbox = { sessionId: 'a', frame: 1 as const, swipe: { direction: 'still' as const, accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } }
+const lightbox = { sessionId: 'a', frame: 1 as const, swipeX: { direction: 'still' as const, accumulated: 0 }, swipeY: { direction: 'still' as const, accumulated: 0 }, anchor: { x: 0, y: 0, sizeX: 1, sizeY: 1 } }
 
 describe('the Z-ladder', () => {
   test('declaration order is stacking order', () => {

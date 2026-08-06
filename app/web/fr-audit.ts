@@ -31,7 +31,11 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // field projection, analyzable).
   { file: 'create/core/init.ts', coverage: '5/13', partial: 0 },
   { file: 'create/core/keys.ts', coverage: '1/1', partial: 0 },
-  { file: 'create/core/lightbox.ts', coverage: '1/7', partial: 0 },
+  // 1/7 -> 4/14 with the two-axis lightbox (§8 rework): +makeJobsSource, +jobRef,
+  // +dominantAxis, +stillSwipe, +landOnJob, +stepJob, +jumpToJob. Analyzed: refOf,
+  // jobRef, stillSwipe, dominantAxis; the union/spread state transitions stay
+  // string-domain as declared (lightbox.test.ts is the checked surface).
+  { file: 'create/core/lightbox.ts', coverage: '4/14', partial: 0 },
   // §15 editor geometry: viewToImage + clampBrushSize analyzed; strokeStamps is an
   // array producer (documented fr exception in its header, tested).
   { file: 'create/core/mask.ts', coverage: '2/3', partial: 0 },
