@@ -1483,6 +1483,68 @@ fourier_decay:
     pixel-like behavior. The grid is energy-normalized so any value in
     range starts near-gray and optimizes healthily.
 
+manifold_projection:
+  label: MANIFOLD PROJECTION
+  type: BOOL
+  section: null
+  group: annealing
+  hint: >-
+    Every K steps, clean the canvas through a frozen VQ round-trip and
+    blend it back — kills accumulated noise and off-manifold color
+    while preserving your own structure and texture character.
+  prose: >-
+    Projected gradient descent onto the LlamaGen decoder manifold: the
+    image is periodically re-expressed as the nearest thing a
+    natural-image codebook can say, then blended back at PROJECTION
+    STRENGTH. Carries no foreign content — unlike structure annealing,
+    it cannot re-decide composition, only launder noise out of it. The
+    last ~35% of steps are projection-free so character settles.
+    Refuses VQGAN/LlamaGen canvases, animation, structure annealing,
+    auto-stop, and adamw_sf; canvas dims must divide the tokenizer
+    stride (ds8: 8, ds16: 16).
+
+projection_every:
+  label: PROJECTION EVERY
+  type: NUM
+  section: null
+  group: annealing
+  relevantWhen: {field: manifold_projection, in: [true]}
+  hint: >-
+    Steps between projections (5-200). Lower = cleaner and tamer;
+    higher = wilder texture between cleanings.
+  prose: >-
+    The cadence of the VQ cleanings. Each costs ~0.4s. Projections stop
+    before the protected tail regardless of cadence.
+
+projection_strength:
+  label: PROJECTION STRENGTH
+  type: NUM
+  section: null
+  group: annealing
+  relevantWhen: {field: manifold_projection, in: [true]}
+  hint: >-
+    Blend toward the projected image per cycle (0-1]; 1 = full replace.
+    Exact delta form — on-manifold content is untouched at any strength.
+  prose: >-
+    How much of each cleaning lands. The blend is a delta: only the
+    DIFFERENCE between the canvas and its projection moves, scaled by
+    this factor, so content the codebook already agrees with never
+    drifts. Limited Palette applies the brightness component only
+    (palette identity is the look and is never touched).
+
+projection_model:
+  label: PROJECTION MODEL
+  type: CHOICE
+  section: null
+  group: annealing
+  relevantWhen: {field: manifold_projection, in: [true]}
+  hint: >-
+    Which VQ tokenizer defines the manifold: ds8 (finer, default) or
+    ds16 (coarser cells, stronger smoothing).
+  prose: >-
+    ds8 quantizes 8x8 cells — gentler, keeps more texture; ds16's
+    16x16 cells clean harder. Canvas dims must divide the stride.
+
 structure_annealing:
   label: STRUCTURE ANNEALING
   type: BOOL
