@@ -71,6 +71,14 @@ describe('parseSessionSummary', () => {
     expect(() => parseSessionSummary({ ...SUMMARY, artifacts: [{ name: 'x' }] })).toThrow(/artifacts/)
   })
 
+  test('§16: the underpaint envelope parses to {source, steps} (done is server lifecycle, dropped)', () => {
+    expect(parseSessionSummary(SUMMARY).underpaint).toBeNull() // absent -> a normal session
+    const tile = parseSessionSummary({ ...SUMMARY, underpaint: { source: 'llamagen', steps: 100, done: true } })
+    expect(tile.underpaint).toEqual({ source: 'llamagen', steps: 100 })
+    expect(() => parseSessionSummary({ ...SUMMARY, underpaint: { source: 'vqgan', steps: 100 } })).toThrow('underpaint')
+    expect(() => parseSessionSummary({ ...SUMMARY, underpaint: 'llamagen' })).toThrow('underpaint')
+  })
+
   test('failExcerpt arrives as a list of lines (server fail_tail[-2:]) -> newline-joined', () => {
     const tile = parseSessionSummary({ ...SUMMARY, state: 'failed', failExcerpt: ['line one', 'line two'] })
     expect(tile.failExcerpt).toBe('line one\nline two')
@@ -152,6 +160,12 @@ describe('parseSseEvent', () => {
       sessionId: 's-1',
       substate: 'loading_models',
     })
+    // §16: phase 1's render substate
+    expect(parseSseEvent('state', { sessionId: 's-1', state: 'underpainting', seed: 5 })).toEqual({
+      kind: 'state-live',
+      sessionId: 's-1',
+      substate: 'underpainting',
+    })
   })
   test('terminal state carries the summary', () => {
     expect(
@@ -173,12 +187,24 @@ describe('parseSseEvent', () => {
   test('progress', () => {
     const ev = parseSseEvent('progress', {
       sessionId: 's-1', step: 10, stepsTotal: 200, scene: 0, sceneCount: 1,
-      phase: 'scene', sPerStep: 1.5, etaSec: 280, elapsedSec: 15, nextFrameInSec: 3,
+      phase: 'scene', renderPhase: 'main', sPerStep: 1.5, etaSec: 280, elapsedSec: 15, nextFrameInSec: 3,
     })
     expect(ev).toEqual({
       kind: 'progress', sessionId: 's-1', step: 10, stepsTotal: 200, scene: 0, sceneCount: 1,
-      phase: 'scene', sPerStep: 1.5, etaSec: 280,
+      phase: 'scene', renderPhase: 'main', sPerStep: 1.5, etaSec: 280,
     })
+  })
+  test('progress carries the §16 render phase (underpaint)', () => {
+    const ev = parseSseEvent('progress', {
+      sessionId: 's-1', step: 10, stepsTotal: 400, scene: 0, sceneCount: 1,
+      phase: 'scene', renderPhase: 'underpaint', sPerStep: 1.5, etaSec: 280,
+    })
+    expect(ev.kind === 'progress' && ev.renderPhase).toBe('underpaint')
+    // a missing/junk renderPhase is a contract violation
+    expect(() => parseSseEvent('progress', {
+      sessionId: 's-1', step: 10, stepsTotal: 400, scene: 0, sceneCount: 1,
+      phase: 'scene', sPerStep: 1.5, etaSec: 280,
+    })).toThrow('renderPhase')
   })
   test('frame keeps only savedTotal', () => {
     expect(parseSseEvent('frame', { sessionId: 's-1', index: 4, step: 40, url: 'u', thumbUrl: 't', savedTotal: 4 })).toEqual({

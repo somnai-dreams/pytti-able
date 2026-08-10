@@ -46,15 +46,20 @@ export async function getSchemaFields(): Promise<string[]> {
 // always uses queue mode: idle -> starts immediately; busy -> APPENDS to the FIFO.
 // Never preempt from Create — killing a live render is a bench verb.
 export async function postStart(payload: SubmissionPayload): Promise<StartResult> {
+  // §16: the underpaint envelope field is present ONLY when the UNDERPAINT row is
+  // non-OFF (or a tweak replays a base envelope) — an untouched panel's body is
+  // byte-identical to the pre-§16 envelope.
+  const body: Record<string, unknown> = {
+    mode: 'queue',
+    values: payload.values,
+    forkOf: payload.forkOf,
+    seedLocked: payload.seedLocked,
+  }
+  if (payload.underpaint != null) body['underpaint'] = payload.underpaint
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      mode: 'queue',
-      values: payload.values,
-      forkOf: payload.forkOf,
-      seedLocked: payload.seedLocked,
-    }),
+    body: JSON.stringify(body),
   })
   return parseStartResult(res.status, await res.json())
 }

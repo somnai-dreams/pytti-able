@@ -18,16 +18,19 @@
 // user sees is the number that submits (§5.6).
 //
 // The EXPERIMENTS panel (2026-08-06, spec §5.7 — "i need access to the higher level
-// experiment toggles in create"): seven rows in the gear's collapsed EXPERIMENTS
-// disclosure, each a mapping onto schema fields (Experiments / matchExperiments /
-// the applyExperiments emission inside composeSubmission). The panel's PAYLOAD RULE:
-// a row adds keys iff its selection differs from what the server's defaults-compose
-// produces anyway — six rows default to the composed default and emit NOTHING
-// untouched; PYRAMID is the deliberate exception (its default 3 is Create's judged
-// pin over the engine default OFF, made visible — it emits its two keys at every
-// non-OFF selection), so the untouched panel's payload is byte-identical to the
-// pre-panel pin era. The rule leans on the same-side pin test_server.py carries
-// (a bare submission composes the engine defaults these emissions assume).
+// experiment toggles in create"): ten rows (§5.7 + the §16 pipeline rows) in the
+// gear's collapsed EXPERIMENTS disclosure, each a mapping onto schema fields
+// (Experiments / matchExperiments / the applyExperiments emission inside
+// composeSubmission) — except UNDERPAINT, which rides the POST body's `underpaint`
+// ENVELOPE field (§16), never a values key. The panel's PAYLOAD RULE: a row adds
+// keys iff its selection differs from what the server's defaults-compose produces
+// anyway — every row but PYRAMID defaults to the composed default and emits
+// NOTHING untouched; PYRAMID is the deliberate exception (its default 3 is
+// Create's judged pin over the engine default OFF, made visible — it emits its
+// two keys at every non-OFF selection), so the untouched panel's payload is
+// byte-identical to the pre-panel pin era. The rule leans on the same-side pin
+// test_server.py carries (a bare submission composes the engine defaults these
+// emissions assume).
 //
 // String/JSON domain — outside freerange's numeric subset; presets.test.ts is the
 // checked surface.
@@ -41,15 +44,22 @@
 //   SeedMode = {kind:'random'} | {kind:'locked', seed}
 //   NoiseId = 'white'|'pink'|'pinkmono'|'gray'   PyramidId = '3'|'2'|'4'|'off'
 //   ToggleId = 'off'|'on'                        AnnealId = 'off'|'blur'|'noise'
-//   Experiments = { noise, pyramid, anneal, coherence, fullVision, phase, autoStop }
-//     — each id-or-null; null = "inherit tweak base" (CUSTOM chip), reachable only
-//     while tweak != null, mirroring aspect/size/look
+//   UnderpaintId = 'off'|'llamagen'|'fourier'    UnderpaintEnvelope = {source, steps?}
+//   Experiments = { noise, pyramid, anneal, coherence, fullVision, phase, autoStop,
+//     underpaint, projection, fourier } — each id-or-null; null = "inherit tweak
+//     base" (CUSTOM chip), reachable only while tweak != null, mirroring
+//     aspect/size/look. The §16 pipeline rows: UNDERPAINT rides the POST body's
+//     `underpaint` ENVELOPE field (never a values key); PROJECTION emits
+//     manifold_projection; FOURIER emits fourier_parameterization (UNLIMITED only)
 //   ComposerSubmitInput = { prompt, aspect: ComposerAspect|null, size|null, steps: number,
 //     look|null, seedMode, tweak|null, init: InitSubmitInput|null, experiments }
 //     (null preset ids = "inherit tweak base", reachable only while tweak != null;
 //     steps is never null — §5.3; init per §15.6 — main maps the attachment through
-//     core/init toInitSubmitInput, which enforces image-is-ready)
-//   SubmissionPayload = { values, forkOf, seedLocked }   — POST /api/sessions body fields
+//     core/init toInitSubmitInput, which enforces image-is-ready; tweak carries
+//     baseUnderpaint — the base session's envelope, the UNDERPAINT CUSTOM replay source)
+//   SubmissionPayload = { values, forkOf, seedLocked, underpaint }  — POST body fields;
+//     underpaint null -> the body carries NO underpaint key (untouched panel adds
+//     nothing to the envelope, §5.6/§16)
 //
 // constants:
 //   VISIBLE_CONTROL_FIELDS / PIN_FIELDS — the isolation invariant's two halves (§5.6):
@@ -77,7 +87,14 @@
 //   lookModel(look) -> image_model string
 //   defaultExperiments() -> Experiments                 the fresh panel: white / 3 /
 //     off / off / off / off / off — every row at the engine-or-tuned default (§5.7)
-//   matchExperiments(values) -> Experiments             the panel's reverse map (§5.3
+//   projectionDimsSafe(aspect, size, baseValues|null) -> boolean   §16: PROJECTION's
+//     /8-dims gate (ds8 tokenizer stride) over the same dims rule composeSubmission
+//     uses; AUTO is safe by construction — renderBar disables the chip on false,
+//     applyAspect/applySize force the row OFF on a dims change that breaks it
+//   matchUnderpaint(envelope|null) -> UnderpaintId|null  §16 reverse map over the base
+//     SESSION's envelope: null -> OFF; default-steps source -> its chip; scripted
+//     non-default steps -> CUSTOM (replays baseUnderpaint verbatim)
+//   matchExperiments(values, baseUnderpaint) -> Experiments   the panel's reverse map (§5.3
 //     doctrine, exact-match only): pink + chroma natural -> PINK, pink + chroma mono
 //     -> PINK MONO, pink + any other chroma -> null (CUSTOM); chroma is consulted
 //     ONLY for pink (it is engine-inert for white/gray); c2f true + stages 2/3/4 ->
@@ -95,7 +112,14 @@
 //     (caller-contract violations — the three steps boundaries above and
 //     model.applyHoldMeaning / applyAutoStop / applyLook guarantee validity; the
 //     engine refuses c2f + semantic init, annealing + auto_stop, and any of
-//     spectrum-shaping / annealing under a latent model, §5.7). AUTO aspect
+//     spectrum-shaping / annealing under a latent model, §5.7). The §16 guards, same
+//     doctrine: an EFFECTIVE underpaint (concrete row or CUSTOM replaying a base
+//     envelope) throws with a non-OFF pyramid row, under LOOK VQGAN (v1 scope), or
+//     with a maskless attachment; PROJECTION ON throws under VQGAN, with AUTO-STOP
+//     on, a non-OFF anneal row, or non-/8 dims; FOURIER ON throws outside LOOK
+//     UNLIMITED or with a shaped-noise/anneal row, and a concrete non-UNLIMITED look
+//     throws with any non-OFF fourier row (base fourier keys must not ride).
+//     AUTO aspect
 //     resolves through autoDims — throws without attachment natural dims (the popover
 //     only enables the chip once they are known; main's submit guard covers the gap).
 //     The rounding multiple comes from the LOOK (verified against pytti-core, §5.1a):
@@ -209,12 +233,24 @@ export type NoiseId = 'white' | 'pink' | 'pinkmono' | 'gray'
 export type PyramidId = '3' | '2' | '4' | 'off'
 export type ToggleId = 'off' | 'on'
 export type AnnealId = 'off' | 'blur' | 'noise'
+// The UNDERPAINT row (§16): OFF, or one of the two validated composition passes.
+// NOT a schema value — a non-OFF selection rides the POST body's `underpaint`
+// envelope field; the server orchestrates the two-phase session.
+export type UnderpaintId = 'off' | 'llamagen' | 'fourier'
+export type UnderpaintEnvelope = { source: 'llamagen' | 'fourier'; steps?: number }
 
 // Chip order = display order (defaults first, per row).
 export const NOISE_IDS: readonly NoiseId[] = ['white', 'pink', 'pinkmono', 'gray']
 export const PYRAMID_IDS: readonly PyramidId[] = ['3', '2', '4', 'off']
 export const TOGGLE_IDS: readonly ToggleId[] = ['off', 'on']
 export const ANNEAL_IDS: readonly AnnealId[] = ['off', 'blur', 'noise']
+export const UNDERPAINT_IDS: readonly UnderpaintId[] = ['off', 'llamagen', 'fourier']
+
+// The server's per-source phase-1 budgets (server UNDERPAINT_DEFAULT_STEPS — the
+// eval legs': lg-under-ds8 100, fu-150 150). The row emits {source} alone and the
+// server composes these; the table exists client-side so matchUnderpaint can
+// exact-match a rematerialized envelope against what the row would emit (§5.3).
+export const UNDERPAINT_DEFAULT_STEPS: Record<'llamagen' | 'fourier', number> = { llamagen: 100, fourier: 150 }
 
 // null = "inherit tweak base" (CUSTOM chip) — reachable ONLY while tweak != null,
 // mirroring aspect/size/look. A fresh composer always has concrete ids.
@@ -226,6 +262,11 @@ export type Experiments = {
   fullVision: ToggleId | null // cutout_sampler 'full' + cutouts 16 when ON (the engine-documented pair); OFF emits nothing
   phase: ToggleId | null // phase_scheduling
   autoStop: ToggleId | null // auto_stop
+  // §16 — the pipeline rows (promoted 2026-08: "all of these settings seen in
+  // isolation arent a huge help because they compound in different ways together"):
+  underpaint: UnderpaintId | null // the POST envelope's underpaint field — NOT a values key
+  projection: ToggleId | null // manifold_projection (the up-fl-proj champion's finish cleaner)
+  fourier: ToggleId | null // fourier_parameterization — UNLIMITED look only
 }
 
 // The fresh panel: every row at the engine-or-tuned default, so an untouched panel
@@ -240,7 +281,20 @@ export function defaultExperiments(): Experiments {
   // white because shaped init fails loud on VQGAN/LlamaGen, and a global
   // default would landmine every bench render of those models. The VQGAN
   // look-guard already forces this row to WHITE (which emits nothing).
-  return { noise: 'pinkmono', pyramid: '3', anneal: 'off', coherence: 'off', fullVision: 'off', phase: 'off', autoStop: 'off' }
+  return {
+    noise: 'pinkmono',
+    pyramid: '3',
+    anneal: 'off',
+    coherence: 'off',
+    fullVision: 'off',
+    phase: 'off',
+    autoStop: 'off',
+    // §16 pipeline rows: conservative defaults — nothing imposed. The battery
+    // evidence (up-fl-proj champion, up-tight-ds8) lives in the chip hints.
+    underpaint: 'off',
+    projection: 'off',
+    fourier: 'off',
+  }
 }
 
 // One row's application: clear the fields the row owns, then set the selection's
@@ -308,6 +362,16 @@ function toggleEmit(field: string, onValue: unknown, toggle: ToggleId): Record<s
 // would 400 at the boundary.
 const ANNEAL_FIELDS: readonly string[] = ['structure_annealing', 'anneal_source', 'anneal_cycles', 'anneal_strength', 'anneal_band']
 
+// The PROJECTION row owns the whole projection field group (the ANNEAL ownership
+// rule): ON emits the flag alone — the knobs (every 30 / strength 0.5 / model ds8)
+// are the engine defaults, and non-defaults alongside false are schema-rejected.
+const PROJECTION_FIELDS: readonly string[] = ['manifold_projection', 'projection_every', 'projection_strength', 'projection_model']
+
+// The FOURIER row owns the pair: fourier_decay is only meaningful with the flag
+// (non-default decay alongside false is schema-rejected), so a concrete re-pick
+// clears a bench-authored decay.
+const FOURIER_FIELDS: readonly string[] = ['fourier_parameterization', 'fourier_decay']
+
 // Apply every CONCRETE row (null rows — tweak CUSTOM — leave the base verbatim).
 // Fresh callers validate all-concrete first; the untouched-panel result is exactly
 // { coarse_to_fine: true, coarse_stages: 3 } — the retired pin's bytes.
@@ -327,6 +391,20 @@ function applyExperiments(values: Record<string, unknown>, ex: Experiments): voi
   }
   if (ex.phase != null) applyRow(values, ['phase_scheduling'], toggleEmit('phase_scheduling', true, ex.phase))
   if (ex.autoStop != null) applyRow(values, ['auto_stop'], toggleEmit('auto_stop', true, ex.autoStop))
+  // §16 pipeline rows. UNDERPAINT is deliberately absent here: it is an envelope
+  // field, not a values key — composeSubmission emits it on the payload directly.
+  if (ex.projection != null) applyRow(values, PROJECTION_FIELDS, toggleEmit('manifold_projection', true, ex.projection))
+  if (ex.fourier != null) applyRow(values, FOURIER_FIELDS, toggleEmit('fourier_parameterization', true, ex.fourier))
+}
+
+// The UNDERPAINT row's envelope emission: OFF -> null (the POST body carries NO
+// underpaint field — §5.6 extends to the envelope: an untouched panel adds nothing);
+// a source -> {source} alone, the server composes the documented per-source steps.
+// The tweak-CUSTOM (null) row replays the base session's envelope verbatim.
+function underpaintEnvelope(row: UnderpaintId | null, baseUnderpaint: UnderpaintEnvelope | null): UnderpaintEnvelope | null {
+  if (row == null) return baseUnderpaint
+  if (row === 'off') return null
+  return { source: row }
 }
 
 function dimsTable(sizeClass: SizeClass): Record<AspectId, readonly [number, number]> {
@@ -431,7 +509,10 @@ export type ComposerSubmitInput = {
   steps: number // always concrete — validated positive integer (§5.3, no null-inherit)
   look: LookId | null
   seedMode: SeedMode
-  tweak: { of: string; baseValues: Record<string, unknown> } | null
+  // baseUnderpaint (§16): the base SESSION's envelope, captured at tweak time from
+  // the summary — the UNDERPAINT row's CUSTOM (null) replay source, exactly as
+  // baseValues is for the schema rows.
+  tweak: { of: string; baseValues: Record<string, unknown>; baseUnderpaint: UnderpaintEnvelope | null } | null
   init: InitSubmitInput | null
   experiments: Experiments
 }
@@ -440,6 +521,10 @@ export type SubmissionPayload = {
   values: Record<string, unknown>
   forkOf: string | null
   seedLocked: boolean
+  // §16: the two-phase envelope field. null -> the POST body carries no underpaint
+  // key at all (net.postStart omits it) — the §2.4 envelope stays byte-identical
+  // for every non-underpaint submission.
+  underpaint: UnderpaintEnvelope | null
 }
 
 // ── The isolation invariant (spec §5.6, binding) ─────────────────────────────
@@ -475,6 +560,13 @@ export const VISIBLE_CONTROL_FIELDS: readonly string[] = [
   'cutouts', // rides the FULL VISION row — ON pairs 16, the engine-documented band for the full sampler
   'phase_scheduling', // PHASE SCHEDULE toggle
   'auto_stop', // AUTO-STOP toggle
+  // §16 pipeline rows (the underpaint field itself is an ENVELOPE key, visible as
+  // the UNDERPAINT row — presets.test.ts pins the envelope side separately). The
+  // rows OWN their knob fields (projection_every/strength/model, fourier_decay —
+  // the ANNEAL ownership rule) but never emit them: ON emits the flag alone, the
+  // knobs stay engine defaults.
+  'manifold_projection', // PROJECTION toggle
+  'fourier_parameterization', // FOURIER toggle (UNLIMITED look only)
 ]
 
 // Fixed pins: constant on every fresh submission (never user-varied, but stated
@@ -498,6 +590,36 @@ function matchAspectInClass(
     if (entry[0] === width && entry[1] === height) return aspect
   }
   return null
+}
+
+// §16 PROJECTION × dims: the projector's tokenizer stride (ds8) needs width AND
+// height /8. Pure over the same dims rule composeSubmission uses, WITHOUT needing
+// the attachment: AUTO dims are /8 by construction (autoDims multiples are 8/16),
+// a concrete aspect resolves through the tables (draft 16:9's 320x180 is the one
+// offender), a CUSTOM (null) aspect reads the base dims (non-numeric -> safe: the
+// server/engine fails loud, never a silent client guess). renderBar disables the
+// PROJECTION chip on false; applyAspect/applySize force the row OFF on a dims
+// change that breaks it (§5.7 forcing doctrine).
+export function projectionDimsSafe(
+  aspect: ComposerAspect | null,
+  size: SizeId | null,
+  baseValues: Record<string, unknown> | null,
+): boolean {
+  if (aspect === 'auto') return true
+  let width: unknown
+  let height: unknown
+  if (aspect != null) {
+    const sizeClass = baseValues != null ? tweakDimsClass(size, baseValues) : SIZE_CLASS[size ?? 'full']
+    const entry = dimsTable(sizeClass)[aspect]
+    width = entry[0]
+    height = entry[1]
+  } else {
+    if (baseValues == null) return true // fresh composers always have a concrete aspect
+    width = baseValues['width']
+    height = baseValues['height']
+  }
+  if (typeof width !== 'number' || typeof height !== 'number') return true
+  return width % 8 === 0 && height % 8 === 0
 }
 
 // The size class to use for a tweak dims override when size is CUSTOM (null):
@@ -574,13 +696,74 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
   if (composer.look === 'vqgan' && (composer.experiments.noise !== 'white' || composer.experiments.anneal !== 'off')) {
     throw new Error('composeSubmission: LOOK VQGAN with a shaped-noise or anneal row (applyLook must force white/off)')
   }
+  // §16 UNDERPAINT guards — the effective envelope (a null/CUSTOM row replays the
+  // tweak base's) is what the server will orchestrate, so the guards key off it:
+  const underpaint = underpaintEnvelope(
+    composer.experiments.underpaint,
+    composer.tweak == null ? null : composer.tweak.baseUnderpaint,
+  )
+  if (underpaint != null) {
+    // The engine downsamples a c2f stage-1 init — the pyramid would destroy the
+    // underpaint. applyUnderpaint forces PYRAMID to OFF; the server also strips
+    // c2f at the handoff as a backstop, but §5.6 says the row must not lie.
+    if (composer.experiments.pyramid !== 'off') {
+      throw new Error('composeSubmission: UNDERPAINT with a non-OFF pyramid row (applyUnderpaint must force it off)')
+    }
+    // v1 scope: no underpaint under a VQGAN finish (applyLook forces the row off).
+    if (composer.look === 'vqgan') {
+      throw new Error('composeSubmission: UNDERPAINT under LOOK VQGAN (applyLook must force it off — v1 scope)')
+    }
+    // §16 mask rule: an attachment + underpaint needs a painted mask — without one
+    // the two inits have no defined composition (the server 400s the same pair).
+    if (composer.init != null && composer.init.mask == null) {
+      throw new Error('composeSubmission: UNDERPAINT with an attachment but no painted mask (the submit guard must stop this)')
+    }
+  }
+  // §16 PROJECTION guards: the engine refuses manifold_projection alongside
+  // structure_annealing, auto_stop, and VQGAN/LlamaGen canvases, and needs /8 dims
+  // (the ds8 tokenizer stride). applyProjection/applyAutoStop/applyLook/applyAspect/
+  // applySize keep these pairs unreachable; reaching one is a caller-contract
+  // violation. (Accepted residual, the look-CUSTOM rule: a null look over a
+  // LlamaGen base is not guarded — it fails loud at render start.)
+  if (composer.experiments.projection === 'on') {
+    if (composer.look === 'vqgan') {
+      throw new Error('composeSubmission: PROJECTION under LOOK VQGAN (applyLook must force it off)')
+    }
+    if (composer.experiments.autoStop !== 'off') {
+      throw new Error('composeSubmission: PROJECTION with AUTO-STOP on (applyAutoStop must force it off)')
+    }
+    if (composer.experiments.anneal !== 'off') {
+      throw new Error('composeSubmission: PROJECTION with a non-OFF anneal row (applyProjection must force it off)')
+    }
+    if (!projectionDimsSafe(composer.aspect, composer.size, composer.tweak == null ? null : composer.tweak.baseValues)) {
+      throw new Error('composeSubmission: PROJECTION with non-/8 dims (applyAspect/applySize must force it off)')
+    }
+  }
+  // §16 FOURIER guards: the engine scopes fourier_parameterization to the
+  // Unlimited Palette (+ white spectrum, no annealing). ON requires LOOK UNLIMITED
+  // exactly; a concrete non-UNLIMITED look also rejects a null/CUSTOM row (base
+  // fourier keys would ride under a model the engine refuses) — applyLook forces
+  // the row OFF on every look change away from UNLIMITED.
+  if (composer.experiments.fourier === 'on' && composer.look !== 'unlimited') {
+    throw new Error('composeSubmission: FOURIER outside LOOK UNLIMITED (the row is enabled only there)')
+  }
+  if (composer.look != null && composer.look !== 'unlimited' && composer.experiments.fourier !== 'off') {
+    throw new Error('composeSubmission: non-UNLIMITED look with a non-OFF fourier row (applyLook must force it off)')
+  }
+  if (composer.experiments.fourier === 'on' && (composer.experiments.noise !== 'white' || composer.experiments.anneal !== 'off')) {
+    throw new Error('composeSubmission: FOURIER with a shaped-noise or anneal row (applyFourier must force white/off)')
+  }
 
   if (composer.tweak == null) {
     if (composer.aspect == null || composer.size == null || composer.look == null) {
       throw new Error('composeSubmission: a fresh composer must have concrete preset ids')
     }
     const ex = composer.experiments
-    if (ex.noise == null || ex.pyramid == null || ex.anneal == null || ex.coherence == null || ex.fullVision == null || ex.phase == null || ex.autoStop == null) {
+    if (
+      ex.noise == null || ex.pyramid == null || ex.anneal == null || ex.coherence == null ||
+      ex.fullVision == null || ex.phase == null || ex.autoStop == null ||
+      ex.underpaint == null || ex.projection == null || ex.fourier == null
+    ) {
       throw new Error('composeSubmission: a fresh composer must have concrete experiment rows (null = tweak-only CUSTOM)')
     }
     const dims =
@@ -629,7 +812,7 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
         values['perceptor_backend'] = 'torch' // semantic init is torch-only by design
       }
     }
-    return { values, forkOf: null, seedLocked }
+    return { values, forkOf: null, seedLocked, underpaint }
   }
 
   // Tweak: base snapshot values, overridden only where the user picked a concrete chip.
@@ -714,7 +897,7 @@ export function composeSubmission(composer: ComposerSubmitInput): SubmissionPayl
     if (init.holdMeaning) values['perceptor_backend'] = 'torch'
   }
 
-  return { values, forkOf: composer.tweak.of, seedLocked }
+  return { values, forkOf: composer.tweak.of, seedLocked, underpaint }
 }
 
 export function matchPresets(values: Record<string, unknown>): {
@@ -828,7 +1011,45 @@ function matchFullVision(values: Record<string, unknown>): ToggleId | null {
   return null // classic / batched / junk -> CUSTOM (rides verbatim)
 }
 
-export function matchExperiments(values: Record<string, unknown>): Experiments {
+function matchProjection(values: Record<string, unknown>): ToggleId | null {
+  const projection = values['manifold_projection']
+  // Absent composes to the engine default (off); knobs alongside false are
+  // schema-rejected, so false/absent is OFF regardless of knob values.
+  if (projection == null || projection === false) return 'off'
+  if (projection !== true) return null
+  // ON is exact only with the knobs at their engine defaults (the ANNEAL rule):
+  // a bench-tuned every/strength/model is CUSTOM and rides verbatim.
+  const every = values['projection_every']
+  const strength = values['projection_strength']
+  const model = values['projection_model']
+  if ((every != null && every !== 30) || (strength != null && strength !== 0.5) || (model != null && model !== 'ds8')) {
+    return null
+  }
+  return 'on'
+}
+
+function matchFourier(values: Record<string, unknown>): ToggleId | null {
+  const fourier = values['fourier_parameterization']
+  if (fourier == null || fourier === false) return 'off' // non-default decay alongside false is schema-rejected
+  if (fourier !== true) return null
+  const decay = values['fourier_decay']
+  if (decay != null && decay !== 1.0) return null // bench-tuned decay -> CUSTOM, rides verbatim
+  return 'on'
+}
+
+// §16: the UNDERPAINT row's reverse map — over the base session's ENVELOPE (from
+// the summary), not its values. Exact-match doctrine: the row would emit {source}
+// and the server composes the documented default steps, so only a default-steps
+// envelope rematerializes as its chip; a scripted non-default budget is CUSTOM
+// (null) and replays verbatim through baseUnderpaint.
+export function matchUnderpaint(envelope: UnderpaintEnvelope | null): UnderpaintId | null {
+  if (envelope == null) return 'off'
+  const steps = envelope.steps
+  if (steps != null && steps !== UNDERPAINT_DEFAULT_STEPS[envelope.source]) return null
+  return envelope.source
+}
+
+export function matchExperiments(values: Record<string, unknown>, baseUnderpaint: UnderpaintEnvelope | null): Experiments {
   return {
     noise: matchNoise(values),
     pyramid: matchPyramid(values),
@@ -837,6 +1058,9 @@ export function matchExperiments(values: Record<string, unknown>): Experiments {
     fullVision: matchFullVision(values),
     phase: matchToggle(values['phase_scheduling']),
     autoStop: matchToggle(values['auto_stop']),
+    underpaint: matchUnderpaint(baseUnderpaint),
+    projection: matchProjection(values),
+    fourier: matchFourier(values),
   }
 }
 

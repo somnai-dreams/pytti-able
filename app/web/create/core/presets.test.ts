@@ -11,10 +11,12 @@ import {
   lookModel,
   matchExperiments,
   matchPresets,
+  matchUnderpaint,
   MAX_CUSTOM_STEPS,
   parseCustomSteps,
   parseStepsId,
   PIN_FIELDS,
+  projectionDimsSafe,
   rematerializeSteps,
   resolveDims,
   SIZE_IDS,
@@ -243,9 +245,9 @@ describe('composeSubmission (tweak)', () => {
       steps: rematerializeSteps(base), // what tweakSession materializes — the base's 200
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's-0001-x', baseValues: { ...base } },
+      tweak: { of: 's-0001-x', baseValues: { ...base }, baseUnderpaint: null },
       init: null,
-      experiments: matchExperiments(base), // what tweakSession materializes (§5.7) — all rows at the base
+      experiments: matchExperiments(base, null), // what tweakSession materializes (§5.7) — all rows at the base
     })
     expect(payload.values).toEqual({ scenes: 'new prompt', width: 448, height: 576, steps_per_scene: 200, image_model: 'Limited Palette', cutouts: 16 })
     expect(payload.forkOf).toBe('s-0001-x')
@@ -260,9 +262,9 @@ describe('composeSubmission (tweak)', () => {
       steps: 300,
       look: 'vqgan',
       seedMode: { kind: 'locked', seed: 7 },
-      tweak: { of: 's-0001-x', baseValues: { ...base } },
+      tweak: { of: 's-0001-x', baseValues: { ...base }, baseUnderpaint: null },
       init: null,
-      experiments: matchExperiments(base),
+      experiments: matchExperiments(base, null),
     })
     expect(payload.values['width']).toBe(640)
     expect(payload.values['height']).toBe(360)
@@ -279,9 +281,9 @@ describe('composeSubmission (tweak)', () => {
       steps: 450,
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's', baseValues: { width: 999, height: 333, steps_per_scene: 200 } },
+      tweak: { of: 's', baseValues: { width: 999, height: 333, steps_per_scene: 200 }, baseUnderpaint: null },
       init: null,
-      experiments: matchExperiments({ width: 999, height: 333, steps_per_scene: 200 }),
+      experiments: matchExperiments({ width: 999, height: 333, steps_per_scene: 200 }, null),
     })
     expect(payload.values['width']).toBe(999)
     expect(payload.values['height']).toBe(333)
@@ -297,9 +299,9 @@ describe('composeSubmission (tweak)', () => {
       steps: rematerializeSteps(baseValues), // 275, shown in the custom input
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's', baseValues },
+      tweak: { of: 's', baseValues, baseUnderpaint: null },
       init: null,
-      experiments: matchExperiments(baseValues),
+      experiments: matchExperiments(baseValues, null),
     })
     expect(payload.values['width']).toBe(640)
     expect(payload.values['height']).toBe(360)
@@ -314,9 +316,9 @@ describe('composeSubmission (tweak)', () => {
       steps: 200,
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's', baseValues: { width: 224, height: 288 } },
+      tweak: { of: 's', baseValues: { width: 224, height: 288 }, baseUnderpaint: null },
       init: null,
-      experiments: matchExperiments({ width: 224, height: 288 }),
+      experiments: matchExperiments({ width: 224, height: 288 }, null),
     })
     expect(payload.values['width']).toBe(320)
     expect(payload.values['height']).toBe(180)
@@ -330,9 +332,9 @@ describe('composeSubmission (tweak)', () => {
       steps: 200,
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's', baseValues: { width: 999, height: 333 } },
+      tweak: { of: 's', baseValues: { width: 999, height: 333 }, baseUnderpaint: null },
       init: null,
-      experiments: matchExperiments({ width: 999, height: 333 }),
+      experiments: matchExperiments({ width: 999, height: 333 }, null),
     })
     expect(payload.values['width']).toBe(512)
     expect(payload.values['height']).toBe(512)
@@ -347,12 +349,12 @@ describe('composerDims', () => {
   })
   test('tweak with CUSTOM aspect inherits base dims', () => {
     expect(
-      composerDims({ prompt: 'p', aspect: null, size: null, steps: 200, look: null, seedMode: { kind: 'random' }, tweak: { of: "s", baseValues: { width: 640, height: 360 } }, init: null, experiments: defaultExperiments() }),
+      composerDims({ prompt: 'p', aspect: null, size: null, steps: 200, look: null, seedMode: { kind: 'random' }, tweak: { of: "s", baseValues: { width: 640, height: 360 }, baseUnderpaint: null }, init: null, experiments: defaultExperiments() }),
     ).toEqual({ width: 640, height: 360 })
   })
   test('tweak without numeric base dims falls to 512x512', () => {
     expect(
-      composerDims({ prompt: 'p', aspect: null, size: null, steps: 200, look: null, seedMode: { kind: 'random' }, tweak: { of: "s", baseValues: {} }, init: null, experiments: defaultExperiments() }),
+      composerDims({ prompt: 'p', aspect: null, size: null, steps: 200, look: null, seedMode: { kind: 'random' }, tweak: { of: "s", baseValues: {}, baseUnderpaint: null }, init: null, experiments: defaultExperiments() }),
     ).toEqual({ width: 512, height: 512 })
   })
   test('AUTO matches what composeSubmission emits (optimistic tile AR = session AR)', () => {
@@ -411,9 +413,9 @@ describe('AUTO aspect through composeSubmission (§5.1a)', () => {
       steps: 200,
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's', baseValues: { width: 224, height: 288, image_model: 'Limited Palette' } },
+      tweak: { of: 's', baseValues: { width: 224, height: 288, image_model: 'Limited Palette' }, baseUnderpaint: null },
       init: { path: '/up/a.png', natural: { width: 1000, height: 1000 }, strength: null, holdMeaning: false, mask: null },
-      experiments: matchExperiments({ width: 224, height: 288, image_model: 'Limited Palette' }),
+      experiments: matchExperiments({ width: 224, height: 288, image_model: 'Limited Palette' }, null),
     })
     expect(payload.values['width']).toBe(256)
     expect(payload.values['height']).toBe(256)
@@ -427,9 +429,9 @@ describe('AUTO aspect through composeSubmission (§5.1a)', () => {
       steps: 200,
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's', baseValues: { width: 512, height: 512, image_model: 'VQGAN' } },
+      tweak: { of: 's', baseValues: { width: 512, height: 512, image_model: 'VQGAN' }, baseUnderpaint: null },
       init: { path: '/up/a.png', natural: { width: 1920, height: 1080 }, strength: null, holdMeaning: false, mask: null },
-      experiments: matchExperiments({ width: 512, height: 512, image_model: 'VQGAN' }),
+      experiments: matchExperiments({ width: 512, height: 512, image_model: 'VQGAN' }, null),
     })
     expect(payload.values['width']).toBe(688)
     expect(payload.values['height']).toBe(384)
@@ -582,7 +584,7 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
   ): Parameters<typeof composeSubmission>[0] => {
     // Mirror tweakSession exactly (§5.7): rematerialize the panel from the base, then
     // re-assert the pyramid × HOLD rule (HOLD on => PYRAMID off).
-    const experiments = matchExperiments(baseValues)
+    const experiments = matchExperiments(baseValues, null)
     if (init != null && init.holdMeaning) experiments.pyramid = 'off'
     return {
       prompt: 'p',
@@ -591,7 +593,7 @@ describe('composeSubmission init — tweak (§15.6, override only on diff)', () 
       steps: 200,
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's-1', baseValues },
+      tweak: { of: 's-1', baseValues, baseUnderpaint: null },
       init,
       experiments,
     }
@@ -754,10 +756,10 @@ describe('pyramid × HOLD MEANING (§5.7 — the engine refuses c2f + semantic i
         steps: 150,
         look: null,
         seedMode: { kind: 'random' },
-        tweak: { of: 's-1', baseValues: { init_image: '/up/a.png', direct_init_weight: '4' } },
+        tweak: { of: 's-1', baseValues: { init_image: '/up/a.png', direct_init_weight: '4' }, baseUnderpaint: null },
         init: holdInit,
         // null (CUSTOM) would let base c2f keys ride under HOLD — equally rejected.
-        experiments: { ...matchExperiments({}), pyramid: null },
+        experiments: { ...matchExperiments({}, null), pyramid: null },
       }),
     ).toThrow()
   })
@@ -771,22 +773,22 @@ describe('anneal × AUTO-STOP (§5.7 — the engine refuses annealing + auto_sto
     })
 
   test('AUTO-STOP ON with ANNEAL OFF (what applyAutoStop forces) composes fine', () => {
-    const values = freshWith({ ...defaultExperiments(), autoStop: 'on' }).values
+    const values = freshWith({ ...defaultExperiments(), autoStop: 'on', underpaint: 'off', projection: 'off', fourier: 'off' }).values
     expect(values['auto_stop']).toBe(true)
     expect('structure_annealing' in values).toBe(false)
   })
 
   test('AUTO-STOP ON with a non-OFF anneal row THROWS — never a silent omission (fresh and tweak-CUSTOM)', () => {
-    expect(() => freshWith({ ...defaultExperiments(), anneal: 'blur', autoStop: 'on' })).toThrow()
-    expect(() => freshWith({ ...defaultExperiments(), anneal: 'noise', autoStop: 'on' })).toThrow()
+    expect(() => freshWith({ ...defaultExperiments(), anneal: 'blur', autoStop: 'on', underpaint: 'off', projection: 'off', fourier: 'off' })).toThrow()
+    expect(() => freshWith({ ...defaultExperiments(), anneal: 'noise', autoStop: 'on', underpaint: 'off', projection: 'off', fourier: 'off' })).toThrow()
     expect(() =>
       composeSubmission({
         prompt: 'x', aspect: null, size: null, steps: 150, look: null,
         seedMode: { kind: 'random' },
-        tweak: { of: 's-1', baseValues: { structure_annealing: true } },
+        tweak: { of: 's-1', baseValues: { structure_annealing: true }, baseUnderpaint: null },
         init: null,
         // null (CUSTOM) would let base anneal keys ride under AUTO-STOP — equally rejected.
-        experiments: { ...matchExperiments({}), anneal: null, autoStop: 'on' },
+        experiments: { ...matchExperiments({}, null), anneal: null, autoStop: 'on', underpaint: 'off', projection: 'off', fourier: 'off' },
       }),
     ).toThrow()
   })
@@ -817,11 +819,11 @@ describe('LOOK VQGAN × noise/anneal (§5.7 — codebook init has no spectrum; a
       composeSubmission({
         prompt: 'x', aspect: null, size: null, steps: 150, look: 'vqgan',
         seedMode: { kind: 'random' },
-        tweak: { of: 's-1', baseValues: { init_spectrum: 'pink' } },
+        tweak: { of: 's-1', baseValues: { init_spectrum: 'pink' }, baseUnderpaint: null },
         init: null, experiments,
       })
-    expect(() => tweakVqgan({ ...matchExperiments({}), noise: null })).toThrow()
-    expect(() => tweakVqgan({ ...matchExperiments({}), anneal: null })).toThrow()
+    expect(() => tweakVqgan({ ...matchExperiments({}, null), noise: null })).toThrow()
+    expect(() => tweakVqgan({ ...matchExperiments({}, null), anneal: null })).toThrow()
   })
 })
 
@@ -881,7 +883,7 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
     // FULL VISION ON adds the sampler + cutouts PAIR (§5.7 — full's designed band is 16).
     expect(added({ ...defaultExperiments(), fullVision: 'on' })).toEqual(['cutout_sampler', 'cutouts'])
     expect(added({ ...defaultExperiments(), phase: 'on' })).toEqual(['phase_scheduling'])
-    expect(added({ ...defaultExperiments(), autoStop: 'on' })).toEqual(['auto_stop'])
+    expect(added({ ...defaultExperiments(), autoStop: 'on', underpaint: 'off', projection: 'off', fourier: 'off' })).toEqual(['auto_stop'])
     // PYRAMID inverts: OFF (the engine default) REMOVES the pin pair from the baseline.
     const offKeys = Object.keys(freshWith({ ...defaultExperiments(), pyramid: 'off' }).values).sort()
     expect(offKeys).toEqual(baseline.filter((k) => k !== 'coarse_to_fine' && k !== 'coarse_stages'))
@@ -935,7 +937,7 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
   })
 
   test('toggles: ON emits the true/full value; OFF emits NOTHING (never an explicit smart/false)', () => {
-    const on = freshWith({ ...defaultExperiments(), coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'on' }).values
+    const on = freshWith({ ...defaultExperiments(), coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'on', underpaint: 'off', projection: 'off', fourier: 'off' }).values
     expect(on['coherence_weighting']).toBe(true)
     expect(on['cutout_sampler']).toBe('full')
     expect(on['cutouts']).toBe(16) // the pair travels together (§5.7)
@@ -950,85 +952,85 @@ describe('experiments — fresh emission and the payload rule (§5.7)', () => {
 
 describe('matchExperiments (§5.3 doctrine — exact-match only, misses are CUSTOM)', () => {
   test('an empty/schema-default base rematerializes WHITE + OFF everywhere except the pyramid (engine-default OFF)', () => {
-    expect(matchExperiments({})).toEqual({
+    expect(matchExperiments({}, null)).toEqual({
       noise: 'white',
       pyramid: 'off',
       anneal: 'off',
       coherence: 'off',
       fullVision: 'off',
       phase: 'off',
-      autoStop: 'off',
+      autoStop: 'off', underpaint: 'off', projection: 'off', fourier: 'off',
     })
   })
 
   test('a Create-authored panel round-trips through its own submission values', () => {
-    const picks: Experiments = { noise: 'pink', pyramid: '4', anneal: 'blur', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'off' }
+    const picks: Experiments = { noise: 'pink', pyramid: '4', anneal: 'blur', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'off', underpaint: 'off', projection: 'off', fourier: 'off' }
     const payload = composeSubmission({
       prompt: 'p', aspect: '1:1', size: 'full', steps: 200, look: 'limited',
       seedMode: { kind: 'random' }, tweak: null, init: null, experiments: picks,
     })
-    expect(matchExperiments(payload.values)).toEqual(picks)
+    expect(matchExperiments(payload.values, null)).toEqual(picks)
     // The flag-only ANNEAL NOISE emission and the PINK MONO pairing round-trip too.
     const picks2: Experiments = { ...defaultExperiments(), noise: 'pinkmono', anneal: 'noise' }
     const payload2 = composeSubmission({
       prompt: 'p', aspect: '1:1', size: 'full', steps: 200, look: 'limited',
       seedMode: { kind: 'random' }, tweak: null, init: null, experiments: picks2,
     })
-    expect(matchExperiments(payload2.values)).toEqual(picks2)
+    expect(matchExperiments(payload2.values, null)).toEqual(picks2)
   })
 
   test('noise: pink + natural is PINK, pink + mono is PINK MONO; any other pink chroma is CUSTOM; chroma is ignored for white/gray (engine-inert)', () => {
-    expect(matchExperiments({ init_spectrum: 'pink', init_spectrum_chroma: 'natural' }).noise).toBe('pink')
-    expect(matchExperiments({ init_spectrum: 'pink', init_spectrum_chroma: 'mono' }).noise).toBe('pinkmono')
-    expect(matchExperiments({ init_spectrum: 'pink', init_spectrum_chroma: 'full' }).noise).toBeNull()
-    expect(matchExperiments({ init_spectrum: 'pink' }).noise).toBeNull() // absent chroma composes 'full'
-    expect(matchExperiments({ init_spectrum: 'fractal' }).noise).toBeNull() // battery loser — bench-only
-    expect(matchExperiments({ init_spectrum: 'white', init_spectrum_chroma: 'mono' }).noise).toBe('white')
-    expect(matchExperiments({ init_spectrum: 'gray', init_spectrum_chroma: 'natural' }).noise).toBe('gray')
-    expect(matchExperiments({ init_spectrum: 7 }).noise).toBeNull()
+    expect(matchExperiments({ init_spectrum: 'pink', init_spectrum_chroma: 'natural' }, null).noise).toBe('pink')
+    expect(matchExperiments({ init_spectrum: 'pink', init_spectrum_chroma: 'mono' }, null).noise).toBe('pinkmono')
+    expect(matchExperiments({ init_spectrum: 'pink', init_spectrum_chroma: 'full' }, null).noise).toBeNull()
+    expect(matchExperiments({ init_spectrum: 'pink' }, null).noise).toBeNull() // absent chroma composes 'full'
+    expect(matchExperiments({ init_spectrum: 'fractal' }, null).noise).toBeNull() // battery loser — bench-only
+    expect(matchExperiments({ init_spectrum: 'white', init_spectrum_chroma: 'mono' }, null).noise).toBe('white')
+    expect(matchExperiments({ init_spectrum: 'gray', init_spectrum_chroma: 'natural' }, null).noise).toBe('gray')
+    expect(matchExperiments({ init_spectrum: 7 }, null).noise).toBeNull()
   })
 
   test('anneal: BLUR/NOISE by source with the other knobs at engine defaults; any bench-tuned knob is CUSTOM; false/absent is OFF', () => {
-    expect(matchExperiments({ structure_annealing: true }).anneal).toBe('noise') // absent source composes 'noise'
-    expect(matchExperiments({ structure_annealing: true, anneal_source: 'noise' }).anneal).toBe('noise')
-    expect(matchExperiments({ structure_annealing: true, anneal_source: 'blur' }).anneal).toBe('blur')
+    expect(matchExperiments({ structure_annealing: true }, null).anneal).toBe('noise') // absent source composes 'noise'
+    expect(matchExperiments({ structure_annealing: true, anneal_source: 'noise' }, null).anneal).toBe('noise')
+    expect(matchExperiments({ structure_annealing: true, anneal_source: 'blur' }, null).anneal).toBe('blur')
     // Explicit engine-default knobs still match exactly (absent composes to the same).
-    expect(matchExperiments({ structure_annealing: true, anneal_source: 'blur', anneal_cycles: 3, anneal_strength: 0.5, anneal_band: 0.15 }).anneal).toBe('blur')
+    expect(matchExperiments({ structure_annealing: true, anneal_source: 'blur', anneal_cycles: 3, anneal_strength: 0.5, anneal_band: 0.15 }, null).anneal).toBe('blur')
     // Any non-default knob -> CUSTOM (a bench-tuned schedule rides the base verbatim).
-    expect(matchExperiments({ structure_annealing: true, anneal_cycles: 5 }).anneal).toBeNull()
-    expect(matchExperiments({ structure_annealing: true, anneal_strength: 0.8 }).anneal).toBeNull()
-    expect(matchExperiments({ structure_annealing: true, anneal_band: 0.3 }).anneal).toBeNull()
-    expect(matchExperiments({ structure_annealing: true, anneal_source: 'melt' }).anneal).toBeNull() // junk source
-    expect(matchExperiments({ structure_annealing: false }).anneal).toBe('off')
-    expect(matchExperiments({ structure_annealing: 'yes' }).anneal).toBeNull() // junk flag
+    expect(matchExperiments({ structure_annealing: true, anneal_cycles: 5 }, null).anneal).toBeNull()
+    expect(matchExperiments({ structure_annealing: true, anneal_strength: 0.8 }, null).anneal).toBeNull()
+    expect(matchExperiments({ structure_annealing: true, anneal_band: 0.3 }, null).anneal).toBeNull()
+    expect(matchExperiments({ structure_annealing: true, anneal_source: 'melt' }, null).anneal).toBeNull() // junk source
+    expect(matchExperiments({ structure_annealing: false }, null).anneal).toBe('off')
+    expect(matchExperiments({ structure_annealing: 'yes' }, null).anneal).toBeNull() // junk flag
   })
 
   test('pyramid: stages 2/3/4 with c2f true; coarse_stages 5 is CUSTOM; c2f false/absent is OFF', () => {
-    expect(matchExperiments({ coarse_to_fine: true, coarse_stages: 3 }).pyramid).toBe('3')
-    expect(matchExperiments({ coarse_to_fine: true, coarse_stages: 2 }).pyramid).toBe('2')
-    expect(matchExperiments({ coarse_to_fine: true, coarse_stages: 4 }).pyramid).toBe('4')
-    expect(matchExperiments({ coarse_to_fine: true, coarse_stages: 5 }).pyramid).toBeNull()
-    expect(matchExperiments({ coarse_to_fine: true }).pyramid).toBeNull() // no ladder in the snapshot
-    expect(matchExperiments({ coarse_to_fine: false }).pyramid).toBe('off')
-    expect(matchExperiments({ coarse_to_fine: 'yes' }).pyramid).toBeNull()
+    expect(matchExperiments({ coarse_to_fine: true, coarse_stages: 3 }, null).pyramid).toBe('3')
+    expect(matchExperiments({ coarse_to_fine: true, coarse_stages: 2 }, null).pyramid).toBe('2')
+    expect(matchExperiments({ coarse_to_fine: true, coarse_stages: 4 }, null).pyramid).toBe('4')
+    expect(matchExperiments({ coarse_to_fine: true, coarse_stages: 5 }, null).pyramid).toBeNull()
+    expect(matchExperiments({ coarse_to_fine: true }, null).pyramid).toBeNull() // no ladder in the snapshot
+    expect(matchExperiments({ coarse_to_fine: false }, null).pyramid).toBe('off')
+    expect(matchExperiments({ coarse_to_fine: 'yes' }, null).pyramid).toBeNull()
   })
 
   test('toggles: true/false/absent map ON/OFF/OFF; junk is CUSTOM; cutout_sampler smart IS the row OFF', () => {
-    expect(matchExperiments({ coherence_weighting: true }).coherence).toBe('on')
-    expect(matchExperiments({ coherence_weighting: false }).coherence).toBe('off')
-    expect(matchExperiments({ coherence_weighting: 'yes' }).coherence).toBeNull()
-    expect(matchExperiments({ phase_scheduling: true }).phase).toBe('on')
-    expect(matchExperiments({ auto_stop: true }).autoStop).toBe('on')
+    expect(matchExperiments({ coherence_weighting: true }, null).coherence).toBe('on')
+    expect(matchExperiments({ coherence_weighting: false }, null).coherence).toBe('off')
+    expect(matchExperiments({ coherence_weighting: 'yes' }, null).coherence).toBeNull()
+    expect(matchExperiments({ phase_scheduling: true }, null).phase).toBe('on')
+    expect(matchExperiments({ auto_stop: true }, null).autoStop).toBe('on')
   })
 
   test('full vision: ON means the full+16 pair; full with any other cutouts is CUSTOM; cutouts is consulted only when the sampler is full', () => {
-    expect(matchExperiments({ cutout_sampler: 'full', cutouts: 16 }).fullVision).toBe('on')
-    expect(matchExperiments({ cutout_sampler: 'full', cutouts: 40 }).fullVision).toBeNull() // the pre-fix mispairing rematerializes CUSTOM, rides verbatim
-    expect(matchExperiments({ cutout_sampler: 'full' }).fullVision).toBeNull() // absent cutouts composes the tuned 40
-    expect(matchExperiments({ cutout_sampler: 'smart' }).fullVision).toBe('off')
-    expect(matchExperiments({ cutout_sampler: 'smart', cutouts: 16 }).fullVision).toBe('off') // cutouts is a bench knob here
-    expect(matchExperiments({ cutouts: 24 }).fullVision).toBe('off') // absent sampler composes 'smart'
-    expect(matchExperiments({ cutout_sampler: 'classic' }).fullVision).toBeNull() // rides verbatim
+    expect(matchExperiments({ cutout_sampler: 'full', cutouts: 16 }, null).fullVision).toBe('on')
+    expect(matchExperiments({ cutout_sampler: 'full', cutouts: 40 }, null).fullVision).toBeNull() // the pre-fix mispairing rematerializes CUSTOM, rides verbatim
+    expect(matchExperiments({ cutout_sampler: 'full' }, null).fullVision).toBeNull() // absent cutouts composes the tuned 40
+    expect(matchExperiments({ cutout_sampler: 'smart' }, null).fullVision).toBe('off')
+    expect(matchExperiments({ cutout_sampler: 'smart', cutouts: 16 }, null).fullVision).toBe('off') // cutouts is a bench knob here
+    expect(matchExperiments({ cutouts: 24 }, null).fullVision).toBe('off') // absent sampler composes 'smart'
+    expect(matchExperiments({ cutout_sampler: 'classic' }, null).fullVision).toBeNull() // rides verbatim
   })
 })
 
@@ -1041,7 +1043,7 @@ describe('experiments — tweak semantics (§5.7: concrete applies, CUSTOM inher
       steps: 200,
       look: null,
       seedMode: { kind: 'random' },
-      tweak: { of: 's-1', baseValues },
+      tweak: { of: 's-1', baseValues, baseUnderpaint: null },
       init: null,
       experiments,
     })
@@ -1054,7 +1056,7 @@ describe('experiments — tweak semantics (§5.7: concrete applies, CUSTOM inher
       structure_annealing: true, anneal_source: 'blur', anneal_cycles: 6, anneal_strength: 0.8, anneal_band: 0.3,
       cutout_sampler: 'classic', cutouts: 24, coherence_weighting: 'junk',
     }
-    const allCustom: Experiments = { noise: null, pyramid: null, anneal: null, coherence: null, fullVision: null, phase: null, autoStop: null }
+    const allCustom: Experiments = { noise: null, pyramid: null, anneal: null, coherence: null, fullVision: null, phase: null, autoStop: null, underpaint: null, projection: null, fourier: null }
     const values = tweakWith(base, allCustom).values
     expect(values['init_spectrum']).toBe('fractal')
     expect(values['init_spectrum_chroma']).toBe('mono')
@@ -1080,7 +1082,7 @@ describe('experiments — tweak semantics (§5.7: concrete applies, CUSTOM inher
       coherence_weighting: true, cutout_sampler: 'full', cutouts: 16,
       phase_scheduling: false, auto_stop: false,
     }
-    const values = tweakWith(base, matchExperiments(base)).values
+    const values = tweakWith(base, matchExperiments(base, null)).values
     // Non-default rows re-apply the base's own values verbatim…
     expect(values['init_spectrum']).toBe('pink')
     expect(values['init_spectrum_chroma']).toBe('natural')
@@ -1131,7 +1133,7 @@ describe('experiments — tweak semantics (§5.7: concrete applies, CUSTOM inher
   })
 
   test('flipping rows ON over a bare base emits exactly the row values', () => {
-    const values = tweakWith({ width: 512 }, { noise: 'gray', pyramid: 'off', anneal: 'noise', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'off' }).values
+    const values = tweakWith({ width: 512 }, { noise: 'gray', pyramid: 'off', anneal: 'noise', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'off', underpaint: 'off', projection: 'off', fourier: 'off' }).values
     expect(values['init_spectrum']).toBe('gray')
     expect('coarse_to_fine' in values).toBe(false)
     expect(values['structure_annealing']).toBe(true)
@@ -1169,10 +1171,16 @@ describe('isolation invariant: submissions are reconstructible from what the use
   // by construction (composeSubmission throws on it — guard-tested separately).
   const EXPERIMENTS_AXIS: readonly Experiments[] = [
     defaultExperiments(),
-    { noise: 'pink', pyramid: 'off', anneal: 'blur', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'off' },
+    { noise: 'pink', pyramid: 'off', anneal: 'blur', coherence: 'on', fullVision: 'on', phase: 'on', autoStop: 'off', underpaint: 'off', projection: 'off', fourier: 'off' },
     { ...defaultExperiments(), noise: 'gray', pyramid: '2', anneal: 'noise' },
-    { ...defaultExperiments(), pyramid: '4', autoStop: 'on' },
+    { ...defaultExperiments(), pyramid: '4', autoStop: 'on', underpaint: 'off', projection: 'off', fourier: 'off' },
     { ...defaultExperiments(), noise: 'pinkmono' },
+    // §16 pipeline rows — each offered option in the walk at least once, including
+    // the champion stack (fourier underpaint + projection finish, up-fl-proj):
+    { ...defaultExperiments(), projection: 'on' }, // needs /8 dims + no anneal (defaults hold)
+    { ...defaultExperiments(), noise: 'white', fourier: 'on' }, // UNLIMITED look only; white forced
+    { ...defaultExperiments(), pyramid: 'off', underpaint: 'llamagen' },
+    { ...defaultExperiments(), pyramid: 'off', underpaint: 'fourier', projection: 'on' },
   ]
 
   test('fresh: payload keys ⊆ visible controls ∪ documented pins', () => {
@@ -1195,6 +1203,12 @@ describe('isolation invariant: submissions are reconstructible from what the use
                   if (init != null && init.holdMeaning && experiments.pyramid !== 'off') continue
                   // VQGAN forces NOISE white + ANNEAL off (applyLook) — same rule.
                   if (look === 'vqgan' && (experiments.noise !== 'white' || experiments.anneal !== 'off')) continue
+                  // §16 forcings, same rule: the guarded pairings are unreachable
+                  // by construction (applyUnderpaint/applyLook/applyAspect/applySize
+                  // /applyFourier) and composeSubmission throws on them.
+                  if (experiments.underpaint !== 'off' && (look === 'vqgan' || (init != null && init.mask == null))) continue
+                  if (experiments.projection === 'on' && (look === 'vqgan' || !projectionDimsSafe(aspect, size, null))) continue
+                  if (experiments.fourier === 'on' && look !== 'unlimited') continue
                   const payload = composeSubmission({ prompt: 'p', aspect, size, steps, look, seedMode, tweak: null, init, experiments })
                   for (const key of Object.keys(payload.values)) {
                     if (!VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
@@ -1246,20 +1260,26 @@ describe('isolation invariant: submissions are reconstructible from what the use
     // to the §5.7 axis; null rows must contribute NO keys of their own.
     const TWEAK_EXPERIMENTS: readonly Experiments[] = [
       ...EXPERIMENTS_AXIS,
-      { noise: null, pyramid: null, anneal: null, coherence: null, fullVision: null, phase: null, autoStop: null },
+      { noise: null, pyramid: null, anneal: null, coherence: null, fullVision: null, phase: null, autoStop: null, underpaint: null, projection: null, fourier: null },
     ]
-    // Both looks: VQGAN exercises its §5.7 forcing skip; LIMITED walks the noise/anneal
-    // variants VQGAN's guard would exclude.
-    for (const look of ['vqgan', 'limited'] as const) {
+    // Three looks: VQGAN exercises its §5.7 forcing skip; LIMITED walks the
+    // noise/anneal variants VQGAN's guard would exclude; UNLIMITED is where the
+    // FOURIER variants (and the all-CUSTOM panel's null fourier row) are legal (§16).
+    for (const look of ['vqgan', 'limited', 'unlimited'] as const) {
       for (const steps of STEPS_AXIS) {
         for (const seedMode of SEED_MODES) {
           for (const init of INITS) {
             for (const experiments of TWEAK_EXPERIMENTS) {
               if (init != null && init.holdMeaning && experiments.pyramid !== 'off') continue // §5.7, as fresh
               if (look === 'vqgan' && (experiments.noise !== 'white' || experiments.anneal !== 'off')) continue // §5.7, as fresh
+              // §16 forcings, as fresh (a null fourier row under a concrete
+              // non-UNLIMITED look is applyLook-forced OFF and throws here):
+              if (experiments.underpaint != null && experiments.underpaint !== 'off' && (look === 'vqgan' || (init != null && init.mask == null))) continue
+              if (experiments.projection === 'on' && look === 'vqgan') continue
+              if (experiments.fourier !== 'off' && look !== 'unlimited') continue
               const payload = composeSubmission({
                 prompt: 'new', aspect: '16:9', size: 'full', steps, look, seedMode,
-                tweak: { of: 's-1', baseValues: { ...base } }, init, experiments,
+                tweak: { of: 's-1', baseValues: { ...base }, baseUnderpaint: null }, init, experiments,
               })
               for (const key of Object.keys(payload.values)) {
                 if (!(key in base) && !VISIBLE_CONTROL_FIELDS.includes(key) && !PIN_FIELDS.includes(key)) {
@@ -1272,5 +1292,197 @@ describe('isolation invariant: submissions are reconstructible from what the use
       }
     }
     expect(violations).toEqual([])
+  })
+})
+
+// ─── §16 two-phase sessions: the UNDERPAINT / PROJECTION / FOURIER rows ────────
+
+const freshPipeline = (experiments: Experiments, over: Partial<Parameters<typeof composeSubmission>[0]> = {}) =>
+  composeSubmission({
+    prompt: 'p', aspect: '1:1', size: 'full', steps: 300, look: 'limited',
+    seedMode: { kind: 'random' }, tweak: null, init: null, experiments, ...over,
+  })
+
+describe('§16 UNDERPAINT — the envelope field', () => {
+  test('OFF emits NO underpaint payload field (the untouched panel adds nothing to the envelope)', () => {
+    const payload = freshPipeline(defaultExperiments())
+    expect(payload.underpaint).toBeNull()
+    expect('underpaint' in payload.values).toBe(false) // never a values key
+  })
+
+  test('a source emits {source} alone — the server composes the documented steps', () => {
+    for (const source of ['llamagen', 'fourier'] as const) {
+      const payload = freshPipeline({ ...defaultExperiments(), pyramid: 'off', underpaint: source })
+      expect(payload.underpaint).toEqual({ source })
+      expect('underpaint' in payload.values).toBe(false)
+    }
+  })
+
+  test('tweak: a concrete row overrides the base envelope; CUSTOM (null) replays it verbatim', () => {
+    const tweak = { of: 's-1', baseValues: { scenes: 'old' }, baseUnderpaint: { source: 'llamagen' as const, steps: 250 } }
+    const off = composeSubmission({
+      prompt: 'p', aspect: null, size: null, steps: 300, look: null, seedMode: { kind: 'random' },
+      tweak, init: null, experiments: { ...matchExperiments({}, null), underpaint: 'off' },
+    })
+    expect(off.underpaint).toBeNull() // OFF re-pick drops the base's two-phase behavior
+    const custom = composeSubmission({
+      prompt: 'p', aspect: null, size: null, steps: 300, look: null, seedMode: { kind: 'random' },
+      tweak, init: null, experiments: { ...matchExperiments({}, null), pyramid: 'off', underpaint: null },
+    })
+    expect(custom.underpaint).toEqual({ source: 'llamagen', steps: 250 }) // scripted budget survives untouched
+  })
+
+  test('matchUnderpaint: exact-match doctrine over the envelope', () => {
+    expect(matchUnderpaint(null)).toBe('off')
+    expect(matchUnderpaint({ source: 'llamagen', steps: 100 })).toBe('llamagen')
+    expect(matchUnderpaint({ source: 'fourier', steps: 150 })).toBe('fourier')
+    expect(matchUnderpaint({ source: 'llamagen', steps: 250 })).toBeNull() // scripted budget -> CUSTOM
+    expect(matchUnderpaint({ source: 'fourier' })).toBe('fourier') // stepless envelope = the default
+  })
+
+  test('guards throw: pyramid pair, VQGAN (v1 scope), maskless attachment', () => {
+    expect(() => freshPipeline({ ...defaultExperiments(), underpaint: 'llamagen' })) // pyramid still '3'
+      .toThrow('non-OFF pyramid')
+    expect(() =>
+      freshPipeline(
+        { ...defaultExperiments(), noise: 'white', pyramid: 'off', underpaint: 'fourier' },
+        { look: 'vqgan' },
+      ),
+    ).toThrow('VQGAN')
+    expect(() =>
+      freshPipeline(
+        { ...defaultExperiments(), pyramid: 'off', underpaint: 'fourier' },
+        { init: { path: '/up/a.png', natural: null, strength: 'medium', holdMeaning: false, mask: null } },
+      ),
+    ).toThrow('painted mask')
+    // a MASKED attachment composes fine — the composite is the server's job
+    const payload = freshPipeline(
+      { ...defaultExperiments(), pyramid: 'off', underpaint: 'fourier' },
+      { init: { path: '/up/a.png', natural: null, strength: 'medium', holdMeaning: false, mask: { path: '/up/m.png', inverted: false } } },
+    )
+    expect(payload.underpaint).toEqual({ source: 'fourier' })
+    expect(payload.values['direct_init_weight']).toBe('4_[/up/m.png]')
+  })
+
+  test('a tweak CUSTOM row replaying a base envelope is guarded too (maskless attachment throws)', () => {
+    expect(() =>
+      composeSubmission({
+        prompt: 'p', aspect: null, size: null, steps: 300, look: null, seedMode: { kind: 'random' },
+        tweak: { of: 's-1', baseValues: {}, baseUnderpaint: { source: 'fourier', steps: 150 } },
+        init: { path: '/up/a.png', natural: null, strength: 'medium', holdMeaning: false, mask: null },
+        experiments: { ...matchExperiments({}, { source: 'fourier', steps: 150 }), pyramid: 'off' },
+      }),
+    ).toThrow('painted mask')
+  })
+})
+
+describe('§16 PROJECTION — manifold_projection', () => {
+  test('ON adds exactly the flag; OFF adds nothing (knobs stay engine defaults)', () => {
+    const off = freshPipeline(defaultExperiments())
+    expect('manifold_projection' in off.values).toBe(false)
+    const on = freshPipeline({ ...defaultExperiments(), projection: 'on' })
+    expect(on.values['manifold_projection']).toBe(true)
+    expect('projection_every' in on.values).toBe(false)
+    expect('projection_strength' in on.values).toBe(false)
+    expect('projection_model' in on.values).toBe(false)
+  })
+
+  test('tweak: a concrete re-pick clears bench projection knobs; CUSTOM rides verbatim', () => {
+    const base = { manifold_projection: true, projection_every: 10, projection_model: 'ds16' }
+    const tweak = { of: 's-1', baseValues: base, baseUnderpaint: null }
+    const offRepick = composeSubmission({
+      prompt: 'p', aspect: null, size: null, steps: 300, look: null, seedMode: { kind: 'random' },
+      tweak, init: null, experiments: { ...matchExperiments(base, null), projection: 'off' },
+    })
+    expect('manifold_projection' in offRepick.values).toBe(false)
+    expect('projection_every' in offRepick.values).toBe(false) // knobs without the flag are a schema lie
+    const custom = composeSubmission({
+      prompt: 'p', aspect: null, size: null, steps: 300, look: null, seedMode: { kind: 'random' },
+      tweak, init: null, experiments: matchExperiments(base, null), // projection: null (non-default knobs)
+    })
+    expect(custom.values['projection_every']).toBe(10) // rides untouched
+  })
+
+  test('guards throw: VQGAN, AUTO-STOP, anneal, non-/8 dims', () => {
+    expect(() => freshPipeline({ ...defaultExperiments(), noise: 'white', projection: 'on' }, { look: 'vqgan' })).toThrow('VQGAN')
+    expect(() => freshPipeline({ ...defaultExperiments(), projection: 'on', autoStop: 'on' })).toThrow('AUTO-STOP')
+    expect(() => freshPipeline({ ...defaultExperiments(), projection: 'on', anneal: 'blur' })).toThrow('anneal')
+    expect(() => freshPipeline({ ...defaultExperiments(), projection: 'on' }, { aspect: '16:9', size: 'draft' })).toThrow('/8')
+  })
+
+  test('projectionDimsSafe: draft 16:9 is the one table offender; AUTO and unknown base dims are safe', () => {
+    expect(projectionDimsSafe('16:9', 'draft', null)).toBe(false) // 320x180
+    expect(projectionDimsSafe('16:9', 'full', null)).toBe(true) // 640x360
+    expect(projectionDimsSafe('1:1', 'draft', null)).toBe(true)
+    expect(projectionDimsSafe('3:4', 'draft', null)).toBe(true) // 224x288
+    expect(projectionDimsSafe('auto', 'draft', null)).toBe(true) // autoDims rounds to 8/16
+    expect(projectionDimsSafe(null, null, { width: 320, height: 180 })).toBe(false)
+    expect(projectionDimsSafe(null, null, { width: 512, height: 512 })).toBe(true)
+    expect(projectionDimsSafe(null, null, {})).toBe(true) // non-numeric base -> engine fails loud, not the client
+  })
+
+  test('matchExperiments: projection exact-match (knobs at defaults) else CUSTOM', () => {
+    expect(matchExperiments({ manifold_projection: true }, null).projection).toBe('on')
+    expect(matchExperiments({ manifold_projection: true, projection_every: 30, projection_strength: 0.5, projection_model: 'ds8' }, null).projection).toBe('on')
+    expect(matchExperiments({ manifold_projection: true, projection_every: 10 }, null).projection).toBeNull()
+    expect(matchExperiments({ manifold_projection: false }, null).projection).toBe('off')
+    expect(matchExperiments({}, null).projection).toBe('off')
+    expect(matchExperiments({ manifold_projection: 'yes' }, null).projection).toBeNull()
+  })
+})
+
+describe('§16 FOURIER — fourier_parameterization', () => {
+  test('ON (UNLIMITED look) adds exactly the flag; OFF adds nothing', () => {
+    const on = freshPipeline({ ...defaultExperiments(), noise: 'white', fourier: 'on' }, { look: 'unlimited' })
+    expect(on.values['fourier_parameterization']).toBe(true)
+    expect('fourier_decay' in on.values).toBe(false)
+    expect(on.values['image_model']).toBe('Unlimited Palette')
+    const off = freshPipeline(defaultExperiments(), { look: 'unlimited' })
+    expect('fourier_parameterization' in off.values).toBe(false)
+  })
+
+  test('guards throw: outside UNLIMITED, shaped noise, anneal', () => {
+    expect(() => freshPipeline({ ...defaultExperiments(), noise: 'white', fourier: 'on' })).toThrow('UNLIMITED') // look limited
+    expect(() => freshPipeline({ ...defaultExperiments(), noise: 'pink', fourier: 'on' }, { look: 'unlimited' })).toThrow('shaped-noise')
+    expect(() => freshPipeline({ ...defaultExperiments(), noise: 'white', anneal: 'blur', fourier: 'on' }, { look: 'unlimited' })).toThrow('anneal')
+    // a concrete non-UNLIMITED look rejects a null/CUSTOM fourier row (base keys would ride)
+    expect(() =>
+      composeSubmission({
+        prompt: 'p', aspect: null, size: null, steps: 300, look: 'limited', seedMode: { kind: 'random' },
+        tweak: { of: 's-1', baseValues: { fourier_parameterization: true, fourier_decay: 2 }, baseUnderpaint: null },
+        init: null,
+        experiments: { ...matchExperiments({ fourier_parameterization: true, fourier_decay: 2 }, null) }, // fourier: null
+      }),
+    ).toThrow('non-OFF fourier')
+  })
+
+  test('tweak: OFF re-pick clears a bench decay; CUSTOM rides it', () => {
+    const base = { fourier_parameterization: true, fourier_decay: 2 }
+    const tweak = { of: 's-1', baseValues: base, baseUnderpaint: null }
+    const offRepick = composeSubmission({
+      prompt: 'p', aspect: null, size: null, steps: 300, look: null, seedMode: { kind: 'random' },
+      tweak, init: null, experiments: { ...matchExperiments(base, null), fourier: 'off' },
+    })
+    expect('fourier_parameterization' in offRepick.values).toBe(false)
+    expect('fourier_decay' in offRepick.values).toBe(false)
+    const custom = composeSubmission({
+      prompt: 'p', aspect: null, size: null, steps: 300, look: null, seedMode: { kind: 'random' },
+      tweak, init: null, experiments: matchExperiments(base, null),
+    })
+    expect(custom.values['fourier_decay']).toBe(2)
+  })
+
+  test('matchExperiments: fourier exact-match (decay 1.0/absent) else CUSTOM', () => {
+    expect(matchExperiments({ fourier_parameterization: true }, null).fourier).toBe('on')
+    expect(matchExperiments({ fourier_parameterization: true, fourier_decay: 1.0 }, null).fourier).toBe('on')
+    expect(matchExperiments({ fourier_parameterization: true, fourier_decay: 2 }, null).fourier).toBeNull()
+    expect(matchExperiments({}, null).fourier).toBe('off')
+  })
+
+  test('the champion stack composes: fourier underpaint + projection finish (up-fl-proj)', () => {
+    const payload = freshPipeline({ ...defaultExperiments(), pyramid: 'off', underpaint: 'fourier', projection: 'on' })
+    expect(payload.underpaint).toEqual({ source: 'fourier' })
+    expect(payload.values['manifold_projection']).toBe(true)
+    expect(payload.values['coarse_to_fine'] ?? false).toBe(false) // flat finish
   })
 })

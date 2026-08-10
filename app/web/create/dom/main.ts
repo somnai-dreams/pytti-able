@@ -21,14 +21,19 @@ import {
 import { keyIntent } from '../core/keys'
 import { applyWheel, jumpToFrame, jumpToJob, stepFrame, stepJob } from '../core/lightbox'
 import {
+  applyAspect,
   applyAutoStop,
   applyEncodeEvent,
+  applyFourier,
   applyFrameEvent,
   applyHoldMeaning,
   applyLook,
   applyProgressEvent,
+  applyProjection,
   applyQueueEvent,
+  applySize,
   applyStateEvent,
+  applyUnderpaint,
   type CreateState,
   findQueueItem,
   findTile,
@@ -44,6 +49,7 @@ import {
   type Tile,
 } from '../core/model'
 import {
+  type ComposerAspect,
   composeSubmission,
   composerDims,
   DEFAULT_STEPS,
@@ -54,10 +60,13 @@ import {
   matchPresets,
   parseCustomSteps,
   parseStepsId,
+  projectionDimsSafe,
   rematerializeSteps,
+  type SizeId,
   type SubmissionPayload,
   submittableValues,
   type ToggleId,
+  type UnderpaintId,
 } from '../core/presets'
 import { topmostDismissable } from '../core/surfaces'
 import * as net from './net'
@@ -398,7 +407,7 @@ function beginSubmission(prompt: string, dims: { width: number; height: number }
     switch (result.kind) {
       case 'started':
         state.lastSeed = result.seed
-        state.lastRun = { values: payload.values, forkOf: payload.forkOf, seedLocked: payload.seedLocked }
+        state.lastRun = { values: payload.values, forkOf: payload.forkOf, seedLocked: payload.seedLocked, underpaint: payload.underpaint }
         // If SSE 'state: launching' raced ahead of this response the tile already
         // exists and pending must not linger next to it.
         state.pending =
@@ -414,7 +423,7 @@ function beginSubmission(prompt: string, dims: { width: number; height: number }
               }
         break
       case 'queued':
-        state.lastRun = { values: payload.values, forkOf: payload.forkOf, seedLocked: payload.seedLocked }
+        state.lastRun = { values: payload.values, forkOf: payload.forkOf, seedLocked: payload.seedLocked, underpaint: payload.underpaint }
         // The optimistic tile hands over to the queued tile: queued tiles derive from
         // state.queue, so append the 202's item unless the SSE echo already landed it.
         state.pending = null
@@ -460,6 +469,19 @@ function submit(): void {
     // yet (rematerialized load in flight, or an unreadable image) — same surface as
     // the uploading guard; composeSubmission would rightly throw past this point.
     toastNow('image size unknown — pick an aspect')
+    return
+  }
+  // A1 guard addition (§16): an EFFECTIVE underpaint (concrete row, or a tweak's
+  // CUSTOM row replaying the base envelope) with an attachment needs a painted
+  // mask — without one the two inits have no defined composition. Same surface as
+  // the guards above; composeSubmission throws (and the server 400s) past this.
+  const underpaintRow = composer.experiments.underpaint
+  const underpaintActive =
+    underpaintRow == null
+      ? composer.tweak != null && composer.tweak.baseUnderpaint != null
+      : underpaintRow !== 'off'
+  if (underpaintActive && composer.init != null && composer.init.mask == null) {
+    toastNow('underpaint + image needs a painted mask — MASK on the chip')
     return
   }
   const submitInput = {
@@ -510,7 +532,9 @@ async function rerunSession(id: string): Promise<void> {
     typeof width === 'number' && width > 0 && typeof height === 'number' && height > 0
       ? { width, height }
       : { width: 512, height: 512 },
-    { values, forkOf: id, seedLocked: false },
+    // §16: RE-RUN replays the base session's underpaint envelope verbatim — the
+    // two-phase pipeline is a setting; a fresh seed reruns BOTH phases fresh.
+    { values, forkOf: id, seedLocked: false, underpaint: tile.underpaint },
   )
 }
 
@@ -523,7 +547,7 @@ async function tweakSession(id: string): Promise<void> {
   const composer = state.composer
   const scenes = config['scenes']
   composer.prompt = typeof scenes === 'string' ? scenes : ''
-  composer.tweak = { of: id, baseValues: submittableValues(config, state.schemaFields) }
+  composer.tweak = { of: id, baseValues: submittableValues(config, state.schemaFields), baseUnderpaint: tile.underpaint }
   const match = matchPresets(config)
   composer.aspect = match.aspect
   composer.size = match.size
@@ -533,22 +557,57 @@ async function tweakSession(id: string): Promise<void> {
   composer.look = match.look
   // Experiments rematerialize exact-match (§5.3/§5.7): off-menu base values (fractal,
   // coarse_stages 5, cutout_sampler classic, anneal_cycles 5 …) come back null =
-  // CUSTOM chips.
-  composer.experiments = matchExperiments(config)
+  // CUSTOM chips. The UNDERPAINT row rematerializes from the base session's
+  // ENVELOPE (§16), not its values.
+  composer.experiments = matchExperiments(config, tile.underpaint)
   const seed = config['seed']
   composer.seedMode = typeof seed === 'number' ? { kind: 'locked', seed } : { kind: 'random' }
   setInit(deriveInitFromBase(composer.tweak.baseValues))
-  // Re-assert the §5.7 forcing rules after rematerialization (a base carrying a
-  // refused pair cannot have rendered, but the invariants are composer-level;
-  // composeSubmission throws on each pair rather than silently omitting):
-  //   HOLD on            => PYRAMID off
-  //   AUTO-STOP on       => ANNEAL off
-  //   look VQGAN         => NOISE white + ANNEAL off (applyLook's rule)
+  // Re-assert the §5.7/§16 forcing rules after rematerialization (a base carrying a
+  // refused pair usually cannot have rendered — but API-scripted and failed sessions
+  // are tweakable too, and the invariants are composer-level; composeSubmission
+  // throws on each pair rather than silently omitting):
+  //   HOLD on              => PYRAMID off
+  //   AUTO-STOP on         => ANNEAL off + PROJECTION off (§16)
+  //   PROJECTION on        => ANNEAL off (§16)
+  //   look VQGAN           => NOISE white + ANNEAL off + PROJECTION off + UNDERPAINT off
+  //   look non-UNLIMITED   => FOURIER off (§16; a null CUSTOM look forces a matched
+  //                           ON to OFF too — renderBar disables the chips and
+  //                           composeSubmission throws for null looks as well, so
+  //                           leaving ON would wedge GO with no way to change the row.
+  //                           A null-look CUSTOM fourier row stays null: it replays
+  //                           the base verbatim, which composeSubmission permits)
+  //   FOURIER on           => NOISE white + ANNEAL off (§16)
+  //   underpaint effective => PYRAMID off (§16 — flat finish)
+  //   PROJECTION on + non-/8 dims => PROJECTION off (§16)
   if (composer.init != null && composer.init.holdMeaning) composer.experiments.pyramid = 'off'
-  if (composer.experiments.autoStop === 'on') composer.experiments.anneal = 'off'
+  if (composer.experiments.autoStop === 'on') {
+    composer.experiments.anneal = 'off'
+    composer.experiments.projection = 'off'
+  }
+  if (composer.experiments.projection === 'on') composer.experiments.anneal = 'off'
   if (composer.look === 'vqgan') {
     composer.experiments.noise = 'white'
     composer.experiments.anneal = 'off'
+    composer.experiments.projection = 'off'
+    composer.experiments.underpaint = 'off'
+  }
+  if (composer.look !== 'unlimited' && (composer.look != null || composer.experiments.fourier === 'on')) {
+    composer.experiments.fourier = 'off'
+  }
+  if (composer.experiments.fourier === 'on') {
+    composer.experiments.noise = 'white'
+    composer.experiments.anneal = 'off'
+  }
+  const rematUnderpaint = composer.experiments.underpaint
+  if (rematUnderpaint == null ? tile.underpaint != null : rematUnderpaint !== 'off') {
+    composer.experiments.pyramid = 'off'
+  }
+  if (
+    composer.experiments.projection === 'on' &&
+    !projectionDimsSafe(composer.aspect, composer.size, composer.tweak.baseValues)
+  ) {
+    composer.experiments.projection = 'off'
   }
   // A4 dims capture (§15.8): a rematerialized attachment carries no pixel dims (the
   // snapshot has none) — load them async via the uploads route. AUTO stays disabled
@@ -972,26 +1031,34 @@ popoverEl.addEventListener('click', (e) => {
   const fullVision = chip.dataset['fullvision']
   const phase = chip.dataset['phase']
   const autoStop = chip.dataset['autostop']
+  const underpaint = chip.dataset['underpaint']
+  const projection = chip.dataset['projection']
+  const fourier = chip.dataset['fourier']
   const init = state.composer.init
   const experiments = state.composer.experiments
-  if (aspect != null && aspect !== 'custom') state.composer.aspect = aspect as CreateState['composer']['aspect']
-  else if (size != null && size !== 'custom') state.composer.size = size as CreateState['composer']['size']
+  // ASPECT/SIZE route through core write paths (§16): a dims change that breaks the
+  // /8 stride forces PROJECTION off in the same transition.
+  if (aspect != null && aspect !== 'custom') applyAspect(state, aspect as ComposerAspect)
+  else if (size != null && size !== 'custom') applySize(state, size as SizeId)
   else if (steps != null) state.composer.steps = parseStepsId(steps) // chips = shortcuts; no custom chip (the input is the custom path)
-  else if (look != null && look !== 'custom') applyLook(state, look as LookId) // §5.7: VQGAN forces NOISE to WHITE + ANNEAL to OFF
+  else if (look != null && look !== 'custom') applyLook(state, look as LookId) // §5.7/§16: VQGAN forces NOISE WHITE + ANNEAL/PROJECTION/UNDERPAINT OFF; non-UNLIMITED forces FOURIER OFF
   else if (seed === 'random') state.composer.seedMode = { kind: 'random' }
   else if (seed === 'locked') state.composer.seedMode = { kind: 'locked', seed: pinnedSeed() }
   else if (initStrength != null && initStrength !== 'custom' && init != null) init.strength = initStrength as InitStrengthId
   else if (chip.dataset['hold'] != null && init != null) applyHoldMeaning(state, !init.holdMeaning) // §5.7: ON forces PYRAMID to OFF
-  // The EXPERIMENTS rows (§5.7). The pyramid chips are disabled while HOLD is on,
-  // and the noise/anneal chips while LOOK is VQGAN (anneal also while AUTO-STOP is
-  // on) — renderBar — so no click reaches here in those states.
+  // The EXPERIMENTS rows (§5.7/§16). Guarded rows' chips are disabled (renderBar)
+  // while their engine-refused pairing would otherwise be reachable — no click
+  // reaches here in those states.
   else if (noise != null && noise !== 'custom') experiments.noise = noise as Experiments['noise']
   else if (pyramid != null && pyramid !== 'custom') experiments.pyramid = pyramid as Experiments['pyramid']
   else if (anneal != null && anneal !== 'custom') experiments.anneal = anneal as Experiments['anneal']
   else if (coherence != null && coherence !== 'custom') experiments.coherence = coherence as Experiments['coherence']
   else if (fullVision != null && fullVision !== 'custom') experiments.fullVision = fullVision as Experiments['fullVision']
   else if (phase != null && phase !== 'custom') experiments.phase = phase as Experiments['phase']
-  else if (autoStop != null && autoStop !== 'custom') applyAutoStop(state, autoStop as ToggleId) // §5.7: ON forces ANNEAL to OFF
+  else if (autoStop != null && autoStop !== 'custom') applyAutoStop(state, autoStop as ToggleId) // §5.7/§16: ON forces ANNEAL + PROJECTION to OFF
+  else if (underpaint != null && underpaint !== 'custom') applyUnderpaint(state, underpaint as UnderpaintId) // §16: non-OFF forces PYRAMID to OFF
+  else if (projection != null && projection !== 'custom') applyProjection(state, projection as ToggleId) // §16: ON forces ANNEAL to OFF
+  else if (fourier != null && fourier !== 'custom') applyFourier(state, fourier as ToggleId) // §16: ON forces NOISE WHITE + ANNEAL OFF
   loop.scheduleRender()
 })
 

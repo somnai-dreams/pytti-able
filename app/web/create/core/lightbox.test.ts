@@ -18,7 +18,7 @@ function tile(over: Partial<Tile> = {}): Tile {
   return {
     id: 's-1', slug: 's-1', scenes: 'p', state: 'done', seed: 1, startedAt: 0, endedAt: 1,
     frames: 10, stepsDone: 1, stepsTotal: 1, sizeX: 512, sizeY: 512, legacyDims: false,
-    forkedFrom: null, imported: false, artifacts: [], failExcerpt: null, live: null, detail: null,
+    forkedFrom: null, imported: false, artifacts: [], failExcerpt: null, live: null, underpaint: null, detail: null,
     ...over,
   }
 }

@@ -226,8 +226,13 @@ function updateNode(node: TileNodes, entry: GalleryEntry): void {
           node.bar.classList.add('indeterminate')
           node.barFill.style.width = '30%'
         } else {
+          // §16: phase 1 of a two-phase session shows 'underpainting…' over the same
+          // progress bar — stepsTotal spans BOTH phases (server-honest), so the bar
+          // walks continuously from underpaint into the finish.
+          show(node.label, live.substate === 'underpainting')
+          if (live.substate === 'underpainting') node.label.textContent = 'underpainting…'
           node.bar.classList.remove('indeterminate')
-          node.bar.classList.toggle('pulse', live.substate === 'rendering')
+          node.bar.classList.toggle('pulse', live.substate === 'rendering' || live.substate === 'underpainting')
           const pct = live.stepsTotal > 0 ? (100 * live.step) / live.stepsTotal : 0
           node.barFill.style.width = `${pct}%`
         }

@@ -7,7 +7,7 @@ function tile(id: string, sizeX = 512, sizeY = 512): Tile {
   return {
     id, slug: id, scenes: 'p', state: 'done', seed: 1, startedAt: 0, endedAt: 1,
     frames: 5, stepsDone: 1, stepsTotal: 1, sizeX, sizeY, legacyDims: false,
-    forkedFrom: null, imported: false, artifacts: [], failExcerpt: null, live: null, detail: null,
+    forkedFrom: null, imported: false, artifacts: [], failExcerpt: null, live: null, underpaint: null, detail: null,
   }
 }
 

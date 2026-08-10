@@ -11,7 +11,8 @@
 // functions:
 //   parseSessionSummary(raw) -> Tile                 GET /api/sessions items (S1 fields:
 //     scenes/width/height; null dims parse to 512x512 + legacyDims so masonry never sees
-//     a hole — the ONE documented-lenient rule, legacy snapshots are a shaky boundary)
+//     a hole — the ONE documented-lenient rule, legacy snapshots are a shaky boundary;
+//     + the §16 underpaint envelope {source, steps} | null — TWEAK/RE-RUN provenance)
 //   parseSessions(raw) -> Tile[]
 //   parseSessionDetail(raw) -> { tile, config }      GET /api/sessions/{id}
 //   parseQueue(raw) -> QueueItem[]                   GET /api/queue {items} (ordered FIFO;
@@ -38,6 +39,7 @@ import type {
   TerminalState,
   Tile,
 } from './model'
+import type { UnderpaintEnvelope } from './presets'
 
 function ctxErr(ctx: string, want: string, v: unknown): Error {
   return new Error(`${ctx}: expected ${want}, got ${JSON.stringify(v)}`)
@@ -92,7 +94,7 @@ function asFailExcerpt(v: unknown, ctx: string): string | null {
 
 const SESSION_STATES: readonly SessionState[] = ['rendering', 'stopped', 'done', 'failed', 'imported']
 const TERMINAL_STATES: readonly TerminalState[] = ['done', 'stopped', 'failed']
-const SUBSTATES: readonly Substate[] = ['launching', 'loading_models', 'rendering', 'stopping']
+const SUBSTATES: readonly Substate[] = ['launching', 'loading_models', 'rendering', 'underpainting', 'stopping']
 const PHASES: readonly Phase[] = ['pre_animation', 'interpolation', 'scene']
 
 function asEnum<T extends string>(v: unknown, options: readonly T[], ctx: string): T {
@@ -130,6 +132,7 @@ export function parseSessionSummary(raw: unknown): Tile {
   const rawWidth = r['width']
   const rawHeight = r['height']
   const hasDims = typeof rawWidth === 'number' && rawWidth > 0 && typeof rawHeight === 'number' && rawHeight > 0
+  const underpaint = parseUnderpaintEnvelope(r['underpaint'], `summary(${id}).underpaint`)
 
   return {
     id,
@@ -150,8 +153,20 @@ export function parseSessionSummary(raw: unknown): Tile {
     artifacts,
     failExcerpt: asFailExcerpt(r['failExcerpt'], `summary(${id}).failExcerpt`),
     live: null,
+    underpaint,
     detail: null,
   }
+}
+
+// §16: the two-phase envelope on a summary — {source, steps, done} server-side;
+// the client keeps {source, steps} (done is server lifecycle, not replay material).
+// null/absent = a normal session.
+function parseUnderpaintEnvelope(v: unknown, ctx: string): UnderpaintEnvelope | null {
+  if (v == null) return null
+  const r = asRecord(v, ctx)
+  const source = asEnum(r['source'], ['llamagen', 'fourier'] as const, `${ctx}.source`)
+  const steps = asNumber(r['steps'], `${ctx}.steps`)
+  return { source, steps }
 }
 
 export function parseSessions(raw: unknown): Tile[] {
@@ -296,6 +311,7 @@ export function parseSseEvent(type: string, raw: unknown): SseEvent {
         scene: asNumber(r['scene'], 'sse progress.scene'),
         sceneCount: asNumber(r['sceneCount'], 'sse progress.sceneCount'),
         phase: asEnum(r['phase'], PHASES, 'sse progress.phase'),
+        renderPhase: asEnum(r['renderPhase'], ['underpaint', 'main'] as const, 'sse progress.renderPhase'),
         sPerStep: asNumber(r['sPerStep'], 'sse progress.sPerStep'),
         etaSec: asNumber(r['etaSec'], 'sse progress.etaSec'),
       }

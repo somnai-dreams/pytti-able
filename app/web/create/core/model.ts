@@ -34,18 +34,29 @@
 //                                               c2f + semantic init); OFF restores
 //                                               nothing — the row re-enables where it
 //                                               stands. Throws without an attachment
-//   applyLook(state, look)                      THE composer.look write path (§5.7):
-//                                               VQGAN forces experiments.noise to
-//                                               'white' and experiments.anneal to 'off'
-//                                               in the same transition (a codebook init
-//                                               has no spectrum; annealing rejects
-//                                               latent models); switching away restores
-//                                               nothing
+//   applyLook(state, look)                      THE composer.look write path (§5.7/§16):
+//                                               VQGAN forces NOISE white + ANNEAL off
+//                                               (codebook init; latent refusals) +
+//                                               PROJECTION off + UNDERPAINT off (§16);
+//                                               ANY look away from UNLIMITED forces
+//                                               FOURIER off (its engine scope);
+//                                               switching away restores nothing
 //   applyAutoStop(state, autoStop)              THE experiments.autoStop write path
 //                                               (§5.7): ON forces experiments.anneal to
 //                                               'off' in the same transition (the
-//                                               engine refuses annealing + auto_stop);
-//                                               OFF restores nothing
+//                                               engine refuses annealing + auto_stop)
+//                                               AND experiments.projection to 'off'
+//                                               (§16 — projection edits break plateau
+//                                               semantics); OFF restores nothing
+//   applyProjection(state, toggle)              §16: ON forces ANNEAL off (one
+//                                               between-steps intervention at a time)
+//   applyFourier(state, toggle)                 §16: ON forces NOISE white + ANNEAL off
+//                                               (the fourier scope); UNLIMITED look only
+//   applyUnderpaint(state, id)                  §16: non-OFF forces PYRAMID off (the
+//                                               finish must not run the pyramid)
+//   applyAspect / applySize(state, id)          THE aspect/size write paths (§16): a
+//                                               dims change that breaks the /8 stride
+//                                               forces PROJECTION off (projectionDimsSafe)
 //   dropUnreadableMask(state)                   §15.7: unreadable existing mask -> init.mask
 //                                               = null in the same transition as the
 //                                               'starting blank' toast, so the dead path
@@ -73,11 +84,23 @@ import type { SwipeDirection } from '@kit/reel-strip/core'
 import type { Env } from '@kit/env/core'
 import { feel } from './feel'
 import type { InitAttachment } from './init'
-import type { ComposerAspect, Experiments, LookId, SeedMode, SizeId, ToggleId } from './presets'
+import {
+  type ComposerAspect,
+  type Experiments,
+  type LookId,
+  projectionDimsSafe,
+  type SeedMode,
+  type SizeId,
+  type ToggleId,
+  type UnderpaintEnvelope,
+  type UnderpaintId,
+} from './presets'
 
 export type SessionState = 'rendering' | 'stopped' | 'done' | 'failed' | 'imported'
 export type TerminalState = 'done' | 'stopped' | 'failed'
-export type Substate = 'launching' | 'loading_models' | 'rendering' | 'stopping'
+// 'underpainting' (§16): phase 1 of a two-phase session is rendering — the tile's
+// 'underpainting…' label; summaries collapse it to the 'rendering' SessionState.
+export type Substate = 'launching' | 'loading_models' | 'rendering' | 'underpainting' | 'stopping'
 export type Phase = 'pre_animation' | 'interpolation' | 'scene'
 
 export type Artifact = { name: string; bytes: number; fps: number | null; format: 'mp4' | 'prores' }
@@ -114,6 +137,9 @@ export type Tile = {
   // Non-null only while state === 'rendering'; may be null WHILE rendering too (REST
   // only says "rendering" — telemetry arrives with the next SSE state/progress event).
   live: LiveTelemetry | null
+  // §16: the two-phase envelope ({source, steps}) from the summary — null for normal
+  // sessions. TWEAK rematerializes the UNDERPAINT row from it; RE-RUN replays it.
+  underpaint: UnderpaintEnvelope | null
   // Full immutable config snapshot, fetched lazily on first lightbox open; cached forever.
   detail: Record<string, unknown> | null
 }
@@ -150,7 +176,9 @@ export type Composer = {
   steps: number
   look: LookId | null
   seedMode: SeedMode
-  tweak: { of: string; baseValues: Record<string, unknown> } | null
+  // baseUnderpaint (§16): the base session's envelope — the UNDERPAINT row's
+  // CUSTOM (null) replay source, captured from the tile summary at tweak time.
+  tweak: { of: string; baseValues: Record<string, unknown>; baseUnderpaint: UnderpaintEnvelope | null } | null
   init: InitAttachment | null // the image attachment (§15.3); strength null only in tweak
   // The EXPERIMENTS panel (§5.7): opt-in engine modes, one row per schema-field
   // mapping. Row nulls = inherit tweak base (CUSTOM), reachable only while
@@ -206,6 +234,7 @@ export type SseEvent =
       scene: number
       sceneCount: number
       phase: Phase
+      renderPhase: 'underpaint' | 'main' // §16: which render of the session is ticking
       sPerStep: number
       etaSec: number
     }
@@ -229,7 +258,12 @@ export type CreateState = {
   pending: Pending | null
   queue: QueueItem[] // server-truth FIFO mirror, SSE-driven; queued tiles derive from it
   composer: Composer
-  lastRun: { values: Record<string, unknown>; forkOf: string | null; seedLocked: boolean } | null
+  lastRun: {
+    values: Record<string, unknown>
+    forkOf: string | null
+    seedLocked: boolean
+    underpaint: UnderpaintEnvelope | null // §16 — Cmd+Enter replays the envelope too
+  } | null
   lastSeed: number | null // most recent seed returned by POST; seeds the locked toggle
   lightbox: Lightbox | null
   maskEditor: MaskEditor | null // §15.7; non-null implies composer.init != null
@@ -318,7 +352,16 @@ export function applyLook(state: CreateState, look: LookId): void {
   if (look === 'vqgan') {
     state.composer.experiments.noise = 'white'
     state.composer.experiments.anneal = 'off'
+    // §16: manifold projection refuses latent canvases, and underpaint under a
+    // VQGAN finish is out of v1 scope — both rows force OFF, loudly.
+    state.composer.experiments.projection = 'off'
+    state.composer.experiments.underpaint = 'off'
   }
+  // §16 FOURIER × LOOK: fourier_parameterization is scoped to the Unlimited
+  // Palette — ANY look away from UNLIMITED forces the row OFF (a null/CUSTOM row
+  // would let base fourier keys ride under a model the engine refuses; a concrete
+  // OFF re-pick clears them — FOURIER_FIELDS ownership).
+  if (look !== 'unlimited') state.composer.experiments.fourier = 'off'
 }
 
 // THE experiments.autoStop write path (§5.7 — dom's AUTO-STOP chips; tweak
@@ -330,7 +373,75 @@ export function applyLook(state: CreateState, look: LookId): void {
 // treatment). OFF restores nothing — the row re-enables where it stands.
 export function applyAutoStop(state: CreateState, autoStop: ToggleId): void {
   state.composer.experiments.autoStop = autoStop
-  if (autoStop === 'on') state.composer.experiments.anneal = 'off'
+  if (autoStop === 'on') {
+    state.composer.experiments.anneal = 'off'
+    // §16: the engine refuses manifold_projection + auto_stop (a scheduled image
+    // edit breaks plateau semantics) — AUTO-STOP dominates, PROJECTION yields.
+    state.composer.experiments.projection = 'off'
+  }
+}
+
+// THE experiments.projection write path (§16 — dom's PROJECTION chips; tweak
+// rematerialization re-asserts). The engine refuses manifold_projection +
+// structure_annealing (one between-steps intervention at a time), so turning
+// PROJECTION ON forces the ANNEAL row to OFF in the same transition (null/CUSTOM
+// included — base anneal keys must not ride). The reverse direction is prevented:
+// the ANNEAL chips are disabled while PROJECTION is ON (the AUTO-STOP treatment).
+// The VQGAN / auto-stop / dims preconditions are the chip's own disablement —
+// renderBar keeps ON unreachable there, composeSubmission throws as the backstop.
+export function applyProjection(state: CreateState, projection: ToggleId): void {
+  state.composer.experiments.projection = projection
+  if (projection === 'on') state.composer.experiments.anneal = 'off'
+}
+
+// THE experiments.fourier write path (§16 — dom's FOURIER chips; enabled only while
+// LOOK is UNLIMITED). The engine pins fourier_parameterization to a white init
+// spectrum (the Fourier init IS 1/f-shaped) and refuses structure_annealing
+// (pixel-domain planes don't compose with a spectrum parameterization), so ON
+// forces NOISE to WHITE and ANNEAL to OFF in the same transition; both rows'
+// chips are disabled while FOURIER is ON. OFF restores nothing.
+export function applyFourier(state: CreateState, fourier: ToggleId): void {
+  state.composer.experiments.fourier = fourier
+  if (fourier === 'on') {
+    state.composer.experiments.noise = 'white'
+    state.composer.experiments.anneal = 'off'
+  }
+}
+
+// THE experiments.underpaint write path (§16 — dom's UNDERPAINT chips; tweak
+// rematerialization re-asserts). A non-OFF underpaint forces the PYRAMID row to
+// OFF in the same transition: the finish must run FLAT — coarse_to_fine's stage-1
+// downsample would destroy the underpaint (the server strips c2f at the handoff
+// as the backstop; the row must not lie, §5.6). The PYRAMID chips are disabled
+// while UNDERPAINT is non-OFF. VQGAN disablement is applyLook's (v1 scope).
+export function applyUnderpaint(state: CreateState, underpaint: UnderpaintId): void {
+  state.composer.experiments.underpaint = underpaint
+  if (underpaint !== 'off') state.composer.experiments.pyramid = 'off'
+}
+
+// THE aspect/size write paths (§16 — dom's ASPECT/SIZE chips route through these;
+// replaceInit's AUTO-revert writes '1:1' directly, which is always /8-safe).
+// Dims dominate PROJECTION: a change that breaks the /8 stride (the one table
+// offender is draft 16:9's 320x180; tweak bases can carry anything) forces the
+// PROJECTION row to OFF in the same transition — the §5.7 forcing doctrine, never
+// a submit-time surprise.
+export function applyAspect(state: CreateState, aspect: ComposerAspect): void {
+  state.composer.aspect = aspect
+  enforceProjectionDims(state)
+}
+
+export function applySize(state: CreateState, size: SizeId): void {
+  state.composer.size = size
+  enforceProjectionDims(state)
+}
+
+function enforceProjectionDims(state: CreateState): void {
+  const composer = state.composer
+  if (composer.experiments.projection !== 'on') return
+  const base = composer.tweak == null ? null : composer.tweak.baseValues
+  if (!projectionDimsSafe(composer.aspect, composer.size, base)) {
+    composer.experiments.projection = 'off'
+  }
 }
 
 // §15.7's fail-soft ('existing mask not readable — starting blank') completed at the state
@@ -422,11 +533,14 @@ export function applyProgressEvent(state: CreateState, ev: Extract<SseEvent, { k
   const tile = findTile(state.tiles, ev.sessionId)
   if (tile == null) return // resync owns discovery; state events own insertion
   tile.state = 'rendering'
+  // §16: the tick's renderPhase implies the render substate — 'underpainting…'
+  // vs the live bar — which matters on reconnect (REST only said 'rendering').
+  const implied: Substate = ev.renderPhase === 'underpaint' ? 'underpainting' : 'rendering'
   const live = tile.live
   if (live == null) {
-    // Reconnect case — REST only said 'rendering'; a progress tick implies the substate.
+    // Reconnect case — a progress tick implies the substate.
     tile.live = {
-      substate: 'rendering',
+      substate: implied,
       step: ev.step,
       stepsTotal: ev.stepsTotal,
       scene: ev.scene,
@@ -436,8 +550,12 @@ export function applyProgressEvent(state: CreateState, ev: Extract<SseEvent, { k
       etaSec: ev.etaSec,
     }
   } else {
-    // Telemetry fields ONLY (spec §6.2): substate belongs to state events — a progress
-    // tick racing a stop request must not clobber 'stopping' (the STOPPING chip stays).
+    // Telemetry fields ONLY (spec §6.2): launching/loading/stopping substates belong
+    // to state events — a progress tick racing a stop request must not clobber
+    // 'stopping' (the STOPPING chip stays). The one exception is the §16 phase
+    // marker: a tick may flip BETWEEN the two render substates (a stale
+    // 'underpainting' after a reconnect that landed mid-phase-2, and vice versa).
+    if (live.substate === 'rendering' || live.substate === 'underpainting') live.substate = implied
     live.step = ev.step
     live.stepsTotal = ev.stepsTotal
     live.scene = ev.scene

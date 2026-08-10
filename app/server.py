@@ -67,6 +67,67 @@ MANAGED_FIELDS = ("file_namespace", "allow_overwrite", "restore", "config_versio
 # the render queue is a bounded FIFO; over-cap submissions are refused (400), never evicted
 QUEUE_CAP = 20
 
+# ── two-phase sessions (docs/studio-create-spec.md §16) ──────────────────────
+# An optional "underpaint" envelope field on the self-contained POST /api/sessions
+# turns ONE session into TWO renders under one id: phase 1 renders a derived
+# composition pass (the underpaint) into <sid>/underpaint/, phase 2 renders the
+# user's actual config seeded from the underpaint's final frame. The eval batteries
+# behind it: up-fl-proj (fourier-150 -> Limited finish 300 + projection) is the
+# all-time SO400M champion; up-tight-ds8 the both-judges LlamaGen variant.
+# "all of these settings seen in isolation arent a huge help because they
+#  compound in different ways together" — Max.
+UNDERPAINT_SOURCES = ("llamagen", "fourier")
+UNDERPAINT_DEFAULT_STEPS = {"llamagen": 100, "fourier": 150}
+# Min 2: the engine's frame save (ImageGuide.update) skips global step 0, so a
+# 1-step single-scene underpaint can never put a frame on disk — refuse at
+# submit, not at the handoff after burning the phase-1 budget.
+UNDERPAINT_MIN_STEPS = 2
+UNDERPAINT_MAX_STEPS = 20000
+# The finish holds the underpaint at direct weight 2 — the eval legs' hold
+# (init_from=<underpaint>, direct_init_weight=2, flat finish).
+UNDERPAINT_FINISH_WEIGHT = "2"
+
+# Fields the phase-1 derivation RESETS to their engine defaults, regardless of the
+# session's values. Three groups, one table:
+#  - the init surface (phase 1 renders from noise — the user's init belongs to phase 2),
+#  - every field a latent model refuses (shaped init spectrum, coarse_to_fine,
+#    structure_annealing, manifold_projection — LlamaGen phase 1 must never trip them;
+#    fourier phase 1 resets the same set: fourier refuses shaped spectrum + annealing,
+#    and the pyramid/projection belong to the finish),
+#  - finish-only behaviors with no meaning on a fixed-budget composition pass
+#    (auto_stop, phase_scheduling, breath_mode, interpolation ramp, animation).
+UNDERPAINT_NEUTRAL = {
+    "init_image": "",
+    "direct_init_weight": "",
+    "semantic_init_weight": "",
+    "init_spectrum": "white",
+    "init_spectrum_falloff": 1.0,
+    "init_spectrum_chroma": "full",
+    "coarse_to_fine": False,
+    "coarse_stages": 2,
+    "structure_annealing": False,
+    "anneal_cycles": 3,
+    "anneal_strength": 0.5,
+    "anneal_band": 0.15,
+    "anneal_source": "noise",
+    "manifold_projection": False,
+    "projection_every": 30,
+    "projection_strength": 0.5,
+    "projection_model": "ds8",
+    "auto_stop": False,
+    "auto_stop_window": 50,
+    "auto_stop_threshold": 0.002,
+    "phase_scheduling": False,
+    "breath_mode": False,
+    "animation_mode": "off",
+    "interpolation_steps": 0,
+    # canvas scale belongs to the finish look: LlamaGen MULTIPLIES dims by
+    # pixel_size (llamagen.py builds the token grid from width*scale — a
+    # pixel_size-4 session would underpaint a 16x-pixel canvas), and the
+    # underpaint is resized to the canvas at the handoff anyway
+    "pixel_size": 1,
+}
+
 # ── ported from the retired gradio ui.py ────────────────────────────────────
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 LOG_NOISE = re.compile(r"\| DEBUG\s+\||UserWarning:|warnings\.warn\(")
@@ -279,6 +340,151 @@ def coerce_values(values: dict) -> dict:
         except (TypeError, ValueError) as e:
             raise ValueError(f"{name}: {value!r} is not a valid {base} ({e})") from e
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Two-phase sessions — envelope parsing, phase-1 derivation, mask compositing
+# (docs/studio-create-spec.md §16)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def parse_underpaint(raw) -> dict | None:
+    """The 'underpaint' envelope field: {source: 'llamagen'|'fourier', steps?: int}.
+    Raises ValueError (-> 400) on any junk; returns the normalized spec with steps
+    defaulted per source (llamagen 100 / fourier 150 — the eval legs' budgets)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("underpaint must be an object {source, steps?}")
+    unknown = sorted(set(raw) - {"source", "steps"})
+    if unknown:
+        raise ValueError(f"unknown underpaint fields: {', '.join(unknown)}")
+    source = raw.get("source")
+    if source not in UNDERPAINT_SOURCES:
+        raise ValueError(f"underpaint.source must be one of {list(UNDERPAINT_SOURCES)}")
+    steps = raw.get("steps", UNDERPAINT_DEFAULT_STEPS[source])
+    if isinstance(steps, bool) or not isinstance(steps, int) or not (UNDERPAINT_MIN_STEPS <= steps <= UNDERPAINT_MAX_STEPS):
+        raise ValueError(f"underpaint.steps must be an integer {UNDERPAINT_MIN_STEPS}..{UNDERPAINT_MAX_STEPS}")
+    return {"source": source, "steps": steps}
+
+
+# Create's mask-token subset of the engine weight grammar: "<weight>_[<abs path>]",
+# '-' inside the bracket inverting (§15.1). The composite needs a REGION, so this is
+# deliberately strict — a bench-authored cutoff/video-mask weight does not parse.
+CREATE_MASK_RE = re.compile(
+    r"^\s*[^_\[\]]+_\[\s*(-?)\s*([^\]]+?\.(?:png|jpe?g|bmp|webp))\s*\]\s*$", re.IGNORECASE
+)
+
+
+def parse_create_mask(weight: str) -> tuple[str, bool] | None:
+    """(mask_path, inverted) from a Create-subset weight expression, else None."""
+    m = CREATE_MASK_RE.match(weight)
+    if m is None:
+        return None
+    return m.group(2), bool(m.group(1))
+
+
+def validate_underpaint_submission(values: dict, underpaint: dict | None):
+    """Submit-time cross-check (-> 400): an underpaint session with an attached init
+    image needs a painted mask — without one the two inits (user image vs underpaint)
+    have no defined composition. The mask file must exist NOW, like preflight's
+    init_image check, so the failure lands at submit, not mid-handoff."""
+    if underpaint is None:
+        return
+    init = str(values.get("init_image", "") or "").strip()
+    if not init:
+        return
+    mask = parse_create_mask(str(values.get("direct_init_weight", "") or ""))
+    if mask is None:
+        raise ValueError(
+            "underpaint with an attached image needs a painted mask "
+            "(direct_init_weight 'w_[mask.png]') — paint one or remove the attachment"
+        )
+    if not Path(mask[0]).expanduser().exists():
+        raise ValueError(f"underpaint mask not found: {mask[0]}")
+
+
+def derive_underpaint_values(values: dict, underpaint: dict) -> dict:
+    """The phase-1 config: the SESSION's values (same scenes/seed/dims/perceptors),
+    the UNDERPAINT_NEUTRAL resets, then the source overrides.
+
+    llamagen: image_model LlamaGen + llamagen_model ds8 (the title-fight structure
+    king) + perceptor_backend torch (latent models are torch-only) + no fourier.
+    fourier: Unlimited Palette + fourier_parameterization true (white spectrum comes
+    from the neutral resets — the Fourier init IS 1/f-shaped); backend rides the
+    session's when fourier supports it (torch | mlx_full), else mlx_full."""
+    phase1 = dict(values)
+    phase1.update(UNDERPAINT_NEUTRAL)
+    phase1["steps_per_scene"] = underpaint["steps"]
+    # Pin the phase-1 save cadence to the budget: the engine only writes a frame
+    # when (i+1) % save_every == 0 and has NO end-of-run save (_save_final_frame
+    # is auto_stop-only, and auto_stop is reset off above). A session cadence
+    # larger than the budget would save NOTHING (the handoff fails after burning
+    # the whole phase-1 render); a non-divisor cadence would hand phase 2 a
+    # canvas up to save_every-1 steps stale. One frame per scene, at its end.
+    phase1["steps_per_frame"] = underpaint["steps"]
+    phase1["save_every"] = underpaint["steps"]
+    if underpaint["source"] == "llamagen":
+        phase1["image_model"] = "LlamaGen"
+        phase1["llamagen_model"] = "ds8"
+        phase1["perceptor_backend"] = "torch"
+        phase1["fourier_parameterization"] = False
+        phase1["fourier_decay"] = 1.0
+    else:
+        phase1["image_model"] = "Unlimited Palette"
+        phase1["fourier_parameterization"] = True
+        if phase1.get("perceptor_backend") not in ("torch", "mlx_full"):
+            phase1["perceptor_backend"] = "mlx_full"
+    return phase1
+
+
+def underpaint_run_dir(session_id: str) -> Path:
+    return OUTPUTS_DIR / session_id / "underpaint"
+
+
+def underpaint_frame_files(session_id: str) -> list[Path]:
+    """Phase-1 frames live in <sid>/underpaint/images_out/<sid>/ — a sibling of the
+    normal frames location, so gallery/lightbox/encode paths never see them.
+
+    Only the canonical '<sid>_<index>.png' series counts, sorted by index: the
+    handoff seeds phase 2 from frames[-1], so the server owns this invariant
+    rather than inheriting it from the engine's overwrite behavior — a future
+    '<sid>(1)_0001.png' collision series (or any stray png) must never sort
+    ahead of the real final frame."""
+    d = underpaint_run_dir(session_id) / "images_out" / session_id
+    if not d.exists():
+        return []
+    frame_re = re.compile(rf"^{re.escape(session_id)}_(\d+)\.png$")
+    indexed = []
+    for p in d.iterdir():
+        m = frame_re.match(p.name)
+        if m:
+            indexed.append((int(m.group(1)), p))
+    return [p for _, p in sorted(indexed)]
+
+
+def composite_underpaint(
+    underpaint_png: Path, user_init: str, mask_path: str, inverted: bool,
+    width: int, height: int, out_path: Path,
+) -> Path:
+    """§16 mask compositing: the user's image over the underpaint's final frame where
+    the mask is painted (painted/white = the user's content holds — the engine's own
+    mask semantics, §15.1; an inverted mask flips which region that is). Both images
+    and the mask are fitted to the canvas exactly like the engine fits an init image
+    (resize to width x height, LANCZOS — rgb_image.py). The composite becomes phase
+    2's init_image; the user's weight/mask grammar then applies to it per §15."""
+    from PIL import Image, ImageOps
+
+    size = (int(width), int(height))
+    under = Image.open(underpaint_png).convert("RGB").resize(size, Image.LANCZOS)
+    user = Image.open(user_init).convert("RGB").resize(size, Image.LANCZOS)
+    mask = Image.open(mask_path).convert("L").resize(size, Image.LANCZOS)
+    if inverted:
+        mask = ImageOps.invert(mask)
+    out = Image.composite(user, under, mask)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out.save(out_path, "PNG")
+    return out_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -558,9 +764,9 @@ class SessionStore:
                 "deltaSummary", "artifacts", "imported", "exitCode", "failExcerpt",
             )
         }
-        # SessionSummary.state is the spec enum; launch/load/stop substates
-        # travel only on SSE state events
-        if out["state"] in ("launching", "loading_models", "stopping"):
+        # SessionSummary.state is the spec enum; launch/load/stop/underpaint
+        # substates travel only on SSE state events
+        if out["state"] in ("launching", "loading_models", "stopping", "underpainting"):
             out["state"] = "rendering"
         # Create-mode gallery needs prompt text + frame aspect before any thumb
         # loads (masonry heights come from data, not image measurement). All
@@ -569,6 +775,10 @@ class SessionStore:
         out["scenes"] = cfg.get("scenes")
         out["width"] = cfg.get("width")
         out["height"] = cfg.get("height")
+        # §16: the two-phase envelope ({source, steps, done}) — null for normal
+        # sessions. Create's UNDERPAINT row rematerializes from it on TWEAK, and
+        # RE-RUN replays it (the envelope is provenance, like forkedFrom).
+        out["underpaint"] = s.get("underpaint")
         return out
 
     def summaries(self) -> list[dict]:
@@ -614,6 +824,12 @@ class RenderManager:
         self.proc: subprocess.Popen | None = None
         self.live_id: str | None = None
         self.live_values: dict | None = None
+        # Two-phase sessions (§16): which render of the live session is running —
+        # 'underpaint' (phase 1) or 'main' — and the frozen material the phase-1 ->
+        # phase-2 handoff needs ({values: the user's seeded values, underpaint: spec}).
+        # live_finish is non-None exactly while phase == 'underpaint'.
+        self.phase: str | None = None
+        self.live_finish: dict | None = None
         # Ordered FIFO of queued renders, cap QUEUE_CAP. Each item is SELF-CONTAINED
         # (§5.6 isolation invariant): the FULL composed values snapshot is frozen at
         # enqueue time — later draft edits never mutate a queued item.
@@ -624,6 +840,11 @@ class RenderManager:
         # instead of stacking. Only meaningful while queue[0] carries this id.
         self._preempt_head_id: str | None = None
         self.stop_requested = False
+        # Monotonic spawn token: every proc commit bumps it, and each
+        # _watch_frames thread exits once a NEWER spawn exists. Without it the
+        # phase-1 watcher survives the §16 handoff (live_id never blips to None
+        # anymore) and double-publishes every phase-2 frame.
+        self._watch_gen = 0
         # live telemetry
         self.step = 0
         self.steps_total = 0
@@ -635,17 +856,50 @@ class RenderManager:
 
     # ── spawn ──────────────────────────────────────────────────────────────
 
-    def start(self, values: dict, fork_of: str | None, seed_locked: bool):
+    def start(self, values: dict, fork_of: str | None, seed_locked: bool, underpaint: dict | None = None):
         with self._lock:
-            sid, seed, proc = self._spawn_locked(values, fork_of, seed_locked)
+            sid, seed, proc = self._spawn_locked(values, fork_of, seed_locked, underpaint=underpaint)
         self._announce_spawn(sid, seed, proc)
         return sid, seed
 
-    def _spawn_locked(self, values: dict, fork_of: str | None, seed_locked: bool, session_id: str | None = None):
+    @staticmethod
+    def _render_cmd(conf_name: str, run_dir_rel: str, namespace: str, extra: list | None = None) -> list:
+        return [
+            sys.executable, "-W", "ignore", "-m", "pytti.workhorse",
+            f"conf=_sessions/{conf_name}",
+            f"hydra.run.dir={run_dir_rel}",
+            f"file_namespace={namespace}",
+            *(extra or []),
+        ]
+
+    @staticmethod
+    def _write_session_conf(name: str, values: dict) -> dict:
+        """Write a _sessions/<name>.yaml hydra conf; returns the snapshot written.
+        NB: session YAML must be serialized with yaml.dump, never string templates —
+        YAML 1.1 parses an unquoted `off` as boolean False (animation_mode!);
+        yaml.dump quotes it correctly."""
+        snapshot = {k: v for k, v in values.items() if k not in MANAGED_FIELDS}
+        SESSIONS_CONF_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write(SESSIONS_CONF_DIR / f"{name}.yaml",
+                     "# @package _global_\n" + yaml.dump(snapshot, default_flow_style=False, allow_unicode=True))
+        return snapshot
+
+    def _spawn_locked(self, values: dict, fork_of: str | None, seed_locked: bool,
+                      session_id: str | None = None, underpaint: dict | None = None):
         """Busy-check + spawn, caller holds self._lock. Split from start() so enqueue
         can decide start-vs-append atomically with the proc state (a check-then-start
-        across two lock acquisitions can park an item in an idle queue forever)."""
-        if self.proc is not None:
+        across two lock acquisitions can park an item in an idle queue forever).
+
+        With an underpaint spec (§16) this spawns PHASE 1: the derived underpaint
+        config renders under conf _sessions/<sid>-underpaint into outputs/<sid>/
+        underpaint/ (same file_namespace, so frames land in a sibling of the normal
+        location); the session record carries the envelope + the COMBINED stepsTotal
+        (honest progress spans both phases); the user's values are frozen on
+        live_finish for the handoff (_finalize -> _start_finish)."""
+        if self.proc is not None or self.live_id is not None:
+            # live_id without a proc = the §16 handoff window (phase-1 proc gone,
+            # phase 2 not yet spawned): the session still owns the render slot,
+            # so a manual start is busy, not a winner of the microseconds.
             raise RuntimeError("busy")
         taken = [item["id"] for item in self.queue]
         sid = session_id or STORE.mint_id(values.get("scenes", ""), taken=taken)
@@ -656,13 +910,11 @@ class RenderManager:
         values["scene_prefix"] = clean_prompt_field(values.get("scene_prefix", ""), trailing_pipe=True)
         values["scene_suffix"] = clean_prompt_field(values.get("scene_suffix", ""), leading_pipe=True)
 
-        # NB: session YAML must be serialized with yaml.dump, never string
-        # templates — YAML 1.1 parses an unquoted `off` as boolean False
-        # (animation_mode!); yaml.dump quotes it correctly.
-        snapshot = {k: v for k, v in values.items() if k not in MANAGED_FIELDS}
-        SESSIONS_CONF_DIR.mkdir(parents=True, exist_ok=True)
-        conf_path = SESSIONS_CONF_DIR / f"{sid}.yaml"
-        atomic_write(conf_path, "# @package _global_\n" + yaml.dump(snapshot, default_flow_style=False, allow_unicode=True))
+        # The session conf + sidecar snapshot are ALWAYS the user's submission — the
+        # phase-2 injections (init_image/weight/c2f) are derived mechanically at the
+        # handoff and re-derived on every replay, so TWEAK/RE-RUN reproduce intent,
+        # not one run's temp paths (§16).
+        snapshot = self._write_session_conf(sid, values)
 
         run_dir = OUTPUTS_DIR / sid
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -670,13 +922,18 @@ class RenderManager:
         n_scenes = scene_count(values.get("scenes", ""))
         steps_total = n_scenes * int(values.get("steps_per_scene", 100) or 0)
 
+        if underpaint is not None:
+            phase1 = derive_underpaint_values(values, underpaint)
+            self._write_session_conf(f"{sid}-underpaint", phase1)
+            underpaint_run_dir(sid).mkdir(parents=True, exist_ok=True)
+            steps_total += n_scenes * underpaint["steps"]
+            cmd = self._render_cmd(f"{sid}-underpaint", f"outputs/{sid}/underpaint", sid)
+            spawn_values = phase1  # pump arithmetic follows the running config
+        else:
+            cmd = self._render_cmd(sid, f"outputs/{sid}", sid)
+            spawn_values = values
+
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-        cmd = [
-            sys.executable, "-W", "ignore", "-m", "pytti.workhorse",
-            f"conf=_sessions/{sid}",
-            f"hydra.run.dir=outputs/{sid}",
-            f"file_namespace={sid}",
-        ]
         proc = subprocess.Popen(
             cmd, cwd=str(APP_DIR), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
@@ -699,11 +956,16 @@ class RenderManager:
             "artifacts": [],
             "config": snapshot,
         }
+        if underpaint is not None:
+            session["underpaint"] = {**underpaint, "done": False}
         STORE.put(session)
 
         self.proc = proc
         self.live_id = sid
-        self.live_values = values
+        self.live_values = spawn_values
+        self.phase = "underpaint" if underpaint is not None else "main"
+        self.live_finish = None if underpaint is None else {"values": values, "underpaint": underpaint}
+        self._watch_gen += 1
         self.stop_requested = False
         self.step = 0
         self.steps_total = steps_total
@@ -723,21 +985,33 @@ class RenderManager:
         s = STORE.sessions.get(session_id)
         if s is None or s.get("imported"):
             raise KeyError(session_id)
+        underpaint = s.get("underpaint")
+        if underpaint is not None and not underpaint.get("done"):
+            # §16 restore semantics, v1: RESUME restores PHASE 2 ONLY — a session
+            # interrupted during phase 1 RESTARTS phase 1 from scratch (same id,
+            # same config, same seed; the simplest honest semantics — a partial
+            # underpaint has no restore contract). The old record is re-minted.
+            values = dict(s["config"])
+            with self._lock:
+                if self.proc is not None or self.live_id is not None:
+                    raise RuntimeError("busy")
+                sid, seed, proc = self._spawn_locked(
+                    values, s.get("forkedFrom"), True, session_id=session_id,
+                    underpaint={"source": underpaint["source"], "steps": underpaint["steps"]},
+                )
+            self._announce_spawn(sid, seed, proc)
+            return session_id
         values = dict(s["config"])
         values["restore"] = True
-        # reuse the existing snapshot + dir; append restore as an override
+        # reuse the existing snapshot + dir; append restore as an override. For a
+        # two-phase session past its handoff, _sessions/<sid>.yaml already holds the
+        # FINISH config (rewritten at handoff, §16), so the restore relaunches phase 2.
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-        cmd = [
-            sys.executable, "-W", "ignore", "-m", "pytti.workhorse",
-            f"conf=_sessions/{session_id}",
-            f"hydra.run.dir=outputs/{session_id}",
-            f"file_namespace={session_id}",
-            "restore=true",
-        ]
+        cmd = self._render_cmd(session_id, f"outputs/{session_id}", session_id, ["restore=true"])
         with self._lock:
             # busy-check and spawn under the same lock (double-clicked RESUME
             # on a threading server must not spawn twice)
-            if self.proc is not None:
+            if self.proc is not None or self.live_id is not None:
                 raise RuntimeError("busy")
             proc = subprocess.Popen(
                 cmd, cwd=str(APP_DIR), env=env,
@@ -748,6 +1022,9 @@ class RenderManager:
             self.proc = proc
             self.live_id = session_id
             self.live_values = values
+            self.phase = "main"
+            self.live_finish = None
+            self._watch_gen += 1
             self.stop_requested = False
             self.step = 0
             self.steps_total = s.get("stepsTotal", 0)
@@ -756,18 +1033,19 @@ class RenderManager:
             self.samples = 0
             self.started_at = time.time()
             # a resumed run's tqdm bars restart at 0; frames already on disk
-            # tell us how many steps the previous run(s) completed
+            # tell us how many steps the previous run(s) completed — plus the whole
+            # phase-1 budget for a two-phase session (its bars belonged to phase 1)
             save_every = int(values.get("save_every", 0) or 0) or int(values.get("steps_per_frame", 50) or 1)
             self.resume_offset = len(STORE.frame_files(session_id)) * save_every
+            if underpaint is not None:
+                self.resume_offset += scene_count(values.get("scenes", "")) * int(underpaint["steps"])
         STORE.update(session_id, state="launching", endedAt=None)
-        HUB.publish("state", {"sessionId": session_id, "state": "launching", "seed": s.get("seed")})
-        threading.Thread(target=self._pump_stdout, args=(proc, session_id), daemon=True).start()
-        threading.Thread(target=self._watch_frames, args=(session_id,), daemon=True).start()
+        self._announce_spawn(session_id, s.get("seed"), proc)
         return session_id
 
     def stop(self, session_id: str):
         with self._lock:
-            if self.proc is None or self.live_id != session_id:
+            if self.live_id != session_id:
                 raise KeyError(session_id)
             self.stop_requested = True
             proc = self.proc
@@ -776,10 +1054,16 @@ class RenderManager:
             # naturally used to run these lines unlocked AFTER the terminal
             # write/publish, permanently reverting the record to non-terminal and
             # flipping settled client tiles back to STOPPING. _finalize clears
-            # proc inside its locked section, so whichever side wins the lock,
-            # 'stopping' either precedes the terminal event or becomes a KeyError.
+            # the live slot inside its locked section, so whichever side wins the
+            # lock, 'stopping' either precedes the terminal event or is a KeyError.
             STORE.update(session_id, state="stopping")
             HUB.publish("state", {"sessionId": session_id, "state": "stopping"})
+        if proc is None:
+            # §16 handoff window: the session is live but between procs (phase 1
+            # exited, phase 2 not yet spawned). The flag set above makes
+            # _start_finish abort instead of spawning — the session finalizes
+            # 'stopped'; there is nothing to signal.
+            return
         import signal
 
         def signal_group(sig):
@@ -798,14 +1082,17 @@ class RenderManager:
 
         threading.Thread(target=enforcer, daemon=True).start()
 
-    def _make_item(self, values: dict, fork_of: str | None, seed_locked: bool) -> dict:
+    def _make_item(self, values: dict, fork_of: str | None, seed_locked: bool, underpaint: dict | None = None) -> dict:
         """Freeze a self-contained queue item, caller holds self._lock (mint must see
-        the queued ids as taken, atomically with the insert)."""
+        the queued ids as taken, atomically with the insert). A two-phase submission
+        (§16) is ONE item — the underpaint spec rides it and both phases run under
+        its pre-minted id when it drains."""
         taken = [item["id"] for item in self.queue]
         sid = STORE.mint_id(values.get("scenes", ""), taken=taken)
         return {
             "id": sid, "slug": slugify(values.get("scenes", "")),
             "values": dict(values), "forkOf": fork_of, "seedLocked": seed_locked,
+            "underpaint": underpaint,
             "enqueuedAt": now_ms(),
         }
 
@@ -838,20 +1125,20 @@ class RenderManager:
         with self._lock:
             HUB.publish("queue", {"items": [self._item_tile(item, i + 1) for i, item in enumerate(self.queue)]})
 
-    def enqueue(self, values: dict, fork_of: str | None, seed_locked: bool) -> dict:
+    def enqueue(self, values: dict, fork_of: str | None, seed_locked: bool, underpaint: dict | None = None) -> dict:
         """mode 'queue': APPEND to the FIFO — never replaces. Starts immediately only
         when nothing is running AND nothing is queued (queue-when-idle would park a
         session forever). The start-vs-append decision and the spawn/append happen
         under ONE lock acquisition: a check-then-start across two acquisitions races
         _finalize and can strand an item in an idle queue."""
         with self._lock:
-            if self.proc is None and not self.queue:
-                sid, seed, proc = self._spawn_locked(values, fork_of, seed_locked)
+            if self.proc is None and self.live_id is None and not self.queue:
+                sid, seed, proc = self._spawn_locked(values, fork_of, seed_locked, underpaint=underpaint)
                 item = None
             else:
                 if len(self.queue) >= QUEUE_CAP:
                     raise ValueError(f"queue is full ({QUEUE_CAP} items max) — cancel something first")
-                item = self._make_item(values, fork_of, seed_locked)
+                item = self._make_item(values, fork_of, seed_locked, underpaint=underpaint)
                 self.queue.append(item)
                 position = len(self.queue)
         if item is None:
@@ -860,20 +1147,21 @@ class RenderManager:
         self._publish_queue()
         return {"queuedId": item["id"], "position": position}
 
-    def preempt(self, values: dict, fork_of: str | None, seed_locked: bool) -> dict:
+    def preempt(self, values: dict, fork_of: str | None, seed_locked: bool, underpaint: dict | None = None) -> dict:
         """mode 'preempt', the EXPLICIT jump-the-line action: the preemptor is parked
-        at the HEAD of the queue and the live render is stopped; _finalize's auto-start
-        spawns it next. The existing queue stays intact behind it. Preempt bypasses
-        QUEUE_CAP but holds exactly ONE slot: while a previous preemptor is still
-        parked at the head (the live render takes up to 5s to die — SIGTERM grace),
-        another preempt REPLACES it instead of stacking — N impatient clicks = one
-        render, and the backlog never grows past cap+1."""
+        at the HEAD of the queue and the live render is stopped (WHICHEVER phase of a
+        two-phase session is running — stop signals the current proc, §16);
+        _finalize's auto-start spawns it next. The existing queue stays intact behind
+        it. Preempt bypasses QUEUE_CAP but holds exactly ONE slot: while a previous
+        preemptor is still parked at the head (the live render takes up to 5s to die
+        — SIGTERM grace), another preempt REPLACES it instead of stacking — N
+        impatient clicks = one render, and the backlog never grows past cap+1."""
         with self._lock:
             live = self.live_id
             if live is None:
-                sid, seed, proc = self._spawn_locked(values, fork_of, seed_locked)
+                sid, seed, proc = self._spawn_locked(values, fork_of, seed_locked, underpaint=underpaint)
             else:
-                item = self._make_item(values, fork_of, seed_locked)
+                item = self._make_item(values, fork_of, seed_locked, underpaint=underpaint)
                 if self.queue and self.queue[0]["id"] == self._preempt_head_id:
                     self.queue[0] = item  # the parked preemptor never started; newest wins
                 else:
@@ -887,7 +1175,11 @@ class RenderManager:
         try:
             self.stop(live)
         except KeyError:
-            pass  # the live render finished in the gap; _finalize's auto-start takes over
+            # The live render fully finalized in the gap (live slot cleared);
+            # _finalize's auto-start takes over. A two-phase session in its
+            # handoff window is NOT this case: it still owns live_id, so stop()
+            # lands, the handoff aborts, and the preemptor starts next (§16).
+            pass
         return {"preempting": live, "queuedId": sid, "position": 1}
 
     def cancel_queued(self, queue_id: str):
@@ -918,10 +1210,16 @@ class RenderManager:
         under the lock: lines already in the pipe when stop() lands (or emitted
         during the SIGTERM grace) must not overwrite 'stopping' — the STOPPING chip
         is one-shot (spec §7.3), so once stop_requested is set the phase flip is
-        dropped and the next state event the client sees is the terminal one."""
+        dropped and the next state event the client sees is the terminal one.
+
+        Two-phase sessions (§16): while phase 1 runs, 'rendering' announces as the
+        'underpainting' substate — the Create tile's 'underpainting…' label; the
+        summary() collapse maps it back to the 'rendering' SessionState."""
         with self._lock:
             if self.stop_requested:
                 return
+            if state == "rendering" and self.phase == "underpaint":
+                state = "underpainting"
             STORE.update(sid, state=state)
             HUB.publish("state", {"sessionId": sid, "state": state, "seed": STORE.sessions[sid].get("seed")})
 
@@ -965,6 +1263,9 @@ class RenderManager:
 
     def _pump_stdout_inner(self, proc: subprocess.Popen, sid: str):
         values = self.live_values or {}
+        # Fixed for this pump's lifetime: each phase gets its own proc + pump, and the
+        # handoff only happens after this pump's _finalize (§16).
+        render_phase = "underpaint" if self.phase == "underpaint" else "main"
         pre_steps = int(values.get("pre_animation_steps", 0) or 0)
         steps_per_scene = int(values.get("steps_per_scene", 100) or 1)
         steps_per_frame = int(values.get("steps_per_frame", 50) or 1)
@@ -1012,7 +1313,15 @@ class RenderManager:
                 if now - last_progress_pub >= 0.5:
                     last_progress_pub = now
                     sps = self.s_per_step_ewma
-                    remaining = max(0, self.steps_total - step)
+                    # §16: phase-1 ETA covers the phase-1 remainder ONLY — the
+                    # finish runs a different model whose s/step can differ
+                    # several-fold, so extrapolating the combined remainder by
+                    # phase-1 speed would show a wildly wrong number all phase.
+                    eta_steps = (
+                        n_scenes * steps_per_scene if render_phase == "underpaint"
+                        else self.steps_total
+                    )
+                    remaining = max(0, eta_steps - step)
                     phase = "scene"
                     if step < pre_steps:
                         phase = "pre_animation"
@@ -1025,6 +1334,7 @@ class RenderManager:
                         "scene": max(0, self.scene),
                         "sceneCount": n_scenes,
                         "phase": phase,
+                        "renderPhase": render_phase,  # §16: 'underpaint' | 'main'
                         "sPerStep": round(sps, 2),
                         "etaSec": int(remaining * sps) if sps else 0,
                         "elapsedSec": int(time.time() - self.started_at),
@@ -1057,46 +1367,195 @@ class RenderManager:
             import traceback
             traceback.print_exc()
 
+    def _clear_live_locked(self):
+        """Vacate the live slot; caller holds self._lock."""
+        self.live_id = None
+        self.live_values = None
+        self.phase = None
+        self.live_finish = None
+
     def _finalize(self, sid: str, exit_code: int, fail_tail: list):
         with self._lock:
             stop_requested = self.stop_requested
+            phase = self.phase
+            finish = self.live_finish
             step = self.step
             sps = self.s_per_step_ewma
             elapsed = int(time.time() - self.started_at)
             self.proc = None
-            self.live_id = None
-            self.live_values = None
+            handoff = phase == "underpaint" and exit_code == 0 and not stop_requested
+            if not handoff:
+                self._clear_live_locked()
+            # On the handoff path the session KEEPS the live slot (live_id stays
+            # sid, proc None): DELETE's live-guard, stop(), and every spawn
+            # path's busy check hold through the whole composite+conf+spawn
+            # sequence — the old clear opened a window where a delete could
+            # rmtree the session out from under _start_finish, and a manual
+            # start could race the phase-2 spawn.
+
+        if handoff:
+            # §16 HANDOFF: phase 1 finished — phase 2 starts under the SAME session
+            # id; NO terminal state is written or published between the phases (one
+            # session, one lifecycle). This runs on the pump thread like _start_next:
+            # nothing may escape — a handoff failure surfaces as a failed session and
+            # the queue drains on.
+            import traceback
+            try:
+                spawned = self._start_finish(sid, finish)
+            except Exception as e:
+                traceback.print_exc()
+                fail_tail = list(fail_tail) + [f"underpaint handoff failed: {type(e).__name__}: {e}"]
+                exit_code = 1
+                phase = "main"  # the failure is the handoff's, not the underpaint render's
+                with self._lock:
+                    self._clear_live_locked()
+            else:
+                if spawned is not None:
+                    self._announce_spawn(*spawned)
+                    return
+                # a stop landed inside the handoff window: phase 2 never spawns
+                # and the session finalizes 'stopped' with its phase-1 exit
+                stop_requested = True
+                with self._lock:
+                    self._clear_live_locked()
 
         frames = len(STORE.frame_files(sid))
         if stop_requested:
+            # A stop during phase 1 stops the SESSION (any underpaint frames stay on
+            # disk under <sid>/underpaint/); a stop during phase 2 is the normal stop.
             state = "stopped"
         elif exit_code == 0:
             state = "done"
         else:
             state = "failed"
-        session = STORE.update(
-            sid,
-            state=state,
-            endedAt=now_ms(),
-            stepsDone=step,
-            frames=frames,
-            sPerStepAvg=round(sps, 2) if sps else None,
-            elapsedSec=elapsed,
-            exitCode=exit_code,
-            failExcerpt=fail_tail[-2:] if state == "failed" else None,
-        )
-        pid_file = OUTPUTS_DIR / sid / "pid"
-        if pid_file.exists():
-            pid_file.unlink()
-        if sps and step > 20 and state in ("done", "stopped"):
-            CALIBRATION.record(session["config"], sps, sid)
-        HUB.publish("state", {
-            "sessionId": sid, "state": state, "exitCode": exit_code,
-            "seed": session.get("seed"),
-            "summary": {"steps": step, "frames": frames, "elapsedSec": elapsed,
-                        "sPerStepAvg": session.get("sPerStepAvg")},
-        })
+        if phase == "underpaint" and state == "failed":
+            # Phase-1 failure = session failed with the PHASE-1 log excerpt (§16);
+            # name the phase so the excerpt reads as what it is.
+            fail_tail = list(fail_tail) + [f"(underpaint phase, exit {exit_code})"]
+        try:
+            session = STORE.update(
+                sid,
+                state=state,
+                endedAt=now_ms(),
+                stepsDone=step,
+                frames=frames,
+                sPerStepAvg=round(sps, 2) if sps else None,
+                elapsedSec=elapsed,
+                exitCode=exit_code,
+                failExcerpt=fail_tail[-2:] if state == "failed" else None,
+            )
+        except KeyError:
+            # The session was DELETEd in the instant after the live slot
+            # cleared — there is no record to finalize, but the drain below
+            # must still run (an escaping KeyError kills the pump thread and
+            # strands every queued item).
+            print(f"[finalize] {sid} deleted mid-finalize; terminal record skipped", file=sys.stderr)
+        else:
+            pid_file = OUTPUTS_DIR / sid / "pid"
+            if pid_file.exists():
+                pid_file.unlink()
+            if sps and step > 20 and state in ("done", "stopped") and phase != "underpaint":
+                CALIBRATION.record(session["config"], sps, sid)
+            HUB.publish("state", {
+                "sessionId": sid, "state": state, "exitCode": exit_code,
+                "seed": session.get("seed"),
+                "summary": {"steps": step, "frames": frames, "elapsedSec": elapsed,
+                            "sPerStepAvg": session.get("sPerStepAvg")},
+            })
         self._start_next()
+
+    def _start_finish(self, sid: str, finish: dict):
+        """Phase 2 of a two-phase session (§16): compose the finish config from the
+        user's frozen values + the underpaint init, rewrite the session conf (so a
+        later RESUME restores phase 2), spawn under the SAME id. Raises on any
+        failure — _finalize contains it as a failed session. Returns None when a
+        stop landed inside the handoff window — _finalize then settles the
+        session 'stopped' and phase 2 never spawns. The session holds the live
+        slot throughout (live_id stays sid), so deletes 409, stops land, and
+        every other spawn path sees busy until this commits.
+
+        The finish mirrors the eval legs exactly (up-fl-proj / up-tight-ds8): the
+        user's actual config, init_image = the underpaint's final frame,
+        direct_init_weight '2', FLAT — coarse_to_fine is forced off because the
+        pyramid's stage-1 downsample would destroy the underpaint (the composer's
+        UNDERPAINT row forces PYRAMID off for the same reason; this is the server-
+        side backstop for tweak bases that carry c2f).
+
+        Mask compositing (§16): with a user attachment (+painted mask, validated at
+        submit) the user's image is composited over the underpaint where the mask is
+        painted; the composite becomes the init and the user's own weight/mask
+        grammar rides unchanged."""
+        values = dict(finish["values"])
+        up = finish["underpaint"]
+        frames = underpaint_frame_files(sid)
+        if not frames:
+            raise RuntimeError("underpaint produced no frames")
+        init_path = frames[-1]
+        user_init = str(values.get("init_image", "") or "").strip()
+        if user_init:
+            mask = parse_create_mask(str(values.get("direct_init_weight", "") or ""))
+            if mask is None:
+                # validate_underpaint_submission guarantees this at submit; a queue
+                # item composed elsewhere could still miss it — fail loud.
+                raise RuntimeError("underpaint with an attachment but no painted mask")
+            composite = composite_underpaint(
+                init_path, user_init, mask[0], mask[1],
+                int(values["width"]), int(values["height"]),
+                underpaint_run_dir(sid) / "composite.png",
+            )
+            values["init_image"] = str(composite)
+            # the user's direct_init_weight (weight + mask) rides verbatim: the
+            # painted region holds the user's content at the user's strength; the
+            # underpaint region is the starting canvas (§16)
+        else:
+            values["init_image"] = str(init_path)
+            values["direct_init_weight"] = UNDERPAINT_FINISH_WEIGHT
+        values["coarse_to_fine"] = False
+        values["coarse_stages"] = 2  # non-default stages alongside false is schema-rejected
+
+        # _sessions/<sid>.yaml now holds the FINISH — the config that actually
+        # renders (and the one RESUME relaunches). The sidecar config stays the
+        # user's submission (§16: intent is the snapshot; injections are derived).
+        self._write_session_conf(sid, values)
+        n_scenes = scene_count(values.get("scenes", ""))
+        cmd = self._render_cmd(sid, f"outputs/{sid}", sid)
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        with self._lock:
+            if self.stop_requested:
+                # A stop landed while the handoff composed (stop() sees the live
+                # slot and sets the flag even with no proc to signal) — abort;
+                # _finalize settles the session as stopped.
+                return None
+            if self.proc is not None:
+                # Unreachable while the live slot is held through the handoff
+                # (every spawn path busy-checks live_id) — kept as the fail-loud
+                # invariant guard rather than rendering interleaved (§16).
+                raise RuntimeError("busy: another render started during the underpaint handoff")
+            proc = subprocess.Popen(
+                cmd, cwd=str(APP_DIR), env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                start_new_session=True,
+            )
+            (OUTPUTS_DIR / sid / "pid").write_text(str(proc.pid))
+            self.proc = proc
+            self.live_id = sid
+            self.live_values = values
+            self.phase = "main"
+            self.live_finish = None
+            self._watch_gen += 1
+            self.stop_requested = False
+            # progress continues where phase 1 ended: the combined stepsTotal stands,
+            # phase 2's tqdm bars restart at 0 and offset by the phase-1 budget
+            self.step = n_scenes * int(up["steps"])
+            self.steps_total = n_scenes * (int(up["steps"]) + int(values.get("steps_per_scene", 100) or 0))
+            self.scene = 0
+            self.s_per_step_ewma = 0.0
+            self.samples = 0
+            # started_at stands from phase 1: elapsedSec spans the whole session
+            self.resume_offset = n_scenes * int(up["steps"])
+        session = STORE.sessions.get(sid, {})
+        STORE.update(sid, state="launching", underpaint={**up, "done": True})
+        return sid, session.get("seed"), proc
 
     def _start_next(self):
         """Auto-start the head of the queue after any terminal render (done, failed,
@@ -1113,7 +1572,7 @@ class RenderManager:
         import traceback
         while True:
             with self._lock:
-                if self.proc is not None or not self.queue:
+                if self.proc is not None or self.live_id is not None or not self.queue:
                     return
                 item = self.queue[0]  # peek — see docstring
             failure: list[str] | None = None
@@ -1122,6 +1581,12 @@ class RenderManager:
                 if not check["ok"]:
                     messages = [f"{i['field']}: {i['message']}" for i in check["issues"] if i["severity"] == "error"]
                     failure = messages or ["preflight failed"]
+                if failure is None and item.get("underpaint") is not None:
+                    # §16: re-run the submit-time cross-check at drain time — the
+                    # painted mask lives at an arbitrary user path and hours may
+                    # have passed in the queue; a vanished mask must fail HERE,
+                    # not at the handoff after burning the whole phase-1 budget.
+                    validate_underpaint_submission(item["values"], item["underpaint"])
             except Exception as e:  # preflight itself blew up — fail the item, not the drain
                 traceback.print_exc()
                 failure = [f"{type(e).__name__}: {e}"]
@@ -1129,14 +1594,15 @@ class RenderManager:
             with self._lock:
                 if not self.queue or self.queue[0] is not item:
                     continue  # cancelled/cleared/replaced while preflighting — re-evaluate
-                if self.proc is not None:
+                if self.proc is not None or self.live_id is not None:
                     return  # a manual start won the window; the head stays queued for the next _finalize
                 self.queue.pop(0)
                 if self._preempt_head_id == item["id"]:
                     self._preempt_head_id = None
                 if failure is None:
                     try:
-                        spawned = self._spawn_locked(item["values"], item["forkOf"], item["seedLocked"], session_id=item["id"])
+                        spawned = self._spawn_locked(item["values"], item["forkOf"], item["seedLocked"],
+                                                     session_id=item["id"], underpaint=item.get("underpaint"))
                     except Exception as e:  # spawn failure (disk, exec) — surface, keep draining
                         traceback.print_exc()
                         failure = [f"{type(e).__name__}: {e}"]
@@ -1176,6 +1642,8 @@ class RenderManager:
             "exitCode": None,
             "failExcerpt": messages[-2:],
         }
+        if item.get("underpaint") is not None:
+            session["underpaint"] = {**item["underpaint"], "done": False}
         STORE.put(session)
         print(f"[queue] {item['id']} failed at start: {'; '.join(messages)}", file=sys.stderr)
         HUB.publish("state", {
@@ -1187,9 +1655,14 @@ class RenderManager:
     def _watch_frames(self, sid: str):
         frames_dir = OUTPUTS_DIR / sid / "images_out" / sid
         seen: set[str] = {p.name for p in STORE.frame_files(sid)}
+        # This watcher belongs to ONE spawn: a newer _watch_gen (the §16 phase-2
+        # spawn, a RESUME after a handoff) means a fresh watcher owns the dir —
+        # exit instead of double-publishing every frame from here on.
+        with self._lock:
+            gen = self._watch_gen
         while True:
             with self._lock:
-                alive = self.live_id == sid and self.proc is not None
+                alive = self.live_id == sid and self.proc is not None and self._watch_gen == gen
             if frames_dir.exists():
                 for p in sorted(frames_dir.iterdir()):
                     if p.suffix != ".png" or p.name in seen:
@@ -1216,7 +1689,7 @@ class RenderManager:
             if s.get("imported"):
                 continue
             pid_file = OUTPUTS_DIR / sid / "pid"
-            if s.get("state") in ("launching", "loading_models", "rendering", "stopping") or pid_file.exists():
+            if s.get("state") in ("launching", "loading_models", "rendering", "underpainting", "stopping") or pid_file.exists():
                 pid = None
                 if pid_file.exists():
                     try:
@@ -1372,7 +1845,7 @@ def tuned_defaults() -> dict:
     return values
 
 
-def compose_submission(body: dict) -> tuple[dict, str | None, bool]:
+def compose_submission(body: dict) -> tuple[dict, str | None, bool, dict | None]:
     """
     A SELF-CONTAINED submission (the Create surface): the versioned tuned
     defaults with the caller's values coerced on top. The shared draft is
@@ -1380,8 +1853,13 @@ def compose_submission(body: dict) -> tuple[dict, str | None, bool]:
     working state (docs/studio-create-spec.md §5.6, isolation invariant).
     Raises ValueError (-> 400 in do_POST) on any unknown or mistyped field,
     at both the envelope and the config-values level.
+
+    The optional 'underpaint' envelope field (§16, {source, steps?}) makes the
+    submission a two-phase session. It is an ENVELOPE field, not a config value
+    — it never enters coerce_values or the session yaml; the draft-based path
+    (the bench) has no way to carry it.
     """
-    unknown = sorted(set(body) - {"mode", "values", "forkOf", "seedLocked"})
+    unknown = sorted(set(body) - {"mode", "values", "forkOf", "seedLocked", "underpaint"})
     if unknown:
         raise ValueError(f"unknown submission fields: {', '.join(unknown)}")
     if not isinstance(body["values"], dict):
@@ -1392,9 +1870,11 @@ def compose_submission(body: dict) -> tuple[dict, str | None, bool]:
     seed_locked = body.get("seedLocked", False)
     if not isinstance(seed_locked, bool):
         raise ValueError("seedLocked must be a boolean")
+    underpaint = parse_underpaint(body.get("underpaint"))
     values = tuned_defaults()
     values.update(coerce_values(body["values"]))
-    return values, fork_of, seed_locked
+    validate_underpaint_submission(values, underpaint)
+    return values, fork_of, seed_locked, underpaint
 
 
 def read_draft() -> dict:
@@ -1655,6 +2135,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "bad artifact name"})
                 return
             self._send_file(STORE.run_dir(sid) / name)
+        elif kind == "underpaint":
+            # §16: the underpaint's final frame (phase 1's result), served from the
+            # session-owned subdir — the path is DERIVED from the session id alone
+            # (no client input reaches the filesystem), 404 until a frame exists.
+            frames = underpaint_frame_files(sid)
+            if not frames:
+                self._json(404, {"error": "no underpaint frame"})
+                return
+            self._send_file(frames[-1], "image/png")
         else:
             self._json(404, {"error": "not found"})
 
@@ -1747,25 +2236,30 @@ class Handler(BaseHTTPRequestHandler):
         if "values" in body:
             # Self-contained submission (Create): tuned defaults + body values;
             # the shared draft is untouched. ValueError -> 400 via do_POST.
-            values, fork_of, seed_locked = compose_submission(body)
+            values, fork_of, seed_locked, underpaint = compose_submission(body)
+        elif "underpaint" in body:
+            # §16: the envelope field belongs to self-contained submissions only —
+            # the shared draft must never grow hidden two-phase behavior.
+            self._json(400, {"error": "underpaint requires a self-contained submission (values)"})
+            return
         else:
             # Draft-based submission (the bench): byte-identical legacy behavior.
             draft = read_draft()
-            values, fork_of, seed_locked = draft["values"], draft.get("forkOf"), draft.get("seedLocked", False)
+            values, fork_of, seed_locked, underpaint = draft["values"], draft.get("forkOf"), draft.get("seedLocked", False), None
         check = preflight(values)
         if not check["ok"]:
             self._json(400, {"error": "preflight failed", "issues": check["issues"]})
             return
         if mode == "queue":
-            result = MANAGER.enqueue(values, fork_of, seed_locked)
+            result = MANAGER.enqueue(values, fork_of, seed_locked, underpaint=underpaint)
             self._json(201 if "sessionId" in result else 202, result)
             return
         if mode == "preempt":
-            result = MANAGER.preempt(values, fork_of, seed_locked)
+            result = MANAGER.preempt(values, fork_of, seed_locked, underpaint=underpaint)
             self._json(201 if "sessionId" in result else 202, result)
             return
         try:
-            sid, seed = MANAGER.start(values, fork_of, seed_locked)
+            sid, seed = MANAGER.start(values, fork_of, seed_locked, underpaint=underpaint)
             self._json(201, {"sessionId": sid, "seed": seed})
         except RuntimeError:
             with MANAGER._lock:

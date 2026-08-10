@@ -23,7 +23,9 @@ if (!existsSync(fr)) {
 // finding fails via fr's exit code regardless of domain.
 const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // 5/23 -> 5/25 with §15: +parseUploadResult, +uploadUrl (string domain, unsupported).
-  { file: 'create/core/api.ts', coverage: '5/25', partial: 2 },
+  // 5/25 -> 5/26 with §16: +parseUnderpaintEnvelope (unknown-record parse, string
+  // domain, unsupported as expected; api.test.ts is the checked surface).
+  { file: 'create/core/api.ts', coverage: '5/26', partial: 2 },
   { file: 'create/core/feel.ts', coverage: '0/0', partial: 0 },
   { file: 'create/core/gallery.ts', coverage: '3/5', partial: 0 },
   // §15 weight_mask codec — string domain by declaration; the analyzed are the
@@ -54,7 +56,11 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // 3/17 -> 3/19 with the ANNEAL row + VQGAN/AUTO-STOP guards (§5.7): +applyLook,
   // +applyAutoStop — union-store transitions like applyHoldMeaning, unsupported as
   // expected; model.test.ts is the checked surface.
-  { file: 'create/core/model.ts', coverage: '3/19', partial: 0 },
+  // 3/19 -> 3/25 with §16 (two-phase sessions): +applyProjection, +applyFourier,
+  // +applyUnderpaint, +applyAspect, +applySize, +enforceProjectionDims — union-store
+  // transitions like applyLook, unsupported as expected; model.test.ts is the
+  // checked surface.
+  { file: 'create/core/model.ts', coverage: '3/25', partial: 0 },
   // 1/10 -> 2/10 with the SIZE/STEPS split: qualitySteps (unsupported Record read)
   // retired; parseStepsId (numeric exact-match loop, ensures return in 150..600) is
   // fully analyzed alongside dimsTable.
@@ -72,7 +78,11 @@ const CORE_PINS: { file: string, coverage: string, partial: number }[] = [
   // 5/26 -> 5/28 with the ANNEAL row (§5.7): +annealEmit (Record producer) and
   // +matchAnneal (unknown reads) unsupported as expected — same domain, same
   // checked surface (matchSampler became matchFullVision, count-neutral).
-  { file: 'create/core/presets.ts', coverage: '5/28', partial: 0 },
+  // 5/28 -> 6/33 with §16 (two-phase sessions): +projectionDimsSafe ANALYZED (pure
+  // numeric /8 gate — pinned upward); +underpaintEnvelope, +matchProjection,
+  // +matchFourier, +matchUnderpaint unsupported as expected (Record/unknown reads,
+  // string/JSON domain; presets.test.ts is the checked surface).
+  { file: 'create/core/presets.ts', coverage: '6/33', partial: 0 },
   { file: 'create/core/surfaces.ts', coverage: '1/2', partial: 0 },
 ]
 

@@ -5,15 +5,17 @@
 // input and the gear, and the INIT row (strength presets + HOLD + torch note) that
 // exists iff an image is attached. §5.1a: the ASPECT row's AUTO chip is disabled
 // (MASK-chip surface treatment) until the attachment's natural dims are known.
-// §5.7: the collapsed EXPERIMENTS disclosure at the bottom (chevron button + seven
-// chip rows); rows the engine's guards refuse are disabled (AUTO-chip treatment):
-// PYRAMID while HOLD MEANING is on, NOISE and ANNEAL while LOOK is VQGAN, ANNEAL
-// while AUTO-STOP is on.
+// §5.7/§16: the collapsed EXPERIMENTS disclosure at the bottom (chevron button +
+// ten chip rows); rows the engine's guards refuse are disabled (AUTO-chip
+// treatment): PYRAMID while HOLD MEANING is on or an underpaint is effective,
+// NOISE and ANNEAL while LOOK is VQGAN or FOURIER is on, ANNEAL while AUTO-STOP or
+// PROJECTION is on, UNDERPAINT while LOOK is VQGAN (v1 scope), PROJECTION under
+// VQGAN / AUTO-STOP / non-/8 dims, FOURIER anywhere but LOOK UNLIMITED.
 import { spring, springGoToEnd, springMostlyDone, springStep } from '@kit/midui/motion'
 import { uploadUrl } from '../core/api'
 import { initNaturalDims, maskEditingLocked } from '../core/init'
 import type { CreateState } from '../core/model'
-import { STEPS_IDS } from '../core/presets'
+import { projectionDimsSafe, STEPS_IDS } from '../core/presets'
 
 type ChipRow =
   | 'aspect'
@@ -28,6 +30,9 @@ type ChipRow =
   | 'fullvision'
   | 'phase'
   | 'autostop'
+  | 'underpaint'
+  | 'projection'
+  | 'fourier'
 
 let promptEl: HTMLInputElement
 let goEl: HTMLButtonElement
@@ -45,6 +50,9 @@ type GuardedChip = { el: HTMLButtonElement; defaultTitle: string }
 let pyramidChipEls: GuardedChip[] = []
 let noiseChipEls: GuardedChip[] = []
 let annealChipEls: GuardedChip[] = []
+let underpaintChipEls: GuardedChip[] = []
+let projectionChipEls: GuardedChip[] = []
+let fourierChipEls: GuardedChip[] = []
 let seedRandomEl: HTMLElement
 let seedLockedEl: HTMLElement
 let stepsCustomEl: HTMLInputElement
@@ -120,6 +128,9 @@ export function initBar(deps: {
     ['fullvision', 'fullvision'],
     ['phase', 'phase'],
     ['autostop', 'autostop'],
+    ['underpaint', 'underpaint'],
+    ['projection', 'projection'],
+    ['fourier', 'fourier'],
   ]
   for (const [row, key] of expRows) {
     for (const el of popEl.querySelectorAll<HTMLElement>(`[data-${key}]`)) {
@@ -131,6 +142,9 @@ export function initBar(deps: {
   pyramidChipEls = guarded('button[data-pyramid]')
   noiseChipEls = guarded('button[data-noise]')
   annealChipEls = guarded('button[data-anneal]')
+  underpaintChipEls = guarded('button[data-underpaint]')
+  projectionChipEls = guarded('button[data-projection]')
+  fourierChipEls = guarded('button[data-fourier]')
   aspectAutoEl = mustQuery('[data-aspect="auto"]') as HTMLButtonElement
   expToggleEl = mustQuery('#exp-toggle') as HTMLButtonElement
   expBodyEl = mustQuery('#exp-body')
@@ -178,6 +192,12 @@ function rowValue(state: CreateState, row: ChipRow): string | null {
       return state.composer.experiments.phase
     case 'autostop':
       return state.composer.experiments.autoStop
+    case 'underpaint':
+      return state.composer.experiments.underpaint
+    case 'projection':
+      return state.composer.experiments.projection
+    case 'fourier':
+      return state.composer.experiments.fourier
   }
 }
 
@@ -236,7 +256,8 @@ export function renderBar(state: CreateState, springSteps: number): boolean {
   popEl.style.pointerEvents = state.composer.popoverOpen ? 'auto' : 'none'
 
   if (visible) {
-    const inTweak = state.composer.tweak != null
+    const tweak = state.composer.tweak
+    const inTweak = tweak != null
     const init = state.composer.init
     initRowEl.style.display = init == null ? 'none' : '' // the row exists iff attached (§15.5)
     initNoteEl.style.display = init != null && init.holdMeaning ? '' : 'none'
@@ -249,30 +270,82 @@ export function renderBar(state: CreateState, springSteps: number): boolean {
     expBodyEl.style.display = expOpen ? '' : 'none'
     // §5.7 pyramid × HOLD MEANING: the engine refuses c2f + semantic init, so while
     // HOLD is on the row shows OFF (applyHoldMeaning forced it) and disables — the
-    // AUTO-chip locked-surface treatment (disabled + title).
+    // AUTO-chip locked-surface treatment (disabled + title). §16 adds the second
+    // dominance: an EFFECTIVE underpaint (concrete row, or tweak CUSTOM replaying a
+    // base envelope) also holds the row at OFF — the finish must run flat.
     const holdOn = init != null && init.holdMeaning
+    const experiments = state.composer.experiments
+    const underpaintActive =
+      experiments.underpaint == null
+        ? tweak != null && tweak.baseUnderpaint != null
+        : experiments.underpaint !== 'off'
     for (const chip of pyramidChipEls) {
-      chip.el.disabled = holdOn
-      chip.el.title = holdOn ? 'HOLD MEANING is on — the engine refuses pyramid + semantic init' : chip.defaultTitle
+      chip.el.disabled = holdOn || underpaintActive
+      chip.el.title = holdOn
+        ? 'HOLD MEANING is on — the engine refuses pyramid + semantic init'
+        : underpaintActive
+          ? 'UNDERPAINT is on — the finish must not run the pyramid (stage 1 would downsample the underpaint away)'
+          : chip.defaultTitle
     }
     // §5.7 LOOK VQGAN × noise/anneal: a codebook init has no spectrum to shape and
     // annealing rejects latent models, so while the look is VQGAN the NOISE row shows
     // WHITE and the ANNEAL row OFF (applyLook forced them) and both disable. The
     // ANNEAL row also disables while AUTO-STOP is on (applyAutoStop forced it OFF —
-    // the engine refuses annealing + auto_stop). Same treatment as pyramid × HOLD.
+    // the engine refuses annealing + auto_stop). §16 adds: NOISE and ANNEAL disable
+    // while FOURIER is on (the fourier scope pins white spectrum, no annealing);
+    // ANNEAL disables while PROJECTION is on (one between-steps intervention at a
+    // time). Same treatment as pyramid × HOLD.
     const vqganLook = state.composer.look === 'vqgan'
-    const autoStopOn = state.composer.experiments.autoStop === 'on'
+    const autoStopOn = experiments.autoStop === 'on'
+    const projectionOn = experiments.projection === 'on'
+    const fourierOn = experiments.fourier === 'on'
     for (const chip of noiseChipEls) {
-      chip.el.disabled = vqganLook
-      chip.el.title = vqganLook ? 'LOOK is VQGAN — a codebook init has no spectrum to shape' : chip.defaultTitle
+      chip.el.disabled = vqganLook || fourierOn
+      chip.el.title = vqganLook
+        ? 'LOOK is VQGAN — a codebook init has no spectrum to shape'
+        : fourierOn
+          ? 'FOURIER is on — the Fourier init is 1/f-shaped already (white only)'
+          : chip.defaultTitle
     }
     for (const chip of annealChipEls) {
-      chip.el.disabled = vqganLook || autoStopOn
+      chip.el.disabled = vqganLook || autoStopOn || projectionOn || fourierOn
       chip.el.title = vqganLook
         ? 'LOOK is VQGAN — annealing rejects latent models'
         : autoStopOn
           ? 'AUTO-STOP is on — the engine refuses annealing + auto-stop'
-          : chip.defaultTitle
+          : projectionOn
+            ? 'PROJECTION is on — one between-steps intervention at a time'
+            : fourierOn
+              ? 'FOURIER is on — annealing does not compose with a spectrum parameterization'
+              : chip.defaultTitle
+    }
+    // §16 UNDERPAINT: disabled under LOOK VQGAN (v1 scope — a latent finish over an
+    // underpaint init is unevaluated).
+    for (const chip of underpaintChipEls) {
+      chip.el.disabled = vqganLook
+      chip.el.title = vqganLook ? 'LOOK is VQGAN — underpaint finishes are pixel-canvas only (v1)' : chip.defaultTitle
+    }
+    // §16 PROJECTION: the engine refuses manifold_projection on latent canvases and
+    // alongside auto_stop; the ds8 tokenizer stride needs /8 dims (the one table
+    // offender is DRAFT 16:9's 320x180).
+    const dimsSafe = projectionDimsSafe(state.composer.aspect, state.composer.size, tweak == null ? null : tweak.baseValues)
+    for (const chip of projectionChipEls) {
+      chip.el.disabled = vqganLook || autoStopOn || !dimsSafe
+      chip.el.title = vqganLook
+        ? 'LOOK is VQGAN — projection has no meaning on a latent canvas'
+        : autoStopOn
+          ? 'AUTO-STOP is on — scheduled image edits break plateau semantics'
+          : !dimsSafe
+            ? 'canvas dims must be multiples of 8 — pick another aspect/size'
+            : chip.defaultTitle
+    }
+    // §16 FOURIER: enabled ONLY while LOOK is UNLIMITED (the engine scopes
+    // fourier_parameterization to the Unlimited Palette; a CUSTOM look is not
+    // provably unlimited — disabled there too, the exact-match doctrine).
+    const unlimitedLook = state.composer.look === 'unlimited'
+    for (const chip of fourierChipEls) {
+      chip.el.disabled = !unlimitedLook
+      chip.el.title = unlimitedLook ? chip.defaultTitle : 'LOOK must be UNLIMITED — fourier re-parameterizes the Unlimited Palette canvas'
     }
     for (const chip of chips) {
       const current = rowValue(state, chip.row)

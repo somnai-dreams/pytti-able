@@ -148,8 +148,20 @@ Self-contained body contract:
 { mode?: 'now' | 'queue' | 'preempt',   // default 'now'; Create always sends 'queue'
   values: { <config schema fields> },   // coerce_values() — unknown/mistyped field -> 400
   forkOf?: string | null,               // lineage; becomes forkedFrom on the session
-  seedLocked?: boolean }                // default false; false -> server rolls the seed
+  seedLocked?: boolean,                 // default false; false -> server rolls the seed
+  underpaint?: { source: 'llamagen' | 'fourier',   // §16 — makes this a TWO-PHASE session
+                 steps?: int } }        // default 100 (llamagen) / 150 (fourier); 2..20000
+                                        // (min 2: the engine never saves a frame at global
+                                        // step 0, so a 1-step underpaint cannot hand off)
 ```
+
+`underpaint` (added §16) is an **envelope** field, never a config value: it does not
+enter `coerce_values` or the session yaml, and the draft-based path cannot carry it
+(a body with `underpaint` but no `values` is a 400 — the shared draft must never
+grow hidden two-phase behavior). Junk source/steps/keys → 400. An underpaint
+submission whose `values` carry a non-empty `init_image` must also carry a
+parseable Create-subset mask token in `direct_init_weight` whose file exists —
+else 400 (§16.4).
 
 Server-side composition (`compose_submission()`): `tuned_defaults()` — schema
 defaults + `config/default.yaml` curation, the same base a fresh draft starts
@@ -376,7 +388,7 @@ type Composer = {
   look: LookId | null
   seedMode: SeedMode
   tweak: { of: string; baseValues: Record<string, unknown> } | null
-  // The EXPERIMENTS panel (§5.7): seven rows, each id-or-null; null = inherit tweak
+  // The EXPERIMENTS panel (§5.7 + §16): ten rows, each id-or-null; null = inherit tweak
   // base (CUSTOM chip), reachable only while tweak != null — the aspect convention.
   experiments: Experiments
   popoverOpen: boolean
@@ -719,6 +731,9 @@ Visible controls (field → the control that determines it):
 | `cutout_sampler`, `cutouts` | EXPERIMENTS · FULL VISION toggle (§5.7 — ON emits the `full` + `16` pair) |
 | `phase_scheduling` | EXPERIMENTS · PHASE SCHEDULE toggle |
 | `auto_stop` | EXPERIMENTS · AUTO-STOP toggle |
+| `manifold_projection` | EXPERIMENTS · PROJECTION toggle (§16; ON emits the flag alone — the knobs stay engine defaults) |
+| `fourier_parameterization` | EXPERIMENTS · FOURIER toggle (§16; UNLIMITED look only) |
+| *(envelope)* `underpaint` | EXPERIMENTS · UNDERPAINT row (§16 — **the §5.6 invariant extends to the envelope**: the body's `underpaint` field exists iff the visible row is non-OFF or a tweak replays its base's envelope; an untouched panel adds NO envelope field) |
 
 Documented pins (constant on every fresh submission; not user-varied — their
 documentation is this table + the `PIN_FIELDS` comments in `core/presets.ts`).
@@ -759,11 +774,15 @@ maps to schema fields; every default = the engine/tuned default):
 | FULL VISION | OFF · ON | `cutout_sampler: 'full'` **+ `cutouts: 16`** when ON — the pair travels together (fixed 2026-08: ON used to emit `full` alone over the tuned `cutouts: 40`, an engine-documented mispairing — full's designed band is LOW cutn; on a 1:1 canvas all 40 views are the same crop. 16 is the band the engine docs name). OFF emits **nothing** (never an explicit `'smart'`; a base's own `cutouts` rides — it is a bench knob unless full pairs it) |
 | PHASE SCHEDULE | OFF · ON | `phase_scheduling` |
 | AUTO-STOP | OFF · ON | `auto_stop` (ON chip hint: `may stop early — detector is miscalibrated for the modern ensemble`, per the 2026-08-03 cut-at-129/200 incident) |
+| UNDERPAINT | OFF · LLAMAGEN · FOURIER | the POST body's `underpaint` **envelope** field (§16 — never a values key). LLAMAGEN hint names up-tight-ds8 (the both-judges LlamaGen variant); FOURIER hint names up-fl-proj (the all-time SO400M champion's opener). Promoted on Max's methodology call: "all of these settings seen in isolation arent a huge help because they compound in different ways together" — playable, conservative OFF default, nothing imposed |
+| PROJECTION | OFF · ON | `manifold_projection` (§16) — ON emits the flag alone; the knobs (`projection_every`/`projection_strength`/`projection_model`) stay bench-only at engine defaults, and the row OWNS all four fields (the ANNEAL ownership rule: a concrete re-pick clears bench knobs) |
+| FOURIER | OFF · ON | `fourier_parameterization` (§16) — enabled ONLY while LOOK is UNLIMITED (the engine scopes it to the Unlimited Palette; a CUSTOM look is not provably unlimited — disabled there too). The row owns `fourier_decay` (bench knob, never emitted; concrete re-pick clears it) |
 
 **The payload rule (binding, enforced by `presets.test.ts`):** a row adds keys iff
 its selection differs from what the server's defaults-compose already produces.
-Six rows default to the composed default, so an untouched panel adds **zero**
-keys. PYRAMID is the deliberate exception: its default (3) is Create's judged pin
+Every row but one defaults to the composed default (UNDERPAINT contributes no
+values key at all — its non-OFF selection rides the envelope, §16), so an
+untouched panel adds **zero** keys. PYRAMID is the deliberate exception: its default (3) is Create's judged pin
 over the engine default (off) made visible — it emits its two keys at every
 non-OFF selection and OFF emits nothing. Net: the untouched panel's payload is
 **byte-identical** to the pre-panel pin era. The defaults-side of the equivalence
@@ -807,6 +826,38 @@ what submits.
    'vqgan'`). Accepted residual: a tweak whose look is CUSTOM (an off-menu base
    model such as LlamaGen) is not guarded — picking PINK there fails loud at
    render start as a `failed` tile, the pre-guard behavior.
+
+The §16 rows add five more, same treatment (dominant forces yielding, loudly, in
+the same transition; disabled chips + titles while the condition holds; tweak
+re-asserts; `composeSubmission` throws on every pair, null/CUSTOM rows included):
+
+4. **UNDERPAINT × PYRAMID:** the finish must run FLAT — `coarse_to_fine`'s
+   stage-1 downsample would destroy the underpaint. An effective underpaint
+   (concrete non-OFF row, or a tweak CUSTOM row replaying a base envelope)
+   forces PYRAMID to OFF (`model.applyUnderpaint`) and disables its chips. The
+   server strips c2f at the handoff as the backstop (§16.3).
+5. **LOOK VQGAN × UNDERPAINT/PROJECTION:** `applyLook('vqgan')` also forces
+   UNDERPAINT to OFF (v1 scope — latent finishes over an underpaint init are
+   unevaluated) and PROJECTION to OFF (the engine refuses projection on latent
+   canvases); both rows' chips disable under VQGAN.
+6. **AUTO-STOP × PROJECTION:** the engine refuses `manifold_projection` +
+   `auto_stop` (scheduled image edits break plateau semantics). AUTO-STOP
+   dominates: flipping it ON forces PROJECTION OFF (`applyAutoStop`); while ON
+   the PROJECTION chips are disabled.
+7. **PROJECTION × ANNEAL + dims:** the engine allows one between-steps
+   intervention at a time — PROJECTION ON forces ANNEAL OFF (`applyProjection`)
+   and the ANNEAL chips disable while it is ON. The ds8 projector needs **/8
+   dims**: the PROJECTION chips disable when the composed dims break the stride
+   (`projectionDimsSafe`; the one table offender is DRAFT 16:9's 320×180), and
+   the ASPECT/SIZE writes route through `applyAspect`/`applySize`, which force
+   PROJECTION OFF on a dims change that breaks it — dims dominate.
+8. **FOURIER × LOOK/NOISE/ANNEAL:** `fourier_parameterization` is scoped to the
+   Unlimited Palette with a white spectrum and no annealing. The FOURIER chips
+   are enabled ONLY while LOOK is UNLIMITED (CUSTOM looks disabled too — not
+   provably unlimited); any look change away from UNLIMITED forces FOURIER OFF
+   (`applyLook` — a CUSTOM fourier row is forced too, so base fourier keys never
+   ride under a refusing model); FOURIER ON forces NOISE to WHITE and ANNEAL to
+   OFF (`applyFourier`), and both rows' chips disable while it is ON.
 
 **Tweak semantics:** concrete rows apply — delete the row's fields, then set the
 selection's keys (the random-seed delete mechanism: an OFF/WHITE re-pick restores
@@ -2131,13 +2182,16 @@ Mask editor (toplayer, lightbox-class):
     verbatim; once the rematerialized chip's thumb has loaded, AUTO is
     selectable again and re-derives from the base image's dims.
 
-Items 52–54 (the EXPERIMENTS panel, §5.7 — continues the same list):
+Items 52–54 (the EXPERIMENTS panel, §5.7 — continues the same list; §16.8
+continues it further):
 
 52. The gear shows `▸ EXPERIMENTS` collapsed under SEED; clicking it rotates the
-    chevron and reveals exactly six rows — INIT NOISE (WHITE/PINK/GRAY),
-    PYRAMID (3/2/4/OFF), COHERENCE, FULL VISION, PHASE SCHEDULE, AUTO-STOP
-    (OFF/ON each); it stays expanded across popover close/reopen within the
-    session and starts collapsed after a reload.
+    chevron and reveals exactly ten rows — INIT NOISE (WHITE/PINK/PINK
+    MONO/GRAY), PYRAMID (3/2/4/OFF), ANNEAL (OFF/BLUR/NOISE), COHERENCE, FULL
+    VISION, PHASE SCHEDULE, AUTO-STOP (OFF/ON each), UNDERPAINT
+    (OFF/LLAMAGEN/FOURIER), PROJECTION and FOURIER (OFF/ON, §16); it stays
+    expanded across popover close/reopen within the session and starts
+    collapsed after a reload.
 53. ⚑ An untouched panel submits the byte-identical pre-panel payload (network
     panel: `coarse_to_fine: true, coarse_stages: 3` and NO other experiment
     keys). Selecting PINK adds exactly `init_spectrum: 'pink'` +
@@ -2150,3 +2204,196 @@ Items 52–54 (the EXPERIMENTS panel, §5.7 — continues the same list):
     re-enables it still on OFF. TWEAK on a session with experiment values
     rematerializes the matching chips (off-menu values — e.g. a bench
     `coarse_stages: 5` — show CUSTOM and replay verbatim untouched).
+
+---
+
+## 16. Two-phase sessions — underpaint pipelines (added 2026-08-09)
+
+**Status: binding**, additive like §15. The methodology call, verbatim:
+
+> "all of these settings seen in isolation arent a huge help because they
+> compound in different ways together" — Max
+
+The eval batteries validated the pipelines end-to-end: **up-fl-proj** (fourier-150
+underpaint → Limited-palette50 finish, 300 steps, hold 2, + manifold projection)
+is the all-time SO400M champion; **up-tight-ds8** (LlamaGen-ds8-100 underpaint →
+hold-2 finish) the both-judges LlamaGen variant. Chained rendering existed ONLY in
+the eval harness — the engine renders one config; **two-phase orchestration is the
+server's job**. This section ships the components as playable Create controls
+(§5.7's three new rows), conservative defaults, nothing imposed.
+
+### 16.1 The envelope
+
+`POST /api/sessions` (self-contained path only) accepts `underpaint: {source:
+'llamagen'|'fourier', steps?: int}` (§2.4). Create's UNDERPAINT row emits
+`{source}` alone; the server composes the documented per-source default steps
+(llamagen 100 / fourier 150 — the eval legs' budgets, `UNDERPAINT_DEFAULT_STEPS`).
+The envelope persists on the session sidecar and summary as `underpaint: {source,
+steps, done}` — TWEAK rematerializes the row from it (`matchUnderpaint`, §5.3
+exact-match: default-steps envelope → its chip; a scripted budget → CUSTOM, which
+replays `tweak.baseUnderpaint` verbatim) and RE-RUN/Cmd+Enter replay it (the
+pipeline is a setting; `lastRun` carries it).
+
+### 16.2 Phase-1 derivation (server `derive_underpaint_values`)
+
+Phase 1 = the SESSION's composed values (same scenes/seed/dims/perceptors), the
+`UNDERPAINT_NEUTRAL` resets, then the source overrides:
+
+| | llamagen | fourier |
+|---|---|---|
+| `image_model` | `LlamaGen` | `Unlimited Palette` |
+| model knob | `llamagen_model: ds8` | `fourier_parameterization: true` |
+| `perceptor_backend` | `torch` (latent models are torch-only) | session's iff `torch`/`mlx_full`, else `mlx_full` |
+| `steps_per_scene` | envelope steps (default 100) | envelope steps (default 150) |
+| `save_every` + `steps_per_frame` | envelope steps (both sources) — the engine only writes a frame at `(i+1) % save_every == 0` and has no end-of-run save, so the session's cadence riding along would save nothing (cadence > budget → handoff fails after the whole phase-1 burn) or hand phase 2 a stale canvas (non-divisor cadence). One frame per scene, at its end. |
+
+`UNDERPAINT_NEUTRAL` (enumerated in `server.py`, pinned by
+`TestUnderpaintDerivation`) resets: the init surface (`init_image`,
+`direct_init_weight`, `semantic_init_weight` — phase 1 renders from noise),
+every field a latent model refuses (`init_spectrum`/falloff/chroma → white,
+`coarse_to_fine`+stages, `structure_annealing`+4 knobs, `manifold_projection`+3
+knobs), and finish-only behaviors (`auto_stop`+2, `phase_scheduling`,
+`breath_mode`, `animation_mode: off`, `interpolation_steps: 0`), plus
+`pixel_size: 1` (canvas scale belongs to the finish look — LlamaGen MULTIPLIES
+dims by it, so a big-pixel session would otherwise underpaint a 16× canvas; the
+underpaint is resized to the canvas at the handoff anyway). Fourier's white
+spectrum comes from the same resets (the Fourier init IS 1/f-shaped).
+
+Phase 1 renders under `conf=_sessions/<sid>-underpaint`,
+`hydra.run.dir=outputs/<sid>/underpaint`, `file_namespace=<sid>` — frames land in
+`<sid>/underpaint/images_out/<sid>/`, a sibling of the normal location, so
+gallery/lightbox/encode paths never see them. **Isolation regression**: the
+underpaint path never reads or writes the shared draft (§5.6 test extended).
+
+### 16.3 The handoff (server `_start_finish`)
+
+Phase-1 exit 0 (and no stop) → phase 2 spawns under the SAME session id, with NO
+terminal state written or published in between (one session, one lifecycle):
+
+- `init_image` = the underpaint's **final frame** (no frames → failed session,
+  `underpaint produced no frames`). "Final" means the highest index of the
+  canonical `<sid>_<n>.png` series — `underpaint_frame_files` filters and sorts
+  numerically, so a stray png or a future engine collision series
+  (`<sid>(1)_…`) can never seed phase 2.
+- **The session holds the live slot through the whole handoff**: `live_id`
+  stays set (with `proc` None) across frame listing, compositing, conf rewrite
+  and the phase-2 spawn. DELETE 409s, every spawn path sees busy, and `stop()`
+  lands (flag-only — `_start_finish` aborts, the session settles `stopped`,
+  phase 2 never spawns).
+- No attachment → `direct_init_weight: '2'` — the eval legs' hold.
+- Attachment (+painted mask, §16.4) → the composite becomes the init and the
+  user's own weight/mask grammar rides unchanged.
+- `coarse_to_fine` forced **false** (+ `coarse_stages: 2`): the pyramid's stage-1
+  downsample would destroy the underpaint — the flat finish mirrors the eval legs.
+  This is the server backstop for tweak/scripted bases carrying c2f; the composer's
+  UNDERPAINT×PYRAMID guard (§5.7 rule 4) keeps the row honest client-side.
+- `_sessions/<sid>.yaml` is REWRITTEN with the finish config (RESUME relaunches
+  phase 2 from it); the **sidecar `config` stays the user's submission** — intent
+  is the snapshot, injections are derived mechanically and re-derived on every
+  replay (TWEAK/RE-RUN never inherit one run's temp paths).
+- Progress: `stepsTotal` = `n_scenes × (underpaint.steps + steps_per_scene)` from
+  spawn (honest, spans both phases); phase 2 sets `resume_offset` to the phase-1
+  budget so the bar walks continuously; `elapsedSec` spans the whole session.
+- The envelope flips `done: true` at the handoff.
+
+**Phase markers.** The manager carries `phase: 'underpaint'|'main'`; SSE
+`progress` events carry `renderPhase`; phase 1's render substate announces as
+`underpainting` (a new `Substate` member — summaries collapse it to `rendering`
+like launching/loading/stopping). The Create tile shows **`underpainting…`** over
+the same progress bar; phase 2 re-announces launching → loading_models →
+rendering. Lightbox unchanged in v1; the underpaint's final frame is exposed
+cheaply at `GET /api/sessions/{id}/underpaint` (path derived from the session id
+alone — no client path input; 404 until a frame exists).
+
+### 16.4 Mask compositing (attachment × underpaint)
+
+An underpaint submission whose values carry an `init_image` **requires a painted
+mask** (Create-subset token in `direct_init_weight`, file must exist) — without
+one the two inits (user image vs underpaint) have no defined composition. Enforced
+three times, fail-loud: the A1 submit guard (toast), `composeSubmission` (throw),
+and the server 400 (`validate_underpaint_submission`).
+
+At the handoff the server composites (PIL): user image over the underpaint final
+frame where the mask is painted — `Image.composite(user, underpaint, mask_L)`,
+inverted masks flip via `ImageOps.invert`, everything fitted to the canvas exactly
+like the engine fits an init (`resize((width,height), LANCZOS)`, §15.1). Painted =
+the user's content holds (the engine's own white-holds semantics). The composite
+(`<sid>/underpaint/composite.png`) becomes phase 2's `init_image`; the user's
+weight/mask string rides verbatim — the painted region holds the user's content at
+the user's strength, the underpaint region is the starting canvas (v1 decision,
+documented: no synthetic second hold on the unpainted region). Attachment WITHOUT
+underpaint → today's behavior byte-identical.
+
+### 16.5 Lifecycle table
+
+| event | behavior |
+|---|---|
+| STOP during phase 1 | session `stopped`; underpaint frames KEPT on disk; queue advances |
+| STOP during the handoff window | 202; the flag aborts `_start_finish` — session `stopped`, phase 2 never spawns, queue advances (stop-anytime holds: the live slot is owned between procs) |
+| STOP during phase 2 | normal stop semantics (frames kept, tweak/re-run capable) |
+| DELETE while live (either phase OR the handoff window) | 409 `session is rendering; stop it first` — the live-guard holds because `live_id` never clears between phases |
+| phase-1 failure (exit ≠ 0) | session `failed`, failExcerpt = the phase-1 log tail + an `(underpaint phase)` marker; queue advances |
+| handoff failure (no frames, unreadable mask, spawn error) | session `failed` with `underpaint handoff failed: …`; queue advances |
+| queued two-phase item | ONE item (envelope rides `_make_item`); both phases run under its pre-minted id; the drain-time preflight re-runs `validate_underpaint_submission` (a mask that vanished while queued fails the item at start, not at the handoff) |
+| preempt | kills whichever phase runs (stop signals the current proc); a preempt landing in the handoff window stops the session via the flag and starts next — never parked behind phase 2 |
+| RESUME, phase 1 interrupted | **restarts phase 1** from scratch — same id/config/seed (v1's simplest honest semantics: a partial underpaint has no restore contract) |
+| RESUME, after the handoff | normal `restore=true` of the finish conf; `resume_offset` adds the whole phase-1 budget |
+| orphan recovery | `underpainting` joins the live-state list; recovered sessions land `stopped` (RESUME then restarts phase 1 per the row above) |
+| handoff race (manual `now`/`queue`/RESUME during the handoff) | 409/queued/busy — every spawn path busy-checks the held live slot, so nothing can win the window (the old fail-loud residual is closed; `_start_finish`'s busy raise remains as the invariant guard) |
+| calibration | phase-1 s/step never recorded (wrong bucket); phase-2 records normally |
+| progress ETA | phase-1 `etaSec` covers the phase-1 remainder only (the finish runs a different model whose s/step can differ several-fold); phase 2 estimates the combined remainder as before |
+
+### 16.6 Model amendments (additive, the §15.3 pattern)
+
+- `Substate` gains `'underpainting'`; SSE `progress` gains `renderPhase:
+  'underpaint'|'main'` (applyProgressEvent may flip BETWEEN the two render
+  substates — never launching/loading/stopping; the one-shot STOPPING chip stays).
+- `Tile` gains `underpaint: {source, steps} | null` (parsed from the summary).
+- `Composer.tweak` gains `baseUnderpaint`; `lastRun` gains `underpaint`.
+- `Experiments` gains `underpaint / projection / fourier` rows;
+  `SubmissionPayload` gains `underpaint` (null → the POST body carries no key).
+- New core write paths: `applyProjection`, `applyFourier`, `applyUnderpaint`,
+  `applyAspect`, `applySize` (§5.7 rules 4–8); `matchExperiments` takes the base
+  envelope; `projectionDimsSafe` gates the /8 stride.
+
+### 16.7 Tests (lockstep)
+
+`app/test_server.py`: envelope parsing/defaults/refusals + draft-path exclusion +
+isolation regression (`TestUnderpaintEnvelope`), phase-1 derivation both sources
+with the strip list enumerated (`TestUnderpaintDerivation`), the full lifecycle —
+spawn records, handoff injections + no-terminal-between-phases, c2f backstop,
+stop-per-phase, phase-1 failure, no-frames handoff, queued item, substate
+announce/summary collapse, preempt, both resume rows (`TestUnderpaintLifecycle`),
+composite math + inversion + canvas fitting (`TestUnderpaintComposite`), and the
+underpaint route containment (`TestUnderpaintRoute`). `presets.test.ts` /
+`model.test.ts` / `api.test.ts` pin the §16 rows, guards, write-path forcings,
+reverse maps, the envelope emission, and the §5.6 product walk extended with the
+pipeline variants (the champion stack included).
+
+### 16.8 Acceptance checklist additions (continues §13/§15.11)
+
+55. The EXPERIMENTS panel shows UNDERPAINT (OFF/LLAMAGEN/FOURIER), PROJECTION
+    (OFF/ON) and FOURIER (OFF/ON) rows; all three default OFF and an untouched
+    panel's POST body carries NO `underpaint` key and no projection/fourier
+    values (network panel).
+56. ⚑ UNDERPAINT FOURIER at DRAFT 1:1: ONE tile appears, shows `underpainting…`
+    with a progress bar spanning both phases, then flips through `warming up…`
+    into the normal live bar; the finished session's `stepsTotal` is the sum;
+    `GET /api/sessions/{id}/underpaint` serves the phase-1 final frame; frame 1
+    of the finish visibly starts from it.
+57. Picking UNDERPAINT forces PYRAMID to OFF and disables it (title); LOOK VQGAN
+    disables UNDERPAINT + PROJECTION and forces both OFF; AUTO-STOP ON forces
+    PROJECTION OFF; PROJECTION ON forces ANNEAL OFF; DRAFT+16:9 disables
+    PROJECTION (title names /8) and switching to those dims with PROJECTION ON
+    visibly moves it to OFF; FOURIER is disabled unless LOOK is UNLIMITED and ON
+    forces NOISE WHITE + ANNEAL OFF.
+58. ⚑ STOP during `underpainting…` lands the tile `stopped` with 0 gallery
+    frames (underpaint frames remain on disk); a queued item auto-starts.
+59. With an attachment and UNDERPAINT non-OFF, submitting without a painted mask
+    toasts (`underpaint + image needs a painted mask`); with a painted mask the
+    finish's init is the composite (painted region = the attachment's content
+    over the underpaint).
+60. TWEAK on an underpaint session rematerializes the UNDERPAINT chip from the
+    envelope (PYRAMID disabled at OFF); RE-RUN creates a fresh two-phase session
+    (envelope replayed, new seed); `bun run check` exits 0 and `create.js` stays
+    ≤ 100 KB.

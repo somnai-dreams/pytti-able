@@ -4,14 +4,19 @@ import { feel } from './feel'
 import type { InitAttachment } from './init'
 import { defaultExperiments } from './presets'
 import {
+  applyAspect,
   applyAutoStop,
   applyEncodeEvent,
+  applyFourier,
   applyFrameEvent,
   applyHoldMeaning,
   applyLook,
   applyProgressEvent,
+  applyProjection,
   applyQueueEvent,
+  applySize,
   applyStateEvent,
+  applyUnderpaint,
   type CreateState,
   dropUnreadableMask,
   findQueueItem,
@@ -47,6 +52,7 @@ function tile(id: string, over: Partial<Tile> = {}): Tile {
     artifacts: [],
     failExcerpt: null,
     live: null,
+    underpaint: null,
     detail: null,
     ...over,
   }
@@ -166,7 +172,7 @@ describe('applyStateEvent', () => {
 describe('applyProgressEvent / applyFrameEvent', () => {
   test('progress fills telemetry even when live was null (reconnect case)', () => {
     const s = state({ tiles: [tile('a', { state: 'rendering', live: null })] })
-    applyProgressEvent(s, { kind: 'progress', sessionId: 'a', step: 50, stepsTotal: 200, scene: 0, sceneCount: 2, phase: 'scene', sPerStep: 1.1, etaSec: 165 })
+    applyProgressEvent(s, { kind: 'progress', sessionId: 'a', step: 50, stepsTotal: 200, scene: 0, sceneCount: 2, phase: 'scene', renderPhase: 'main', sPerStep: 1.1, etaSec: 165 })
     const t = s.tiles[0]!
     expect(t.live!.step).toBe(50)
     expect(t.live!.substate).toBe('rendering')
@@ -177,7 +183,7 @@ describe('applyProgressEvent / applyFrameEvent', () => {
     const s = state({
       tiles: [tile('a', { state: 'rendering', live: { substate: 'stopping', step: 40, stepsTotal: 200, scene: 0, sceneCount: 1, phase: 'scene', sPerStep: 1, etaSec: 160 } })],
     })
-    applyProgressEvent(s, { kind: 'progress', sessionId: 'a', step: 41, stepsTotal: 200, scene: 0, sceneCount: 1, phase: 'scene', sPerStep: 1, etaSec: 159 })
+    applyProgressEvent(s, { kind: 'progress', sessionId: 'a', step: 41, stepsTotal: 200, scene: 0, sceneCount: 1, phase: 'scene', renderPhase: 'main', sPerStep: 1, etaSec: 159 })
     const live = s.tiles[0]!.live!
     expect(live.substate).toBe('stopping') // spec §6.2: progress updates telemetry ONLY
     expect(live.step).toBe(41)
@@ -417,7 +423,7 @@ describe('applyHoldMeaning (§5.7 — the engine refuses c2f + semantic init)', 
     const pyramidOf = (s: CreateState): CreateState['composer']['experiments']['pyramid'] => s.composer.experiments.pyramid
     const s = state()
     s.composer.init = readyInit()
-    s.composer.tweak = { of: 's-1', baseValues: {} }
+    s.composer.tweak = { of: 's-1', baseValues: {}, baseUnderpaint: null }
     s.composer.experiments.pyramid = null
     applyHoldMeaning(s, true)
     expect(pyramidOf(s)).toBe('off')
@@ -456,7 +462,7 @@ describe('applyLook (§5.7 — VQGAN refuses shaped init noise and structure ann
 
   test('forces from tweak CUSTOM (null) rows too — base spectrum/anneal keys must not ride under VQGAN', () => {
     const s = state()
-    s.composer.tweak = { of: 's-1', baseValues: {} }
+    s.composer.tweak = { of: 's-1', baseValues: {}, baseUnderpaint: null }
     s.composer.experiments.noise = null
     s.composer.experiments.anneal = null
     applyLook(s, 'vqgan')
@@ -497,7 +503,7 @@ describe('applyAutoStop (§5.7 — the engine refuses annealing + auto_stop)', (
 
   test('forces from a tweak CUSTOM (null) row too — base anneal keys must not ride under AUTO-STOP', () => {
     const s = state()
-    s.composer.tweak = { of: 's-1', baseValues: {} }
+    s.composer.tweak = { of: 's-1', baseValues: {}, baseUnderpaint: null }
     s.composer.experiments.anneal = null
     applyAutoStop(s, 'on')
     expect(annealOf(s)).toBe('off')
@@ -570,5 +576,117 @@ describe('dropUnreadableMask (§15.7)', () => {
   test('throws outside an open editor (invariant violation, fail loud)', () => {
     const s = state()
     expect(() => dropUnreadableMask(s)).toThrow('dropUnreadableMask outside an open mask editor')
+  })
+})
+
+// ─── §16 pipeline write paths — the forcing rules, one transition each ─────────
+
+describe('§16 write-path forcings', () => {
+  // Accessors defeat TS's (unsound) literal narrowing across the applier calls.
+  const ex = (s: CreateState) => s.composer.experiments as Record<string, string | null>
+  test('applyLook VQGAN forces PROJECTION and UNDERPAINT off (with the §5.7 noise/anneal pair)', () => {
+    const s = state()
+    s.composer.experiments.projection = 'on'
+    s.composer.experiments.underpaint = 'fourier'
+    applyLook(s, 'vqgan')
+    expect(ex(s)['projection']).toBe('off')
+    expect(ex(s)['underpaint']).toBe('off')
+    expect(ex(s)['noise']).toBe('white')
+    expect(ex(s)['anneal']).toBe('off')
+  })
+
+  test('any look away from UNLIMITED forces FOURIER off; UNLIMITED leaves it standing', () => {
+    const s = state()
+    s.composer.experiments.fourier = 'on'
+    applyLook(s, 'limited')
+    expect(ex(s)['fourier']).toBe('off')
+    s.composer.experiments.fourier = 'on'
+    applyLook(s, 'unlimited')
+    expect(ex(s)['fourier']).toBe('on')
+    // a null/CUSTOM fourier row is forced too — base fourier keys must not ride
+    s.composer.experiments.fourier = null
+    applyLook(s, 'vqgan')
+    expect(ex(s)['fourier']).toBe('off')
+  })
+
+  test('applyAutoStop ON forces PROJECTION off (plateau semantics)', () => {
+    const s = state()
+    s.composer.experiments.projection = 'on'
+    applyAutoStop(s, 'on')
+    expect(ex(s)['projection']).toBe('off')
+    expect(ex(s)['anneal']).toBe('off')
+  })
+
+  test('applyProjection ON forces ANNEAL off (one between-steps intervention at a time)', () => {
+    const s = state()
+    s.composer.experiments.anneal = 'blur'
+    applyProjection(s, 'on')
+    expect(ex(s)['projection']).toBe('on')
+    expect(ex(s)['anneal']).toBe('off')
+    applyProjection(s, 'off') // OFF restores nothing
+    expect(ex(s)['anneal']).toBe('off')
+  })
+
+  test('applyFourier ON forces NOISE white + ANNEAL off (the fourier scope)', () => {
+    const s = state()
+    s.composer.look = 'unlimited'
+    s.composer.experiments.noise = 'pinkmono'
+    s.composer.experiments.anneal = 'noise'
+    applyFourier(s, 'on')
+    expect(ex(s)['noise']).toBe('white')
+    expect(ex(s)['anneal']).toBe('off')
+  })
+
+  test('applyUnderpaint non-OFF forces PYRAMID off (the finish runs flat)', () => {
+    const s = state()
+    expect(ex(s)['pyramid']).toBe('3') // the judged default
+    applyUnderpaint(s, 'llamagen')
+    expect(ex(s)['pyramid']).toBe('off')
+    applyUnderpaint(s, 'off') // OFF restores nothing — the user re-picks
+    expect(ex(s)['pyramid']).toBe('off')
+  })
+
+  test('applyAspect/applySize force PROJECTION off when the dims break the /8 stride', () => {
+    const s = state() // 1:1 + full
+    s.composer.experiments.projection = 'on'
+    applyAspect(s, '16:9') // 640x360 — still safe
+    expect(ex(s)['projection']).toBe('on')
+    applySize(s, 'draft') // 320x180 — the offender
+    expect(ex(s)['projection']).toBe('off')
+    s.composer.experiments.projection = 'on'
+    applyAspect(s, '16:9') // still draft: 320x180
+    expect(ex(s)['projection']).toBe('off')
+    applyAspect(s, '1:1') // 256x256 — safe; nothing force-restores
+    expect(ex(s)['projection']).toBe('off')
+  })
+})
+
+describe('§16 progress renderPhase -> substate', () => {
+  const progress = (renderPhase: 'underpaint' | 'main') => ({
+    kind: 'progress' as const, sessionId: 'a', step: 50, stepsTotal: 400, scene: 0,
+    sceneCount: 1, phase: 'scene' as const, renderPhase, sPerStep: 1, etaSec: 100,
+  })
+
+  test('a tick creates live with the phase-implied substate (reconnect case)', () => {
+    const s = state({ tiles: [tile('a', { state: 'rendering' })] })
+    applyProgressEvent(s, progress('underpaint'))
+    expect(s.tiles[0]!.live!.substate).toBe('underpainting')
+  })
+
+  test('ticks flip between the two render substates but never clobber stopping', () => {
+    const s = state({ tiles: [tile('a', { state: 'rendering' })] })
+    applyProgressEvent(s, progress('underpaint'))
+    applyProgressEvent(s, progress('main')) // the handoff happened
+    expect(s.tiles[0]!.live!.substate).toBe('rendering')
+    s.tiles[0]!.live!.substate = 'stopping'
+    applyProgressEvent(s, progress('main'))
+    expect(s.tiles[0]!.live!.substate).toBe('stopping') // one-shot STOPPING chip stays
+  })
+
+  test("the 'underpainting' substate arrives as a state-live event too", () => {
+    const s = state({ tiles: [tile('a', { state: 'rendering' })] })
+    applyStateEvent(s, { kind: 'state-live', sessionId: 'a', substate: 'underpainting' }, 0)
+    expect(s.tiles[0]!.live!.substate).toBe('underpainting')
+    expect(s.tiles[0]!.state).toBe('rendering')
   })
 })
